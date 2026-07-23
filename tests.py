@@ -19,6 +19,12 @@ from schemas import (SchemaError, UnknownOrderState, parse_market,
                      parse_position, parse_orderbook_response,
                      build_order_body,
                      CREATE_CANCEL_ENDPOINT, ORDERS_ENDPOINT)
+from schemas import (SchemaError, UnknownOrderState, parse_market,
+                     parse_order, parse_create_ack, parse_fill,
+                     parse_position, parse_balance,
+                     parse_orderbook_response,
+                     build_order_body,
+                     CREATE_CANCEL_ENDPOINT, ORDERS_ENDPOINT)
 from order_journal import OrderJournal
 from executor import Executor, HaltError
 from safety import Safety, Reconciler, ExposureError
@@ -414,6 +420,25 @@ def test_portfolio_contracts_decimal():
         parse_market({"ticker": "T", "yes_bid_dollars": "0.5"}); assert False
     except SchemaError:
         pass
+    balance = parse_balance({
+        "balance": 980,
+        "balance_dollars": "9.8026",
+        "portfolio_value": 980,
+        "updated_ts": 123,
+    })
+    assert balance["balance"] == 980
+    assert balance["balance_dollars"] == Decimal("9.8026")
+
+    try:
+        parse_balance({
+            "balance": 981,
+            "balance_dollars": "9.8026",
+            "portfolio_value": 980,
+            "updated_ts": 123,
+        })
+        assert False
+    except SchemaError:
+        pass        
     print("PASS portfolio contracts: Decimal subpenny prices, fractional "
           "quantities, fp fields, negative-depth rejection")
 
