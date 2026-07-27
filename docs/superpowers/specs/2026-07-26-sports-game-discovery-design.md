@@ -1,4 +1,4 @@
-# Multisport Game Discovery Design
+# Sports Game Discovery Design
 
 ## Goal
 
