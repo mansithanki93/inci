@@ -4,6 +4,7 @@ All list endpoints paginate via cursor. Every body is schema-validated."""
 import base64
 import time
 from collections import Counter
+from datetime import datetime, timezone
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
@@ -13,6 +14,7 @@ import schemas
 
 MAX_PAGES = 20
 GET_429_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0)
+PUBLIC_METADATA_MIN_INTERVAL_SECONDS = 0.05
 
 
 def _diagnostic(value, limit=240):
@@ -38,15 +40,32 @@ class KalshiClient:
         self.base = config.api_base
         self.session = requests.Session()
         self._sleep = time.sleep
+        self._monotonic = time.monotonic
+        self._last_public_metadata_at = None
         self._private_key = None
         self.last_market_skips = {}
-        if config.api_key_id and config.private_key_path:
-            try:
-                with open(config.private_key_path, "rb") as f:
-                    self._private_key = serialization.load_pem_private_key(
-                        f.read(), password=None)
-            except FileNotFoundError:
-                pass
+        self.last_market_scan = None
+        self.last_sports_market_skips = {}
+
+    def _ensure_private_key(self):
+        """Load credentials only when an authenticated request needs them."""
+        if self._private_key is not None:
+            return
+        if not self.cfg.api_key_id:
+            raise schemas.SchemaError(
+                "authenticated request requires KALSHI_API_KEY_ID")
+        if not self.cfg.private_key_path:
+            raise schemas.SchemaError(
+                "authenticated request requires KALSHI_PRIVATE_KEY_PATH")
+        try:
+            with open(self.cfg.private_key_path, "rb") as handle:
+                self._private_key = serialization.load_pem_private_key(
+                    handle.read(), password=None)
+        except Exception as error:
+            raise schemas.SchemaError(
+                "authenticated request could not load private key from "
+                f"{self.cfg.private_key_path!r}: "
+                f"{type(error).__name__}: {error}") from error
 
     def _sign(self, method, path):
         ts = str(int(time.time() * 1000))
@@ -62,9 +81,8 @@ class KalshiClient:
 
     def _request(self, method, endpoint, params=None, body=None, auth=False):
         path = "/trade-api/v2" + endpoint
-        if auth and self._private_key is None:
-            raise schemas.SchemaError(
-                "authenticated request requires a loaded private key")
+        if auth:
+            self._ensure_private_key()
         response = None
         for attempt in range(len(GET_429_BACKOFF_SECONDS) + 1):
             # Authentication timestamps/signatures must be fresh after a
@@ -140,32 +158,301 @@ class KalshiClient:
         raise schemas.SchemaError(
             f"{endpoint}: pagination exceeded {MAX_PAGES} pages")
 
+    def _paginate_public_inventory(self, endpoint, params, parse_page):
+        """Exhaust a public metadata inventory; never return partial rows."""
+        query = dict(params)
+        rows = []
+        skips = Counter()
+        seen_cursors = set()
+        raw_row_count = 0
+        for page_number in range(1, MAX_PAGES + 1):
+            response = self._request_public_metadata(
+                endpoint, params=query)
+            page_rows, cursor = parse_page(response)
+            rows.extend(page_rows)
+            raw_row_count += len(page_rows)
+            for row in page_rows:
+                for market_type, count in row.get("market_skips", {}).items():
+                    skips[market_type] += count
+            if cursor == "":
+                metadata = {"pages": page_number, "rows": raw_row_count,
+                            "raw_rows": raw_row_count,
+                            "market_skips": dict(sorted(skips.items()))}
+                return tuple(rows), metadata
+            if cursor in seen_cursors:
+                raise schemas.SchemaError(
+                    f"{endpoint}: repeated pagination cursor {cursor!r}")
+            seen_cursors.add(cursor)
+            query["cursor"] = cursor
+        raise schemas.SchemaError(
+            f"{endpoint}: pagination exceeded {MAX_PAGES} pages")
+
+    def _request_public_metadata(self, endpoint, *, params=None):
+        """Pace successful public discovery GETs before they reach 429s."""
+        clock = getattr(self, "_monotonic", time.monotonic)
+        sleeper = getattr(self, "_sleep", time.sleep)
+        last_request = getattr(self, "_last_public_metadata_at", None)
+        if last_request is not None:
+            remaining = (
+                PUBLIC_METADATA_MIN_INTERVAL_SECONDS
+                - (clock() - last_request))
+            if remaining > 0:
+                sleeper(remaining)
+        response = self._request("GET", endpoint, params=params)
+        self._last_public_metadata_at = clock()
+        return response
+
+    @staticmethod
+    def _rfc3339_utc(value):
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise schemas.SchemaError(
+                    "minimum_start_date: invalid RFC3339 timestamp "
+                    f"{value!r}") from error
+        else:
+            raise schemas.SchemaError(
+                "minimum_start_date: expected RFC3339 string or datetime, got "
+                f"{_diagnostic(value)}")
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise schemas.SchemaError(
+                "minimum_start_date: timestamp must include timezone, got "
+                f"{_diagnostic(value)}")
+        return parsed.astimezone(timezone.utc).isoformat(
+            timespec="seconds").replace("+00:00", "Z")
+
     # ---------- Market data (public) ----------
-    def _parse_market_collection(self, rows):
+    def get_sports_filters(self):
+        return schemas.parse_sports_filters_response(
+            self._request_public_metadata("/search/filters_by_sport"))
+
+    def get_sports_series(self):
+        return schemas.parse_series_list_response(
+            self._request_public_metadata(
+                "/series", params={"category": "Sports"}))
+
+    def get_sports_milestones_page(
+            self, *, competition, minimum_start_date):
+        """Validate exactly one public Sports milestone page.
+
+        This bounded method exists for ``--check``.  Discovery uses the
+        exhaustive sibling below and must never substitute this sample for a
+        complete inventory.
+        """
+        if not isinstance(competition, str) or not competition:
+            raise schemas.SchemaError(
+                "sports milestones competition: expected nonempty string, "
+                f"got {_diagnostic(competition)}")
+        response = self._request_public_metadata("/milestones", params={
+            "category": "Sports",
+            "minimum_start_date": KalshiClient._rfc3339_utc(
+                minimum_start_date),
+            "competition": competition,
+            "limit": 500,
+        })
+        rows, cursor = schemas.parse_milestones_page(response)
+        return rows, {
+            "pages": 1,
+            "rows": len(rows),
+            "raw_rows": len(rows),
+            "cursor": cursor,
+        }
+
+    def get_open_events_page(self, *, series_ticker):
+        """Validate exactly one public nested-Event page for ``--check``."""
+        if not isinstance(series_ticker, str) or not series_ticker:
+            raise schemas.SchemaError(
+                "series_ticker: expected nonempty string, got "
+                f"{_diagnostic(series_ticker)}")
+        response = self._request_public_metadata("/events", params={
+            "series_ticker": series_ticker,
+            "status": "open",
+            "with_nested_markets": "true",
+            "limit": 200,
+        })
+        rows, cursor = schemas.parse_events_page(response)
+        skips = Counter()
+        for row in rows:
+            for market_type, count in row["market_skips"].items():
+                skips[market_type] += count
+        market_skips = dict(sorted(skips.items()))
+        self.last_sports_market_skips = market_skips
+        return rows, {
+            "pages": 1,
+            "rows": len(rows),
+            "raw_rows": len(rows),
+            "cursor": cursor,
+            "market_skips": market_skips,
+        }
+
+    def get_sports_milestones(self, *, minimum_start_date, competition=None,
+                               related_event_ticker=None):
+        has_competition = competition is not None
+        has_related_ticker = related_event_ticker is not None
+        if has_competition == has_related_ticker:
+            raise schemas.SchemaError(
+                "sports milestones require exactly one of competition or "
+                "related_event_ticker")
+        selection_name, selection_value = (
+            ("competition", competition) if has_competition else
+            ("related_event_ticker", related_event_ticker))
+        if not isinstance(selection_value, str) or not selection_value:
+            raise schemas.SchemaError(
+                f"sports milestones {selection_name}: expected nonempty string, "
+                f"got {_diagnostic(selection_value)}")
+        rows, metadata = self._paginate_public_inventory(
+            "/milestones", {
+                "category": "Sports",
+                "minimum_start_date": self._rfc3339_utc(minimum_start_date),
+                selection_name: selection_value,
+                "limit": 500,
+            }, schemas.parse_milestones_page)
+        return rows, metadata
+
+    def get_open_events(self, *, series_ticker):
+        if not isinstance(series_ticker, str) or not series_ticker:
+            raise schemas.SchemaError("series_ticker: expected nonempty string, "
+                                     f"got {_diagnostic(series_ticker)}")
+        rows, metadata = self._paginate_public_inventory(
+            "/events", {
+                "series_ticker": series_ticker,
+                "status": "open",
+                "with_nested_markets": "true",
+                "limit": 200,
+            }, schemas.parse_events_page)
+        self.last_sports_market_skips = metadata["market_skips"]
+        return rows, metadata
+
+    def get_event(self, event_ticker, *, with_nested_markets=True):
+        if not isinstance(event_ticker, str) or not event_ticker:
+            raise schemas.SchemaError("event_ticker: expected nonempty string, "
+                                     f"got {_diagnostic(event_ticker)}")
+        if not isinstance(with_nested_markets, bool):
+            raise schemas.SchemaError(
+                "with_nested_markets: expected boolean, got "
+                f"{_diagnostic(with_nested_markets)}")
+        event = schemas.parse_event_response(self._request_public_metadata(
+            f"/events/{event_ticker}", params={
+                "with_nested_markets": "true" if with_nested_markets else "false"}))
+        self.last_sports_market_skips = event["market_skips"]
+        return event
+
+    def _parse_market_rows(self, rows, skipped):
         """Skip only recognized unsupported products in list contexts.
 
         Direct market reads remain strict. Any malformed binary market or
         unknown product type still aborts the collection as schema drift.
         """
         parsed = []
-        skipped = Counter()
-
-        def save_skips():
-            self.last_market_skips = dict(sorted(skipped.items()))
 
         for row in rows:
             try:
                 parsed.append(schemas.parse_market(row))
             except schemas.UnsupportedMarketType as error:
                 skipped[error.market_type] += 1
-                save_skips()
+                self.last_market_skips = dict(sorted(skipped.items()))
             except schemas.SchemaError as error:
-                save_skips()
+                self.last_market_skips = dict(sorted(skipped.items()))
                 raise schemas.SchemaError(
                     f"{error}; {format_market_skips(self.last_market_skips)}"
                 ) from error
-        save_skips()
         return parsed
+
+    def _parse_market_collection(self, rows):
+        skipped = Counter()
+        parsed = self._parse_market_rows(rows, skipped)
+        self.last_market_skips = dict(sorted(skipped.items()))
+        return parsed
+
+    def _save_market_scan(self, *, pages, rows, selected, truncated,
+                          complete, stop_reason):
+        metadata = {
+            "pages": pages,
+            "rows": rows,
+            "selected": selected,
+            "truncated": truncated,
+            "complete": complete,
+            "stop_reason": stop_reason,
+        }
+        self.last_market_scan = metadata
+        return metadata
+
+    def scan_markets(self, predicate, max_results, **params):
+        """Bounded market discovery, distinct from exhaustive pagination.
+
+        Discovery is allowed to stop once it has the requested number of
+        usable markets. It remains strict about every envelope, page row, and
+        cursor it actually observes. A nonempty cursor after ``MAX_PAGES`` is
+        reported as an incomplete scan rather than treated as a portfolio
+        pagination failure.
+        """
+        if (isinstance(max_results, bool) or not isinstance(max_results, int)
+                or max_results <= 0):
+            raise schemas.SchemaError("market discovery max_results must be positive")
+        if not callable(predicate):
+            raise schemas.SchemaError("market discovery predicate must be callable")
+
+        query = dict(params)
+        selected = []
+        skipped = Counter()
+        seen_cursors = set()
+        row_count = 0
+        self.last_market_skips = {}
+        self.last_market_scan = None
+
+        for page_number in range(1, MAX_PAGES + 1):
+            response = self._request("GET", "/markets", params=query)
+            if not isinstance(response, dict):
+                raise schemas.SchemaError(
+                    "/markets: expected response object, got "
+                    f"{_diagnostic(response)}")
+            if "markets" not in response or not isinstance(
+                    response["markets"], list):
+                raise schemas.SchemaError(
+                    "/markets: missing/invalid collection 'markets', got "
+                    f"{_diagnostic(response.get('markets', '<missing>'))}")
+            if "cursor" not in response:
+                raise schemas.SchemaError(
+                    "/markets: missing required pagination cursor")
+            cursor = response["cursor"]
+            if not isinstance(cursor, str):
+                raise schemas.SchemaError(
+                    "/markets: cursor must be a string, got "
+                    f"{_diagnostic(cursor)}")
+            if cursor and cursor in seen_cursors:
+                raise schemas.SchemaError(
+                    f"/markets: repeated pagination cursor {cursor!r}")
+            if cursor:
+                seen_cursors.add(cursor)
+
+            parsed = self._parse_market_rows(response["markets"], skipped)
+            self.last_market_skips = dict(sorted(skipped.items()))
+            row_count += len(response["markets"])
+            for market in parsed:
+                if predicate(market):
+                    selected.append(market)
+                    if len(selected) == max_results:
+                        complete = cursor == ""
+                        return selected, self._save_market_scan(
+                            pages=page_number, rows=row_count,
+                            selected=len(selected), truncated=not complete,
+                            complete=complete,
+                            stop_reason=("end" if complete else "selected_cap"))
+
+            if cursor == "":
+                return selected, self._save_market_scan(
+                    pages=page_number, rows=row_count, selected=len(selected),
+                    truncated=False, complete=True, stop_reason="end")
+            query["cursor"] = cursor
+
+        # Discovery intentionally returns a useful partial candidate set here.
+        # Generic portfolio pagination stays fail-closed in ``_paginate``.
+        return selected, self._save_market_scan(
+            pages=MAX_PAGES, rows=row_count, selected=len(selected),
+            truncated=True, complete=False, stop_reason="page_cap")
 
     def get_markets(self, **params):
         return self._parse_market_collection(
@@ -192,6 +479,11 @@ class KalshiClient:
 
     def get_market(self, ticker):
         resp = self._request("GET", f"/markets/{ticker}")
+        return schemas.parse_market_response(resp)
+
+    def get_market_for_discovery(self, ticker):
+        """Direct Market proof with discovery pacing, not quote-loop pacing."""
+        resp = self._request_public_metadata(f"/markets/{ticker}")
         return schemas.parse_market_response(resp)
 
     def get_orderbook(self, ticker):

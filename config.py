@@ -37,10 +37,7 @@ class Config:
 
     # --- Markets ---
     tickers: list = field(default_factory=list)
-    market_keywords: list = field(default_factory=lambda: [
-        "tennis", "ATP", "WTA", "US Open", "Wimbledon",
-        "Roland Garros", "Australian Open",
-    ])
+    sports: list = field(default_factory=list)
     max_monitored_markets: int = 10
 
     # --- Strategy (cents). Defaults sized so TP clears fees near 50c (fix #4):
@@ -200,14 +197,17 @@ class Config:
             raise ValueError("paper/live parity requires immediate_or_cancel")
         if self.self_trade_prevention_type not in ("taker_at_cross", "maker"):
             raise ValueError("invalid self_trade_prevention_type")
-        if (not isinstance(self.tickers, list)
-                or any(not isinstance(t, str) or not t for t in self.tickers)):
-            raise ValueError("tickers must be a list of nonempty strings")
-        if (not isinstance(self.market_keywords, list)
-                or any(not isinstance(k, str) or not k
-                       for k in self.market_keywords)):
-            raise ValueError(
-                "market_keywords must be a list of nonempty strings")
+        def selection_list(name):
+            values = getattr(self, name)
+            if (not isinstance(values, list)
+                    or any(not isinstance(value, str) or not value.strip()
+                           for value in values)
+                    or len(set(values)) != len(values)):
+                raise ValueError(
+                    f"{name} must be a list of unique nonempty strings")
+
+        selection_list("tickers")
+        selection_list("sports")
         if self._state_identity:
             current = self._expected_state_identity()
             actual = (current[0], current[1], current[2],

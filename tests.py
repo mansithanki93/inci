@@ -63,28 +63,499 @@ def current_market(ticker="T", event_ticker="E", **overrides):
     return payload
 
 
+def current_sports_filters():
+    return {
+        "filters_by_sports": {
+            "All sports": {"competitions": {},
+                           "scopes": ["Games", "Futures"]},
+            "Tennis": {
+                "competitions": {
+                    "ATP Washington": {"scopes": ["Games", "Set 1 Winner"]},
+                },
+                "scopes": ["Games", "Set Winner"],
+            },
+        },
+        "sport_ordering": ["All sports", "Tennis"],
+    }
+
+
+def current_series(ticker="KXATP", **overrides):
+    row = {"ticker": ticker, "category": "Sports", "tags": ["Tennis"]}
+    row.update(overrides)
+    return row
+
+
+def current_milestone(milestone_id="milestone-1", **overrides):
+    row = {
+        "id": milestone_id,
+        "category": "Sports",
+        "type": "game",
+        "start_date": "2026-07-26T18:00:00Z",
+        "title": "Washington match",
+        "details": {"league": "ATP Washington",
+                    "main_game_event_ticker": "KXATP-26JUL26-ONE"},
+        "primary_event_tickers": ["KXATP-26JUL26-ONE"],
+        "related_event_tickers": ["KXATP-26JUL26-TOTAL"],
+    }
+    row.update(overrides)
+    return row
+
+
+def current_event(event_ticker="KXATP-26JUL26-ONE", **overrides):
+    row = {
+        "event_ticker": event_ticker,
+        "series_ticker": "KXATP",
+        "category": "Sports",
+        "title": "Player A vs Player B",
+        "markets": [current_market(ticker="KXATP-26JUL26-ONE-M1",
+                                    event_ticker=event_ticker)],
+    }
+    row.update(overrides)
+    return row
+
+
+def test_current_sports_filters_contract():
+    from schemas import parse_sports_filters_response
+
+    parsed = parse_sports_filters_response(current_sports_filters())
+    assert parsed == {
+        "sport_ordering": ("All sports", "Tennis"),
+        "sports": {
+            "All sports": {"scopes": frozenset(("Games", "Futures")),
+                           "competitions": {}},
+            "Tennis": {
+                "scopes": frozenset(("Games", "Set Winner")),
+                "competitions": {
+                    "ATP Washington": frozenset(("Games", "Set 1 Winner")),
+                },
+            },
+        },
+    }
+    print("PASS current sports filters contract is normalized strictly")
+
+
+def test_sports_filters_reject_malformed_scopes_and_competitions():
+    from schemas import parse_sports_filters_response
+
+    malformed = (
+        {"filters_by_sports": {"Tennis": {"competitions": {},
+                                             "scopes": ["Games", "Games"]}},
+         "sport_ordering": ["Tennis"]},
+        {"filters_by_sports": {"Tennis": {"competitions": {"ATP": {
+            "scopes": ["Games", "Games"]}}, "scopes": ["Games"]}},
+         "sport_ordering": ["Tennis"]},
+        {"filters_by_sports": {"Tennis": {"competitions": [],
+                                             "scopes": ["Games"]}},
+         "sport_ordering": ["Tennis"]},
+        {"filters_by_sports": {"Tennis": {"competitions": {},
+                                             "scopes": "Games"}},
+         "sport_ordering": ["Tennis"]},
+        {"filters_by_sports": {"Tennis": {"competitions": {},
+                                             "scopes": ["Games"]}},
+         "sport_ordering": ["tennis"]},
+    )
+    for response in malformed:
+        try:
+            parse_sports_filters_response(response)
+            assert False, response
+        except SchemaError:
+            pass
+    print("PASS malformed sports scopes and competitions fail closed")
+
+
+def test_current_sports_series_contract():
+    from schemas import parse_series_list_response
+
+    assert parse_series_list_response({"series": [current_series()]}) == (
+        {"series_ticker": "KXATP", "category": "Sports",
+         "tags": ("Tennis",)},)
+    print("PASS current sports series contract is normalized strictly")
+
+
+def test_series_response_accepts_off_category_and_null_tags():
+    from schemas import parse_series_list_response
+
+    missing_tags = current_series("KXWEATHER", category="Weather")
+    del missing_tags["tags"]
+    parsed = parse_series_list_response({"series": [
+        current_series("KXATP"),
+        current_series("KXPOL", category="Politics", tags=None),
+        missing_tags,
+    ]})
+    assert parsed[1:] == (
+        {"series_ticker": "KXPOL", "category": "Politics", "tags": ()},
+        {"series_ticker": "KXWEATHER", "category": "Weather", "tags": ()},
+    )
+    print("PASS off-category and null-tag series remain valid metadata")
+
+
+def test_series_response_rejects_duplicate_tickers_and_bad_tags():
+    from schemas import parse_series_list_response
+
+    for response in (
+            {"series": [current_series(), current_series()]},
+            {"series": [current_series(tags="Tennis")]},
+            {"series": [current_series(tags=["Tennis", "Tennis"])]},
+            {"series": [current_series(tags=[""])]},
+            {"series": [current_series(category="")]},
+    ):
+        try:
+            parse_series_list_response(response)
+            assert False, response
+        except SchemaError:
+            pass
+    print("PASS duplicate series tickers and malformed tags fail closed")
+
+
+def test_series_response_rejects_nonempty_cursor_as_incomplete():
+    from schemas import parse_series_list_response
+
+    try:
+        parse_series_list_response({
+            "series": [current_series()],
+            "cursor": "more-series",
+        })
+        assert False
+    except SchemaError as error:
+        assert "cursor" in str(error)
+        assert "incomplete" in str(error)
+    print("PASS nonempty Series cursor cannot masquerade as complete inventory")
+
+
+def test_current_milestone_contract():
+    from schemas import parse_milestone, parse_milestones_page
+
+    parsed = parse_milestone(current_milestone())
+    assert parsed == {
+        "milestone_id": "milestone-1", "category": "Sports", "type": "game",
+        "start_ts": 1785088800.0, "title": "Washington match",
+        "league": "ATP Washington", "main_game_event_ticker": "KXATP-26JUL26-ONE",
+        "primary_event_tickers": ("KXATP-26JUL26-ONE",),
+        "related_event_tickers": ("KXATP-26JUL26-TOTAL",),
+    }
+    rows, cursor = parse_milestones_page(
+        {"milestones": [current_milestone()], "cursor": "next"})
+    assert rows == (parsed,) and cursor == "next"
+    print("PASS current milestone contract is normalized strictly")
+
+
+def test_milestone_accepts_empty_event_ticker_lists():
+    """Main-game metadata remains valid when optional Event lists are empty."""
+    from schemas import parse_milestone
+
+    parsed = parse_milestone(current_milestone(
+        primary_event_tickers=[], related_event_tickers=[]))
+
+    assert parsed["main_game_event_ticker"] == "KXATP-26JUL26-ONE"
+    assert parsed["primary_event_tickers"] == ()
+    assert parsed["related_event_tickers"] == ()
+    print("PASS milestone accepts empty optional Event ticker lists")
+
+
+def test_milestone_contract_rejects_bad_details_dates_and_tickers():
+    from schemas import parse_milestone
+
+    malformed = (
+        current_milestone(details=[]),
+        current_milestone(start_date="2026-07-26T18:00:00"),
+        current_milestone(details={"league": "", "main_game_event_ticker": None}),
+        current_milestone(details={"league": None,
+                                   "main_game_event_ticker": 7}),
+        current_milestone(primary_event_tickers=["EVENT", "EVENT"]),
+        current_milestone(related_event_tickers="EVENT"),
+        current_milestone(id=""),
+    )
+    for row in malformed:
+        try:
+            parse_milestone(row)
+            assert False, row
+        except SchemaError:
+            pass
+    parsed = parse_milestone(current_milestone(
+        details={"league": None, "main_game_event_ticker": None}))
+    assert parsed["league"] is None and parsed["main_game_event_ticker"] is None
+    print("PASS malformed milestone details, dates, and tickers fail closed")
+
+
+def test_current_nested_event_contract_uses_market_parser():
+    from schemas import parse_event, parse_event_response, parse_events_page
+
+    event = current_event()
+    parsed = parse_event(event)
+    assert parsed["event_ticker"] == "KXATP-26JUL26-ONE"
+    assert parsed["category"] == "Sports"
+    assert parsed["markets"][0]["ticker"] == "KXATP-26JUL26-ONE-M1"
+    assert parsed["market_skips"] == {}
+    rows, cursor = parse_events_page({"events": [event], "cursor": ""})
+    assert rows == (parsed,) and cursor == ""
+    direct = parse_event_response({"event": event, "markets": event["markets"]})
+    assert direct == parsed
+    broken = current_event(markets=[current_market(
+        event_ticker="KXATP-26JUL26-ONE", close_time="not-a-date")])
+    try:
+        parse_event(broken)
+        assert False
+    except SchemaError as error:
+        assert "not-a-date" in str(error)
+    try:
+        parse_event_response({"event": event,
+                              "markets": [current_market(ticker="OTHER",
+                                                          event_ticker=event["event_ticker"])]})
+        assert False
+    except SchemaError:
+        pass
+    print("PASS nested events use the strict Market parser")
+
+
+def test_direct_event_uses_nested_markets_when_top_level_is_empty():
+    from schemas import parse_event_response
+
+    event = current_event()
+    parsed = parse_event_response({"event": event, "markets": []})
+    assert parsed["event_ticker"] == "KXATP-26JUL26-ONE"
+    assert [market["ticker"] for market in parsed["markets"]] == [
+        "KXATP-26JUL26-ONE-M1"]
+    print("PASS direct event uses populated nested Markets over empty wrapper")
+
+
+def test_direct_event_rejects_nonempty_wrapper_when_nested_markets_empty():
+    from schemas import parse_event_response
+
+    event = current_event(markets=[])
+    for top_markets in (
+            [current_market(event_ticker=event["event_ticker"])],
+            [{"ticker": 7}],
+    ):
+        try:
+            parse_event_response({"event": event, "markets": top_markets})
+            assert False, top_markets
+        except SchemaError:
+            pass
+    print("PASS populated direct wrapper Markets require matching nested Markets")
+
+
+def test_nested_event_counts_only_recognized_unsupported_markets():
+    from schemas import parse_event
+
+    event = current_event(markets=[
+        current_market(ticker="BINARY", event_ticker="KXATP-26JUL26-ONE"),
+        current_market(ticker="SCALAR", event_ticker="KXATP-26JUL26-ONE",
+                       market_type="scalar"),
+        current_market(ticker="KXMVE-ONE", event_ticker="KXMVE-EVENT",
+                       mve_collection_ticker="COLLECTION"),
+    ])
+    # Unsupported products are skipped only after their own identity parses;
+    # their mismatched event ticker must not be able to conceal malformed data.
+    event["markets"][2]["event_ticker"] = event["event_ticker"]
+    parsed = parse_event(event)
+    assert [m["ticker"] for m in parsed["markets"]] == ["BINARY"]
+    assert parsed["market_skips"] == {"mve": 1, "scalar": 1}
+    try:
+        parse_event(current_event(markets=[current_market(
+            event_ticker="OTHER")]))
+        assert False
+    except SchemaError:
+        pass
+    print("PASS nested events skip only recognized unsupported Markets")
+
+
+def test_sports_client_uses_documented_public_queries():
+    from datetime import datetime, timezone
+    from kalshi_client import KalshiClient
+
+    class Client(KalshiClient):
+        def __init__(self):
+            self.cfg = Config(); self.base = self.cfg.api_base; self.calls = []
+            self.responses = [
+                current_sports_filters(), {"series": [current_series()]},
+                {"milestones": [current_milestone()], "cursor": ""},
+                {"milestones": [current_milestone("milestone-2")], "cursor": ""},
+                {"events": [current_event()], "cursor": ""},
+                {"event": current_event(), "markets": current_event()["markets"]},
+            ]
+
+        def _request(self, method, endpoint, params=None, body=None, auth=False):
+            self.calls.append((method, endpoint, dict(params or {}), auth))
+            return self.responses.pop(0)
+
+    client = Client()
+    start = datetime(2026, 7, 26, tzinfo=timezone.utc)
+    assert client.get_sports_filters()["sport_ordering"] == ("All sports", "Tennis")
+    assert client.get_sports_series()[0]["series_ticker"] == "KXATP"
+    milestones, metadata = client.get_sports_milestones(
+        minimum_start_date=start, competition="ATP Washington")
+    assert milestones[0]["milestone_id"] == "milestone-1"
+    assert metadata == {"pages": 1, "rows": 1, "raw_rows": 1,
+                        "market_skips": {}}
+    related, _ = client.get_sports_milestones(
+        minimum_start_date=start, related_event_ticker="KXATP-26JUL26-ONE")
+    assert related[0]["milestone_id"] == "milestone-2"
+    events, event_metadata = client.get_open_events(series_ticker="KXATP")
+    assert events[0]["event_ticker"] == "KXATP-26JUL26-ONE"
+    assert event_metadata["market_skips"] == {}
+    assert client.last_sports_market_skips == {}
+    assert client.get_event("KXATP-26JUL26-ONE")["event_ticker"] == "KXATP-26JUL26-ONE"
+    assert client.calls == [
+        ("GET", "/search/filters_by_sport", {}, False),
+        ("GET", "/series", {"category": "Sports"}, False),
+        ("GET", "/milestones", {"category": "Sports", "minimum_start_date": "2026-07-26T00:00:00Z", "competition": "ATP Washington", "limit": 500}, False),
+        ("GET", "/milestones", {"category": "Sports", "minimum_start_date": "2026-07-26T00:00:00Z", "related_event_ticker": "KXATP-26JUL26-ONE", "limit": 500}, False),
+        ("GET", "/events", {"series_ticker": "KXATP", "status": "open", "with_nested_markets": "true", "limit": 200}, False),
+        ("GET", "/events/KXATP-26JUL26-ONE", {"with_nested_markets": "true"}, False),
+    ]
+    for competition, related in ((None, None), ("ATP", "EVENT"), ("", None)):
+        try:
+            client.get_sports_milestones(minimum_start_date=start,
+                                         competition=competition,
+                                         related_event_ticker=related)
+            assert False
+        except SchemaError:
+            pass
+    print("PASS sports client emits only documented public queries")
+
+
+def test_public_discovery_metadata_requests_are_paced():
+    from datetime import datetime, timezone
+    from kalshi_client import KalshiClient
+
+    client = KalshiClient(Config())
+    responses = [
+        current_sports_filters(),
+        {"series": [current_series()]},
+        {"milestones": [current_milestone()], "cursor": "next"},
+        {"milestones": [current_milestone("milestone-2")], "cursor": ""},
+        {"market": current_market()},
+    ]
+    calls = []
+
+    def request(method, endpoint, params=None, body=None, auth=False):
+        calls.append((method, endpoint))
+        return responses.pop(0)
+
+    now = [0.0]
+    delays = []
+
+    def sleep(delay):
+        delays.append(delay)
+        now[0] += delay
+
+    client._request = request
+    client._monotonic = lambda: now[0]
+    client._sleep = sleep
+    client.get_sports_filters()
+    client.get_sports_series()
+    rows, metadata = client.get_sports_milestones(
+        competition="ATP Washington",
+        minimum_start_date=datetime(2026, 7, 26, tzinfo=timezone.utc))
+    assert hasattr(client, "get_market_for_discovery")
+    market = client.get_market_for_discovery("T")
+
+    assert len(rows) == 2 and metadata["pages"] == 2
+    assert market["ticker"] == "T"
+    assert calls == [
+        ("GET", "/search/filters_by_sport"),
+        ("GET", "/series"),
+        ("GET", "/milestones"),
+        ("GET", "/milestones"),
+        ("GET", "/markets/T"),
+    ]
+    assert delays == [0.05, 0.05, 0.05, 0.05]
+    print("PASS public Sports discovery GETs use conservative pacing")
+
+
+def test_discovery_cursors_missing_nonstring_repeated_and_capped_fail():
+    from kalshi_client import KalshiClient
+    import kalshi_client as kc
+
+    class Client(KalshiClient):
+        def __init__(self, pages):
+            self.cfg = Config(); self.base = self.cfg.api_base; self.pages = pages
+            self.calls = 0
+
+        def _request(self, method, endpoint, params=None, body=None, auth=False):
+            response = self.pages[min(self.calls, len(self.pages) - 1)]
+            self.calls += 1
+            return response
+
+    for pages in (
+            [{"events": [current_event()]}],
+            [{"events": [current_event()], "cursor": None}],
+            [{"events": [current_event()], "cursor": "same"},
+             {"events": [current_event()], "cursor": "same"}],
+    ):
+        try:
+            Client(pages).get_open_events(series_ticker="KXATP")
+            assert False, pages
+        except SchemaError:
+            pass
+    old_cap = kc.MAX_PAGES
+    kc.MAX_PAGES = 1
+    try:
+        try:
+            Client([{"events": [current_event()], "cursor": "more"}]).get_open_events(
+                series_ticker="KXATP")
+            assert False
+        except SchemaError as error:
+            assert "pagination exceeded 1 pages" in str(error)
+    finally:
+        kc.MAX_PAGES = old_cap
+    print("PASS discovery pagination rejects incomplete inventories")
+
+
 RESEARCH_HEADER = [
     "schema_version", "session_id", "starting_daily_pnl_usd",
     "starting_utc_day", "utc_day", "config_fingerprint",
-    "code_fingerprint", "ts", "event_id", "ticker", "event", "detail",
-    "close_ts", "can_close_early", "mid", "bid", "ask", "bid_qty",
-    "ask_qty",
+    "code_fingerprint", "selected_sports", "ts", "ticker",
+    "sport", "league", "series_ticker", "milestone_id", "event_ticker",
+    "scheduled_start_ts", "event", "detail", "close_ts",
+    "can_close_early", "mid", "bid", "ask", "bid_qty", "ask_qty",
 ]
 
 
 def research_row(*, cfg=None, session="S", starting_pnl=0,
                  starting_day="1970-01-01", day="1970-01-01", ts=1,
-                 event_id="E", ticker="T", event="quote", detail="",
+                 selected_sports=("Tennis",), selected_sports_text=None,
+                 ticker="T", sport="Tennis", league="League",
+                 series_ticker="KXSERIES", milestone_id="M",
+                 event_ticker="E", scheduled_start_ts=3600,
+                 event="quote", detail="",
                  close_ts=4070908800.0, can_close_early="false",
                  mid=50, bid=49, ask=51, bid_qty=10, ask_qty=10):
+    import json
     from research_log import config_fingerprint, code_fingerprint
-    cfg = cfg or Config()
-    if event != "quote":
+    selected_sports = tuple(selected_sports)
+    cfg = cfg or Config(sports=list(selected_sports))
+    if not cfg.sports:
+        cfg.sports = list(selected_sports)
+    selected_text = (selected_sports_text
+                     if selected_sports_text is not None
+                     else json.dumps(list(selected_sports),
+                                     separators=(",", ":")))
+    if event in ("session_end", "session_halt"):
+        ticker = sport = league = series_ticker = milestone_id = ""
+        event_ticker = scheduled_start_ts = ""
+        close_ts = can_close_early = ""
+        mid = bid = ask = bid_qty = ask_qty = ""
+    elif event != "quote":
         close_ts, can_close_early = "", ""
-    return [5, session, starting_pnl, starting_day, day,
-            config_fingerprint(cfg), code_fingerprint(), ts, event_id,
-            ticker, event, detail, close_ts, can_close_early,
+        mid = bid = ask = bid_qty = ask_qty = ""
+    return [6, session, starting_pnl, starting_day, day,
+            config_fingerprint(cfg), code_fingerprint(), selected_text, ts,
+            ticker, sport, league, series_ticker, milestone_id,
+            event_ticker, scheduled_start_ts, event, detail,
+            close_ts, can_close_early,
             mid, bid, ask, bid_qty, ask_qty]
+
+
+def research_provenance(
+        *, sport="Tennis", league="League", series_ticker="KXSERIES",
+        milestone_id="M", event_ticker="E", scheduled_start_ts=3600):
+    from sports_discovery import ContractProvenance
+
+    return ContractProvenance(
+        sport=sport, league=league, series_ticker=series_ticker,
+        milestone_id=milestone_id, event_ticker=event_ticker,
+        scheduled_start_ts=scheduled_start_ts)
 
 
 # ================= contract tests (official fixtures) =================
@@ -372,6 +843,53 @@ def test_http_boundary_wiring_and_strict_envelopes():
     print("PASS HTTP boundary: URLs/auth/params/body/envelopes all validated")
 
 
+def test_public_sports_client_loads_private_key_only_for_auth():
+    """Bad credentials must not block unauthenticated Sports discovery."""
+    from kalshi_client import KalshiClient
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return current_sports_filters()
+
+    class PublicSession:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return Response()
+
+    with tempfile.TemporaryDirectory() as directory:
+        key_path = os.path.join(directory, "invalid.pem")
+        with open(key_path, "w", encoding="utf-8") as handle:
+            handle.write("not a private key")
+        cfg = Config()
+        cfg.api_key_id = "KEY"
+        cfg.private_key_path = key_path
+
+        client = KalshiClient(cfg)
+        session = PublicSession()
+        client.session = session
+        filters = client.get_sports_filters()
+
+        assert filters["sport_ordering"] == ("All sports", "Tennis")
+        assert len(session.calls) == 1
+        assert session.calls[0][2]["headers"] == {}
+        try:
+            client.get_balance()
+            assert False
+        except SchemaError as error:
+            assert "private key" in str(error)
+        assert len(session.calls) == 1
+    print("PASS public Sports metadata does not load private credentials")
+
+
 def test_get_429_retries_with_exponential_backoff():
     """A transient read throttle must recover without hiding the delay."""
     import requests
@@ -619,8 +1137,8 @@ def test_pagination_fails_closed():
             BrokenClient([{"fills": [], "cursor": "c1"},
                           {"fills": [], "cursor": "c2"}]).get_fills()
             assert False
-        except SchemaError:
-            pass
+        except SchemaError as error:
+            assert "pagination exceeded 2 pages" in str(error)
     finally:
         kc.MAX_PAGES = old_cap
     print("PASS malformed/repeated/truncated pagination fails closed")
@@ -1627,6 +2145,8 @@ def test_stale_initial_quotes_halt():
     from market_data import PriceFeed
     cfg = Config(); cfg.stale_data_s = 0.05
     feed = PriceFeed(cfg, client=None)
+    feed.install_discovery(_task4_discovery(
+        _task4_contract(ticker="A", event_ticker="EVENT-A")))
     feed.subscribe(["A"])
     s = Safety(cfg)
     time.sleep(0.06)
@@ -1824,12 +2344,14 @@ def test_analyzer_preserves_order_and_censors_horizons():
         w.writerow(research_row(ts=10, mid=50, bid=49, ask=51))
         w.writerow(research_row(ts=12, mid=52, bid=51, ask=53))
         w.writerow(research_row(
-            ts=13, event_id="", ticker="", event="session_end",
+            ts=13, event_ticker="", ticker="", event="session_end",
             detail="operator interrupt", mid="", bid="", ask="",
             bid_qty="", ask_qty=""))
-    series, groups = load(path)
+    series, groups, selected_sports, provenance = load(path)
     assert [p[0] for p in series["T"]] == [1.0, 10.0, 12.0]
     assert groups == {"T": "E"}
+    assert selected_sports == ("Tennis",)
+    assert provenance["T"] == research_provenance()
     marks = markouts(series["T"], 1)
     assert 1 in marks and 5 not in marks and 300 not in marks
     far = [(0.0, Decimal(50), Decimal(49), Decimal(51)),
@@ -1850,7 +2372,7 @@ def test_analyzer_requires_a_clean_terminal_record():
             writer.writerow(research_row())
             if terminal:
                 writer.writerow(research_row(
-                    ts=2, event_id="", ticker="", event=terminal,
+                    ts=2, event_ticker="", ticker="", event=terminal,
                     detail="runtime failure", mid="", bid="", ask="",
                     bid_qty="", ask_qty=""))
         try:
@@ -1866,32 +2388,41 @@ def test_research_log_preserves_no_quote_and_event_group():
     import csv as _csv
     from research_log import ResearchLog
     directory = tempfile.mkdtemp()
-    log = ResearchLog(directory, clock=lambda: 123.5, session_id="SESSION-A")
+    cfg = Config(sports=["Tennis"])
+    provenance = {"T": research_provenance(event_ticker="EVENT-7")}
+    log = ResearchLog(
+        directory, clock=lambda: 123.5, session_id="SESSION-A",
+        config=cfg, provenance_by_ticker=provenance)
     log.tick("T", None, None, None, None, None,
-             ts=123.5, group_id="EVENT-7", event="no_quote")
+             ts=123.5, event="no_quote")
     with open(log.tick_path) as f:
         rows = list(_csv.DictReader(f))
     assert len(rows) == 1
-    assert rows[0]["schema_version"] == "5"
+    assert rows[0]["schema_version"] == "6"
     assert rows[0]["session_id"] == "SESSION-A"
     assert rows[0]["starting_daily_pnl_usd"] == "0"
     assert rows[0]["starting_utc_day"] == "1970-01-01"
     assert rows[0]["utc_day"] == "1970-01-01"
     assert rows[0]["ts"] == "123.5"
-    assert rows[0]["event_id"] == "EVENT-7"
+    assert rows[0]["selected_sports"] == '["Tennis"]'
+    assert rows[0]["event_ticker"] == "EVENT-7"
+    assert rows[0]["sport"] == "Tennis"
     assert rows[0]["event"] == "no_quote"
     assert rows[0]["mid"] == ""
     assert len(rows[0]["config_fingerprint"]) == 64
     assert len(rows[0]["code_fingerprint"]) == 64
-    assert "ticks_v5_" in log.tick_path
+    assert "ticks_v6_" in log.tick_path
     from replay import replay
     result = replay(log.tick_path)
-    assert result["data_gaps"] == 2 and not result["evaluable"]
-    second = ResearchLog(directory, clock=lambda: 123.5,
-                         session_id="SESSION-B")
+    assert result["data_gaps"] == 1 and not result["evaluable"]
+    second = ResearchLog(
+        directory, clock=lambda: 123.5, session_id="SESSION-B",
+        config=cfg, provenance_by_ticker=provenance)
     assert second.tick_path != log.tick_path
     try:
-        ResearchLog(directory, clock=lambda: 123.5, session_id="SESSION-A")
+        ResearchLog(
+            directory, clock=lambda: 123.5, session_id="SESSION-A",
+            config=cfg, provenance_by_ticker=provenance)
         assert False
     except FileExistsError:
         pass
@@ -1911,8 +2442,8 @@ def test_analyzer_rejects_legacy_per_ticker_split():
         load(path)
     except ValueError as e:
         raised = e
-    assert raised is not None and "event_id" in str(raised)
-    print("PASS analyzer rejects legacy logs lacking event-level grouping")
+    assert raised is not None and "v6" in str(raised)
+    print("PASS analyzer rejects legacy logs outside strict v6 validation")
 
 
 def test_malformed_quote_rows_disqualify_research():
@@ -1930,12 +2461,15 @@ def test_malformed_quote_rows_disqualify_research():
         assert False
     except ValueError as error:
         assert "malformed quote" in str(error)
-    rows, gaps = load_log(path)
-    assert rows == [] and gaps == 2
-    print("PASS malformed quote row fails analysis and disqualifies replay")
+    try:
+        load_log(path)
+        assert False
+    except ValueError as error:
+        assert "quote" in str(error) or "ask" in str(error)
+    print("PASS malformed quote row fails strict analysis and replay")
 
 
-def test_analyzer_end_to_end_v5_smoke():
+def test_analyzer_end_to_end_v6_smoke():
     import contextlib
     import csv as _csv
     import io
@@ -1956,10 +2490,10 @@ def test_analyzer_end_to_end_v5_smoke():
             for ts in range(1, 26):
                 writer.writerow(research_row(
                     session="SMOKE", ts=ts + offset * 100,
-                    event_id=event, ticker=f"T-{bucket}",
+                    event_ticker=event, ticker=f"T-{bucket}",
                     bid_qty=100, ask_qty=100))
         writer.writerow(research_row(
-            session="SMOKE", ts=200, event_id="", ticker="",
+            session="SMOKE", ts=200, event_ticker="", ticker="",
             event="session_end", detail="operator interrupt",
             mid="", bid="", ask="", bid_qty="", ask_qty=""))
     output = io.StringIO()
@@ -1968,15 +2502,15 @@ def test_analyzer_end_to_end_v5_smoke():
     text = output.getvalue()
     assert "MARK-OUTS (NON-EXECUTABLE" in text
     assert "FULL REPLAY" in text and "TRAIN:" in text and "TEST:" in text
-    print("PASS analyzer runs end-to-end on a v5 two-partition session")
+    print("PASS analyzer runs end-to-end on a v6 two-partition session")
 
 
-def test_analyzer_attributes_one_shared_portfolio_replay():
+def test_analyzer_replays_shared_portfolio_exactly_once():
     import contextlib
     import csv as _csv
     import io
     import analyze as analyzer
-    from replay import replay
+    from replay import replay as real_replay
 
     groups = {}
     candidate = 0
@@ -1992,7 +2526,7 @@ def test_analyzer_attributes_one_shared_portfolio_replay():
 
         def quote(ts, ticker, event, mid, bid, ask):
             writer.writerow(research_row(
-                cfg=cfg, session="SHARED", ts=ts, event_id=event,
+                cfg=cfg, session="SHARED", ts=ts, event_ticker=event,
                 ticker=ticker, mid=mid, bid=bid, ask=ask,
                 bid_qty=100, ask_qty=100))
 
@@ -2010,12 +2544,12 @@ def test_analyzer_attributes_one_shared_portfolio_replay():
         quote(24.1, "ACTIVE", groups["TRAIN"], 61, 60, 62)
         quote(25.0, "BLOCKED", groups["TEST"], 61, 60, 62)
         writer.writerow(research_row(
-            cfg=cfg, session="SHARED", ts=26, event_id="", ticker="",
+            cfg=cfg, session="SHARED", ts=26, event_ticker="", ticker="",
             event="session_end", detail="operator interrupt",
             mid="", bid="", ask="", bid_qty="", ask_qty=""))
 
-    full = replay(path, cfg=cfg)
-    isolated = replay(path, tickers={"BLOCKED"}, cfg=cfg)
+    full = real_replay(path, cfg=cfg)
+    isolated = real_replay(path, tickers={"BLOCKED"}, cfg=cfg)
     assert [trade[1] for trade in full["trades"]] == ["BUY", "SELL"]
     assert {trade[0] for trade in full["trades"]} == {"ACTIVE"}
     assert [trade[1] for trade in isolated["trades"]] == ["BUY", "SELL"]
@@ -2027,18 +2561,38 @@ def test_analyzer_attributes_one_shared_portfolio_replay():
     analyzer.CFG = cfg
     analyzer.HORIZONS = analyzer.build_horizons(cfg.max_hold_seconds)
     analyzer.MARKOUT_TOLERANCE_S = max(1.0, cfg.poll_interval * 2)
+    original_load = analyzer.load
+    original_replay = analyzer.replay
+    load_calls = []
+    replay_calls = []
+
+    def counted_load(*args, **kwargs):
+        load_calls.append((args, kwargs))
+        return original_load(*args, **kwargs)
+
+    def counted_replay(*args, **kwargs):
+        replay_calls.append((args, kwargs))
+        assert "tickers" not in kwargs
+        return real_replay(*args, **kwargs)
+
+    analyzer.load = counted_load
+    analyzer.replay = counted_replay
     output = io.StringIO()
     try:
         with contextlib.redirect_stdout(output):
             analyzer.main(path)
     finally:
+        analyzer.load = original_load
+        analyzer.replay = original_replay
         analyzer.CFG = old_cfg
         analyzer.HORIZONS = old_horizons
         analyzer.MARKOUT_TOLERANCE_S = old_tolerance
     text = output.getvalue()
-    assert "TRAIN: 1 exits" in text
-    assert "TEST: 0 exits" in text
-    print("PASS analyzer attributes one shared portfolio, not subset replays")
+    assert load_calls == [((path,), {})]
+    assert replay_calls == [((path,), {"cfg": cfg})]
+    assert "TRAIN: 1 markets, 1 exits" in text
+    assert "TEST: 1 markets, 0 exits" in text
+    print("PASS analyzer replays one shared portfolio exactly once")
 
 
 def test_aggregate_fee_rounding():
@@ -2105,20 +2659,23 @@ def test_unknown_depth_never_means_unlimited_fill():
     print("PASS unknown depth cannot fill; blocking paper bypass rejected")
 
 
-def test_pricefeed_learns_event_id_from_quote():
+def test_pricefeed_uses_installed_event_identity():
     from market_data import PriceFeed
 
     class Client:
         def get_market(self, ticker):
-            return {"event_ticker": "MATCH-123", "status": "active",
+            return {"ticker": ticker, "event_ticker": "MATCH-123",
+                    "status": "active",
                     "yes_bid": Decimal(50),
                     "yes_ask": Decimal(52), "yes_bid_size": Decimal(10),
                     "yes_ask_size": Decimal(10)}
 
     feed = PriceFeed(Config(), Client(), clock=lambda: 1.0)
+    feed.install_discovery(_task4_discovery(
+        _task4_contract(ticker="CONTRACT-A", event_ticker="MATCH-123")))
     feed.get_quote("CONTRACT-A")
     assert feed.group_id("CONTRACT-A") == "MATCH-123"
-    print("PASS configured ticker learns match/event ID from market quote")
+    print("PASS PriceFeed uses preinstalled immutable event identity")
 
 
 def test_market_envelope_to_research_log_preserves_event_identity():
@@ -2141,44 +2698,63 @@ def test_market_envelope_to_research_log_preserves_event_identity():
                 yes_sub_title="Player A wins",
                 yes_bid_size_fp="10.00", yes_ask_size_fp="12.00")}
 
-    feed = PriceFeed(Config(), Client(), clock=lambda: 7.25)
+    cfg = Config(sports=["Tennis"])
+    feed = PriceFeed(cfg, Client(), clock=lambda: 7.25)
+    feed.install_discovery(_task4_discovery(
+        _task4_contract(
+            ticker="CONTRACT-A", event_ticker="MATCH-123"),
+        _task4_contract(
+            ticker="CONTRACT-B", event_ticker="MATCH-123")))
     directory = tempfile.mkdtemp()
-    log = ResearchLog(directory, clock=lambda: 7.25,
-                      session_id="SESSION-E2E")
+    log = ResearchLog(
+        directory, clock=lambda: 7.25, session_id="SESSION-E2E",
+        config=cfg, provenance_by_ticker=feed.provenance_by_ticker)
     for ticker in ("CONTRACT-A", "CONTRACT-B"):
         mid, bid, ask, observed_at = feed.get_quote(ticker)
         _, bid_qty, _, ask_qty = feed.top_of_book(ticker)
         log.tick(ticker, mid, bid, ask, bid_qty, ask_qty,
-                 ts=observed_at, group_id=feed.group_id(ticker),
+                 ts=observed_at,
                  close_ts=feed.lifecycle(ticker)[0],
                  can_close_early=feed.lifecycle(ticker)[1])
     with open(log.tick_path) as handle:
         rows = list(_csv.DictReader(handle))
-    assert {row["event_id"] for row in rows} == {"MATCH-123"}
+    assert {row["event_ticker"] for row in rows} == {"MATCH-123"}
     assert {row["ticker"] for row in rows} == {"CONTRACT-A", "CONTRACT-B"}
     assert {row["ts"] for row in rows} == {"7.25"}
-    assert feed.group_id("UNKNOWN") is None
+    try:
+        feed.group_id("UNKNOWN")
+        assert False
+    except SchemaError:
+        pass
     print("PASS official market envelope preserves event identity to CSV")
 
 
 def test_replay_exact_paper_path_and_residual():
     import csv as _csv
     from replay import replay
-    cfg = Config()
+    cfg = Config(sports=["Tennis"])
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
-        w.writerow(["ts", "ticker", "mid", "bid", "ask", "bid_qty", "ask_qty"])
+        w.writerow(RESEARCH_HEADER)
         t = 0.0
         for i in range(80):
             t += 1.5
-            w.writerow([t, "T", 60, 59, 61, 500, 500])
-        w.writerow([t + 1.5, "T", 52, 51, 53, 500, 500])   # 8c dip
-        w.writerow([t + 2.6, "T", "51.75", 51, "52.5", 500, 6])
+            w.writerow(research_row(
+                cfg=cfg, session="RESIDUAL", ts=t,
+                mid=60, bid=59, ask=61, bid_qty=500, ask_qty=500))
+        w.writerow(research_row(
+            cfg=cfg, session="RESIDUAL", ts=t + 1.5,
+            mid=52, bid=51, ask=53, bid_qty=500, ask_qty=500))
+        w.writerow(research_row(
+            cfg=cfg, session="RESIDUAL", ts=t + 2.6,
+            mid="51.75", bid=51, ask="52.5", bid_qty=500, ask_qty=6))
         # crash with ZERO bid depth: exits/flatten cannot fill
         for k in range(40):
-            w.writerow([t + 3.0 + k * 1.5, "T", 40, 39, 41, 0, 500])
-    r = replay(path)
+            w.writerow(research_row(
+                cfg=cfg, session="RESIDUAL", ts=t + 3.0 + k * 1.5,
+                mid=40, bid=39, ask=41, bid_qty=0, ask_qty=500))
+    r = replay(path, cfg=cfg)
     buys = [tr for tr in r["trades"] if tr[1] == "BUY"]
     assert buys and buys[0][2] == Decimal("52.5") + cfg.sim_slippage_cents
     assert buys[0][3] == Decimal(6)                 # depth-limited
@@ -2313,13 +2889,18 @@ def test_pending_entries_count_toward_position_limit():
 def test_replay_empty_ticker_selection_processes_nothing():
     import csv as _csv
     from replay import replay
+    cfg = Config(sports=["Tennis"])
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
-        w.writerow(["ts", "ticker", "mid", "bid", "ask",
-                    "bid_qty", "ask_qty"])
-        w.writerow([1, "ONLY", 50, 49, 51, 10, 10])
-    result = replay(path, tickers=set())
+        w.writerow(RESEARCH_HEADER)
+        w.writerow(research_row(
+            cfg=cfg, session="FILTER", ticker="ONLY",
+            event_ticker="ONLY-EVENT"))
+        w.writerow(research_row(
+            cfg=cfg, session="FILTER", ts=2, ticker="",
+            event="session_end", detail="operator interrupt"))
+    result = replay(path, tickers=set(), cfg=cfg)
     assert result["rows_processed"] == 0
     assert result["trades"] == []
     assert not result["evaluable"]
@@ -2329,16 +2910,22 @@ def test_replay_empty_ticker_selection_processes_nothing():
 def test_replay_eof_never_fabricates_flatten_fills():
     import csv as _csv
     from replay import replay
+    cfg = Config(sports=["Tennis"])
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
-        w.writerow(["ts", "ticker", "mid", "bid", "ask",
-                    "bid_qty", "ask_qty"])
+        w.writerow(RESEARCH_HEADER)
         for ts in range(1, 21):
-            w.writerow([ts, "T", 60, 59, 61, 100, 100])
-        w.writerow([21, "T", 52, 51, 53, 100, 100])
-        w.writerow([22, "T", 52, 51, 53, 100, 5])
-    result = replay(path)
+            w.writerow(research_row(
+                cfg=cfg, session="EOF", ts=ts, mid=60, bid=59, ask=61,
+                bid_qty=100, ask_qty=100))
+        w.writerow(research_row(
+            cfg=cfg, session="EOF", ts=21, mid=52, bid=51, ask=53,
+            bid_qty=100, ask_qty=100))
+        w.writerow(research_row(
+            cfg=cfg, session="EOF", ts=22, mid=52, bid=51, ask=53,
+            bid_qty=100, ask_qty=5))
+    result = replay(path, cfg=cfg)
     assert [trade[1] for trade in result["trades"]] == ["BUY"]
     assert result["realized"] == 0
     assert result["residual_contracts"] == 5
@@ -2399,7 +2986,8 @@ def test_pricefeed_and_replayfeed_produce_identical_paper_fills():
 
         def get_market(self, ticker):
             row = self.current
-            return {"event_ticker": "EVENT-T", "status": "active",
+            return {"ticker": ticker, "event_ticker": "EVENT-T",
+                    "status": "active",
                     "yes_bid": row[3], "yes_ask": row[4],
                     "yes_bid_size": row[5], "yes_ask_size": row[6],
                     "close_ts": 4070908800.0, "can_close_early": False}
@@ -2407,6 +2995,8 @@ def test_pricefeed_and_replayfeed_produce_identical_paper_fills():
     real_clock = VirtualClock()
     client = StreamClient()
     price_feed = PriceFeed(Config(), client, clock=real_clock.time)
+    price_feed.install_discovery(_task4_discovery(
+        _task4_contract(ticker="T", event_ticker="EVENT-T")))
 
     def fetch(row):
         client.current = row
@@ -2436,13 +3026,20 @@ def test_actual_runtime_driver_matches_replay():
         (25.0, "T", Decimal(61), Decimal(60), Decimal(62),
          Decimal(6), Decimal(100)),
     ]
+    cfg = Config(sports=["Tennis"]); cfg.sim_latency_s = 1.0
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
-        writer.writerow(["ts", "ticker", "mid", "bid", "ask",
-                         "bid_qty", "ask_qty"])
-        writer.writerows(rows)
-    replay_result = replay(path)
+        writer.writerow(RESEARCH_HEADER)
+        for ts, ticker, mid, bid, ask, bid_qty, ask_qty in rows:
+            writer.writerow(research_row(
+                cfg=cfg, session="DRIVER", ts=ts, ticker=ticker,
+                event_ticker="EVENT-T", mid=mid, bid=bid, ask=ask,
+                bid_qty=bid_qty, ask_qty=ask_qty))
+        writer.writerow(research_row(
+            cfg=cfg, session="DRIVER", ts=26, ticker="",
+            event="session_end", detail="operator interrupt"))
+    replay_result = replay(path, cfg=cfg)
 
     clock = VirtualClock()
     class RuntimeFeed:
@@ -2469,7 +3066,6 @@ def test_actual_runtime_driver_matches_replay():
         def group_id(self, ticker):
             return "EVENT-T"
 
-    cfg = Config(); cfg.sim_latency_s = 1.0
     feed = RuntimeFeed()
     strategy = ScalpStrategy(cfg)
     executor = Executor(cfg, None, feed, clock=clock.time,
@@ -2503,6 +3099,165 @@ def test_core_units():
                 - fee_usd(40, 20) - fee_usd(50, 20))
     assert s.realized_pnl == expected
     print("PASS core units (Decimal fees, causality, gapped-stop actual price)")
+
+
+def test_cli_parses_sports_without_hardcoded_choices():
+    """The CLI keeps operator spelling until public metadata resolves it."""
+    from bot import parse_cli
+
+    options = parse_cli(["--sports", " tennis ,Basketball "])
+    assert options.mode == "paper"
+    assert options.requested_sports == ("tennis", "Basketball")
+    print("PASS CLI preserves uncanonicalized Sports selections")
+
+
+def test_cli_rejects_empty_or_duplicate_sports():
+    """Blank components and case-folded duplicates are unusable selections."""
+    from bot import parse_cli
+
+    for argv in (("--sports", "tennis,,Basketball"),
+                 ("--sports", "tennis,TENNIS")):
+        try:
+            parse_cli(argv)
+            assert False, argv
+        except ValueError as error:
+            assert "usage:" in str(error)
+    for argv in (("--check", "--list-sports"),
+                 ("--check", "--sports", "Tennis")):
+        try:
+            parse_cli(argv)
+            assert False, argv
+        except ValueError as error:
+            assert "usage:" in str(error)
+    print("PASS CLI rejects empty/duplicate Sports and invalid modes")
+
+
+def test_config_validates_unique_selection_lists():
+    """Configuration selections must be explicit, nonblank, and unique."""
+    for kwargs in ({"sports": ["Tennis", "Tennis"]},
+                   {"sports": [" "]},
+                   {"tickers": ["KX", "KX"]},
+                   {"tickers": [""]}):
+        try:
+            Config(**kwargs)
+            assert False, kwargs
+        except ValueError:
+            pass
+    assert Config().sports == []
+    print("PASS config validates unique nonblank Sports/tickers")
+
+
+def test_cli_rejects_sports_with_configured_tickers():
+    """A paper session chooses either dynamic Sports or exact tickers."""
+    import contextlib
+    import io
+    import bot as bot_module
+
+    state_root = tempfile.mkdtemp()
+    constructed = []
+
+    class Client:
+        pass
+
+    def config_factory():
+        return Config(tickers=["KXGAME-1"], state_root=state_root)
+
+    def client_factory(cfg):
+        constructed.append(cfg)
+        return Client()
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert bot_module.main(["--sports", "Tennis"],
+                               config_factory=config_factory,
+                               client_factory=client_factory) == 1
+    assert constructed and constructed[0].sports == ["Tennis"]
+    assert "both configured tickers and Sports" in output.getvalue()
+    print("PASS paper startup rejects simultaneous tickers and Sports")
+
+
+def test_paper_startup_requires_sports_or_explicit_tickers():
+    """A paper session cannot fall back to an implicit discovery selection."""
+    import contextlib
+    import io
+    import bot as bot_module
+
+    state_root = tempfile.mkdtemp()
+
+    class Client:
+        pass
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert bot_module.main([],
+                               config_factory=lambda: Config(
+                                   state_root=state_root),
+                               client_factory=lambda cfg: Client()) == 1
+    assert "select at least one Sport or configure explicit tickers" \
+        in output.getvalue()
+    print("PASS paper startup requires an explicit discovery selection")
+
+
+def test_list_sports_is_public_and_creates_no_session_artifact():
+    """Listing Sports succeeds/fails without constructing session state."""
+    import contextlib
+    import io
+    import bot as bot_module
+
+    original_feed = bot_module.PriceFeed
+    old_cwd = os.getcwd()
+    try:
+        bot_module.PriceFeed = lambda *args, **kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("PriceFeed must not be constructed")))
+        for should_fail in (False, True):
+            workdir = tempfile.mkdtemp()
+            os.chdir(workdir)
+            calls = []
+
+            class Client:
+                def get_sports_filters(self):
+                    calls.append("filters")
+                    if should_fail:
+                        raise SchemaError("filters unavailable")
+                    return {
+                        "sport_ordering":
+                            ("All sports", "Tennis", "Cricket")}
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = bot_module.main(
+                    ["--list-sports"],
+                    config_factory=lambda: Config(
+                        state_root=os.path.join(workdir, "state")),
+                    client_factory=lambda cfg: Client())
+            assert result == (1 if should_fail else 0)
+            assert calls == ["filters"]
+            assert os.listdir(workdir) == []
+            if should_fail:
+                assert "filters unavailable" in output.getvalue()
+                assert "Traceback" not in output.getvalue()
+            else:
+                assert output.getvalue().splitlines()[-3:] == [
+                    "All sports", "Tennis", "Cricket"]
+    finally:
+        bot_module.PriceFeed = original_feed
+        os.chdir(old_cwd)
+    print("PASS --list-sports success/failure is public and artifact-free")
+
+
+def test_cli_reports_unknown_arguments_without_traceback():
+    """Operator input errors are reported as usage, never a Python traceback."""
+    import contextlib
+    import io
+    import bot as bot_module
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert bot_module.main(["--unknown"]) == 2
+    assert "usage:" in output.getvalue()
+    assert "Traceback" not in output.getvalue()
+    print("PASS unknown CLI arguments fail cleanly")
 
 
 def test_live_and_demo_disabled():
@@ -2574,6 +3329,7 @@ def test_current_market_contract_and_empty_book_normalization():
             return parse_market(current_market(status="closed"))
 
     feed = PriceFeed(Config(), InactiveClient(), clock=lambda: 10.0)
+    feed.install_discovery(_task4_discovery(_task4_contract()))
     feed.subscribe(["T"])
     try:
         feed.get_quote("T")
@@ -2687,27 +3443,314 @@ def test_staleness_is_checked_between_market_requests():
     print("PASS stale flat market is isolated between blocking requests")
 
 
+class _Task8PreflightClient:
+    """Strict public-page preflight double; all HTTP-shaped calls are recorded."""
+
+    last_market_skips = {}
+    last_sports_market_skips = {}
+
+    def __init__(self, *, filters_response=None, series_response=None,
+                 milestone_response=None, event_response=None):
+        from kalshi_client import KalshiClient
+
+        self._production_type = KalshiClient
+        self.cfg = Config()
+        self.base = self.cfg.api_base
+        self.calls = []
+        self.portfolio_calls = []
+        self.responses = {
+            "/search/filters_by_sport": (
+                current_sports_filters() if filters_response is None
+                else filters_response),
+            "/series": (
+                {"series": [current_series()]} if series_response is None
+                else series_response),
+            "/milestones": (
+                {"milestones": [current_milestone()],
+                 "cursor": "milestone-next"} if milestone_response is None
+                else milestone_response),
+            "/events": (
+                {"events": [current_event()], "cursor": "event-next"}
+                if event_response is None else event_response),
+        }
+
+    def _request(self, method, endpoint, params=None, body=None, auth=False):
+        self.calls.append(
+            (method, endpoint, dict(params or {}), body, bool(auth)))
+        if endpoint not in self.responses:
+            raise AssertionError(f"unexpected preflight request: {endpoint}")
+        return self.responses[endpoint]
+
+    def _request_public_metadata(self, endpoint, *, params=None):
+        return self._production_type._request_public_metadata(
+            self, endpoint, params=params)
+
+    def get_sports_filters(self):
+        return self._production_type.get_sports_filters(self)
+
+    def get_sports_series(self):
+        return self._production_type.get_sports_series(self)
+
+    def get_sports_milestones_page(self, **kwargs):
+        return self._production_type.get_sports_milestones_page(self, **kwargs)
+
+    def get_open_events_page(self, **kwargs):
+        return self._production_type.get_open_events_page(self, **kwargs)
+
+    def get_exchange_status(self):
+        return {"exchange_active": True, "trading_active": True}
+
+    def get_markets_sample(self, **_kwargs):
+        return [parse_market(current_market())]
+
+    def get_balance(self):
+        self.portfolio_calls.append("balance")
+        return {"balance": 0}
+
+    def get_open_orders(self):
+        self.portfolio_calls.append("orders")
+        return []
+
+    def get_fills(self):
+        self.portfolio_calls.append("fills")
+        return []
+
+    def get_positions(self):
+        self.portfolio_calls.append("positions")
+        return []
+
+    def get_sports_milestones(self, **_kwargs):
+        raise AssertionError("preflight followed exhaustive milestone inventory")
+
+    def get_open_events(self, **_kwargs):
+        raise AssertionError("preflight followed exhaustive Event inventory")
+
+    def get_order(self, *_args, **_kwargs):
+        raise AssertionError("preflight polled an individual order")
+
+    def create_order(self, *_args, **_kwargs):
+        raise AssertionError("preflight attempted order creation")
+
+    def cancel_order(self, *_args, **_kwargs):
+        raise AssertionError("preflight attempted order cancellation")
+
+    def scan_markets(self, *_args, **_kwargs):
+        raise AssertionError("preflight attempted discovery/ranking")
+
+
+def _run_task8_preflight(client, *, authenticated=True):
+    import contextlib
+    import io
+    import bot
+    from sports_discovery import LocalDayWindow
+
+    cfg = Config()
+    cfg.api_key_id = "KEY" if authenticated else ""
+    original = getattr(bot, "local_day_window", None)
+    bot.local_day_window = lambda: LocalDayWindow(
+        "America/Los_Angeles",
+        "2026-07-26T00:00:00-07:00",
+        "2026-07-27T00:00:00-07:00",
+        1785049200.0,
+        1785135600.0)
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            result = bot.preflight(cfg, client)
+    finally:
+        if original is None:
+            delattr(bot, "local_day_window")
+        else:
+            bot.local_day_window = original
+    return result, output.getvalue()
+
+
+def test_preflight_validates_public_sports_metadata_without_orders():
+    client = _Task8PreflightClient()
+    result, text = _run_task8_preflight(client)
+
+    assert result
+    assert client.calls == [
+        ("GET", "/search/filters_by_sport", {}, None, False),
+        ("GET", "/series", {"category": "Sports"}, None, False),
+        ("GET", "/milestones", {
+            "category": "Sports",
+            "minimum_start_date": "2026-07-26T07:00:00Z",
+            "competition": "ATP Washington",
+            "limit": 500,
+        }, None, False),
+        ("GET", "/events", {
+            "series_ticker": "KXATP",
+            "status": "open",
+            "with_nested_markets": "true",
+            "limit": 200,
+        }, None, False),
+    ]
+    assert all("cursor" not in call[2] for call in client.calls)
+    assert "Sports filters OK: 1 canonical Sports; Games-capable: Tennis" in text
+    assert "Sports series schema OK: 1 rows" in text
+    assert ("Sports milestone page OK: competition=ATP Washington rows=1 "
+            "more_pages=true; not followed by --check") in text
+    assert "Sports event page OK: series=KXATP events=1 " in text
+    assert "more_pages=true; not followed by --check" in text
+    print("PASS --check validates bounded public Sports pages without orders")
+
+
+def test_preflight_reports_metadata_skips_and_unobserved_portfolio_rows():
+    event_ticker = "KXATP-26JUL26-ONE"
+    event = current_event(markets=[
+        current_market(ticker="BINARY", event_ticker=event_ticker),
+        current_market(ticker="SCALAR", event_ticker=event_ticker,
+                       market_type="scalar"),
+    ])
+    client = _Task8PreflightClient(
+        event_response={"events": [event], "cursor": ""})
+    result, text = _run_task8_preflight(client)
+
+    assert result
+    assert "unsupported skipped: total=1 types=scalar=1" in text
+    assert ("WARNING row schemas not observed for empty collections "
+            "['orders', 'fills', 'positions']") in text
+    assert "portfolio row schemas observed live: none" in text
+    print("PASS --check reports Sports skips and empty portfolio row coverage")
+
+
+def test_preflight_never_calls_order_mutation_endpoints():
+    import bot
+
+    client = _Task8PreflightClient()
+    forbidden = ("PriceFeed", "ProcessLock", "ResearchLog", "Executor")
+    originals = {name: getattr(bot, name) for name in forbidden}
+
+    def forbidden_constructor(*_args, **_kwargs):
+        raise AssertionError("preflight constructed a session/discovery object")
+
+    with tempfile.TemporaryDirectory() as directory:
+        before = tuple(os.listdir(directory))
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(directory)
+            for name in forbidden:
+                setattr(bot, name, forbidden_constructor)
+            result, _ = _run_task8_preflight(client)
+        finally:
+            os.chdir(old_cwd)
+            for name, value in originals.items():
+                setattr(bot, name, value)
+        after = tuple(os.listdir(directory))
+
+    assert result
+    assert before == after == ()
+    assert all(method == "GET" and body is None and not auth
+               for method, _endpoint, _params, body, auth in client.calls)
+    assert not any(endpoint.startswith("/portfolio/events/orders")
+                   for _method, endpoint, *_rest in client.calls)
+    assert not any(endpoint.startswith("/portfolio/orders/")
+                   for _method, endpoint, *_rest in client.calls)
+    print("PASS --check never mutates/orders/discovers or creates artifacts")
+
+
+def test_preflight_counts_sports_without_assuming_pseudo_row():
+    filters = current_sports_filters()
+    del filters["filters_by_sports"]["All sports"]
+    filters["sport_ordering"] = ["Tennis"]
+    client = _Task8PreflightClient(filters_response=filters)
+
+    result, text = _run_task8_preflight(client)
+
+    assert result
+    assert "Sports filters OK: 1 canonical Sports" in text
+    print("PASS --check counts Sports explicitly without a pseudo-row assumption")
+
+
+def test_preflight_warns_when_games_metadata_is_unavailable():
+    no_games = current_sports_filters()
+    no_games["filters_by_sports"]["Tennis"]["competitions"][
+        "ATP Washington"]["scopes"] = ["Futures"]
+    scenarios = (
+        (_Task8PreflightClient(filters_response=no_games),
+         "no Games-capable Sport/competition is currently available"),
+        (_Task8PreflightClient(milestone_response={
+            "milestones": [], "cursor": ""}),
+         "no usable Sports milestone"),
+        (_Task8PreflightClient(series_response={
+            "series": [current_series("KXOTHER")]}),
+         "no resolvable official Sports Series"),
+    )
+    for client, warning in scenarios:
+        result, text = _run_task8_preflight(client)
+        assert result, text
+        assert f"[check] WARNING {warning}" in text
+    assert not any(call[1] == "/milestones" for call in scenarios[0][0].calls)
+    assert not any(call[1] == "/events" for call in scenarios[1][0].calls)
+    assert not any(call[1] == "/events" for call in scenarios[2][0].calls)
+    print("PASS unavailable Games metadata warns and skips only downstream sample")
+
+
+def test_preflight_rejects_sampled_sports_schema_drift():
+    clients = (
+        _Task8PreflightClient(filters_response={
+            "filters_by_sports": [], "sport_ordering": ["Tennis"]}),
+        _Task8PreflightClient(series_response={"series": "bad"}),
+        _Task8PreflightClient(milestone_response={
+            "milestones": [current_milestone()], "cursor": 7}),
+        _Task8PreflightClient(event_response={
+            "events": [current_event(category=7)], "cursor": ""}),
+    )
+    for client in clients:
+        result, text = _run_task8_preflight(client)
+        assert not result, text
+        assert "[check] FAIL Sports " in text
+        counts = {}
+        for _method, endpoint, _params, _body, _auth in client.calls:
+            counts[endpoint] = counts.get(endpoint, 0) + 1
+        assert all(count == 1 for count in counts.values()), counts
+    print("PASS sampled Sports schema/cursor drift fails bounded preflight")
+
+
+def test_preflight_public_checks_run_without_credentials():
+    client = _Task8PreflightClient()
+    result, text = _run_task8_preflight(client, authenticated=False)
+
+    assert not result
+    assert [call[1] for call in client.calls] == [
+        "/search/filters_by_sport", "/series", "/milestones", "/events"]
+    assert client.portfolio_calls == []
+    assert "Sports event page OK" in text
+    assert "FAIL no API key" in text
+    print("PASS public Sports preflight runs before missing-auth failure")
+
+
+def test_readme_documents_sports_commands_and_v6_break():
+    with open(os.path.join(os.path.dirname(__file__), "README.md"),
+              encoding="utf-8") as handle:
+        text = handle.read()
+
+    required = (
+        "python bot.py --list-sports",
+        "python bot.py --sports Tennis,Basketball",
+        "python bot.py --check",
+        "python analyze.py logs/ticks_v6_<YYYYMMDD>_<session-id>.csv",
+        "comma-separated", "case-insensitive", "API-canonicalized",
+        "only Games contracts", "local `[midnight, next midnight)`",
+        "best ten", "selected once at startup", "no rotation",
+        "Config.tickers", "mutually exclusive", "capped at ten",
+        "Market → Event → official Series → current-day Games Milestone",
+        "v6 rows", "shared-portfolio TEST", "demo/live remain disabled",
+    )
+    for phrase in required:
+        assert phrase in text, phrase
+    assert "ticks_v5" not in text
+    assert "title keyword" not in text.casefold()
+    assert "tennis-only" not in text.casefold()
+    print("PASS README documents Sports operation and the strict v6 break")
+
+
 def test_preflight_warns_but_accepts_valid_empty_portfolio_collections():
     from bot import preflight
 
-    class CheckClient:
-        def get_exchange_status(self):
-            return {"exchange_active": True, "trading_active": True}
-
-        def get_markets_sample(self, **kwargs):
-            return [parse_market(current_market())]
-
-        def get_balance(self):
-            return {"balance": 0}
-
-        def get_open_orders(self):
-            return []
-
-        def get_fills(self):
-            return []
-
-        def get_positions(self):
-            return []
+    class CheckClient(_Task8PreflightClient):
+        pass
 
     unauthenticated = Config()
     unauthenticated.api_key_id = ""
@@ -2851,28 +3894,11 @@ def test_discovery_and_preflight_report_unsupported_market_counts():
     import io
     from bot import preflight
     from kalshi_client import format_market_skips
-    from market_data import PriceFeed
 
     assert format_market_skips({}) == \
         "unsupported skipped: total=0 types=none"
-
-    class DiscoveryClient:
-        last_market_skips = {"mve": 2, "scalar": 1}
-
-        def __init__(self):
-            self.params = None
-
-        def get_markets(self, **params):
-            self.params = params
-            return []
-
-    discovery_client = DiscoveryClient()
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        assert PriceFeed(Config(), discovery_client).discover_tickers() == []
-    assert discovery_client.params["mve_filter"] == "exclude"
-    assert "unsupported skipped: total=3 types=mve=2, scalar=1" \
-        in output.getvalue()
+    assert format_market_skips({"mve": 2, "scalar": 1}) == \
+        "unsupported skipped: total=3 types=mve=2, scalar=1"
 
     class CheckClient:
         last_market_skips = {"scalar": 2}
@@ -2895,47 +3921,187 @@ def test_discovery_and_preflight_report_unsupported_market_counts():
     text = output.getvalue()
     assert "unsupported skipped: total=2 types=scalar=2" in text
     assert "no supported markets returned" in text
-    print("PASS discovery/--check loudly report unsupported type counts")
+    print("PASS formatter/--check loudly report unsupported type counts")
 
 
-def test_discovery_uses_maximum_page_and_caps_monitored_markets():
-    from market_data import PriceFeed
+def test_discovery_stops_before_generic_pagination_cap_when_first_page_fills_cap():
+    """A useful first page must not force discovery through 20 more pages."""
+    from kalshi_client import KalshiClient
 
-    class DiscoveryClient:
-        last_market_skips = {}
+    class Response:
+        text = "fake response"
 
+        def __init__(self, payload):
+            self.payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def __init__(self, pages):
+            self.pages = list(pages)
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return Response(self.pages.pop(0))
+
+    pages = []
+    for index in range(21):
+        row = (current_market(ticker="ATP-FIRST", event_ticker="EVENT-1",
+                              title="ATP tennis match")
+               if index == 0 else
+               current_market(ticker=f"OTHER-{index}",
+                              title="unrelated listing"))
+        pages.append({"markets": [row], "cursor": f"cursor-{index}"})
+    client = KalshiClient(Config(max_monitored_markets=1))
+    client.session = Session(pages)
+    selected, metadata = client.scan_markets(
+        lambda market: market["ticker"].startswith("ATP"), 1,
+        status="open", limit=1000, mve_filter="exclude")
+    assert [market["ticker"] for market in selected] == ["ATP-FIRST"]
+    assert len(client.session.calls) == 1
+    assert metadata == {
+        "pages": 1, "rows": 1, "selected": 1, "truncated": True,
+        "complete": False, "stop_reason": "selected_cap"}
+    print("PASS client scan stops after its first qualifying page")
+
+
+def test_discovery_filters_page_by_page_and_aggregates_skip_counts():
+    from kalshi_client import KalshiClient
+
+    class Response:
+        text = "fake response"
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    class Session:
         def __init__(self):
-            self.params = None
-
-        def get_markets(self, **params):
-            self.params = params
-            return [
-                parse_market(current_market(
-                    ticker=f"ATP-{index}", event_ticker=f"EVENT-{index}",
-                    title=f"ATP tennis match {index}"))
-                for index in range(5)
+            self.pages = [
+                {"markets": [
+                    current_market(ticker="OTHER", title="unrelated"),
+                    current_market(ticker="SCALAR", market_type="scalar"),
+                ], "cursor": "page-2"},
+                {"markets": [
+                    current_market(ticker="ATP-ONE", event_ticker="EVENT-1",
+                                   title="ATP tennis one"),
+                    current_market(ticker="MVE",
+                                   mve_collection_ticker="MVE-COLLECTION"),
+                ], "cursor": "page-3"},
+                {"markets": [
+                    current_market(ticker="ATP-TWO", event_ticker="EVENT-2",
+                                   title="ATP tennis two"),
+                    current_market(ticker="ATP-THREE", event_ticker="EVENT-3",
+                                   title="ATP tennis three"),
+                ], "cursor": "more-pages"},
             ]
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return Response(self.pages.pop(0))
 
     cfg = Config(max_monitored_markets=3)
-    client = DiscoveryClient()
-    feed = PriceFeed(cfg, client)
-    assert feed.discover_tickers() == ["ATP-0", "ATP-1", "ATP-2"]
-    assert client.params == {
-        "status": "open", "limit": 1000, "mve_filter": "exclude"}
-    assert feed.group_ids == {
-        "ATP-0": "EVENT-0", "ATP-1": "EVENT-1", "ATP-2": "EVENT-2"}
-    print("PASS discovery uses 1000-row pages and caps monitored markets")
+    client = KalshiClient(cfg)
+    client.session = Session()
+    selected, metadata = client.scan_markets(
+        lambda market: market["ticker"].startswith("ATP"), 3,
+        status="open", limit=1000, mve_filter="exclude")
+    assert [market["ticker"] for market in selected] == [
+        "ATP-ONE", "ATP-TWO", "ATP-THREE"]
+    assert len(client.session.calls) == 3
+    assert client.last_market_skips == {"mve": 1, "scalar": 1}
+    assert metadata == {
+        "pages": 3, "rows": 6, "selected": 3, "truncated": True,
+        "complete": False, "stop_reason": "selected_cap"}
+    assert client.last_market_scan == metadata
+    print("PASS client scan filters each page and aggregates unsupported skips")
 
 
-def test_explicit_tickers_respect_monitoring_cap():
-    from market_data import PriceFeed
+def test_discovery_page_cap_returns_explicit_truncated_partial_scan():
+    from kalshi_client import KalshiClient
 
-    cfg = Config(
-        tickers=["T1", "T2", "T3", "T4"],
-        max_monitored_markets=3)
-    assert PriceFeed(cfg, client=None).discover_tickers() == [
-        "T1", "T2", "T3"]
-    print("PASS explicit ticker lists respect the monitoring cap")
+    class Response:
+        text = "fake response"
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, method, url, **kwargs):
+            page = self.calls
+            self.calls += 1
+            return Response({
+                "markets": [current_market(ticker=f"OTHER-{page}",
+                                            title="unrelated")],
+                "cursor": f"cursor-{page}",
+            })
+
+    client = KalshiClient(Config())
+    client.session = Session()
+    selected, metadata = client.scan_markets(
+        lambda market: market["ticker"].startswith("ATP"), 3,
+        status="open", limit=1000, mve_filter="exclude")
+    assert selected == []
+    assert metadata == {
+        "pages": 20, "rows": 20, "selected": 0, "truncated": True,
+        "complete": False, "stop_reason": "page_cap"}
+    assert client.last_market_scan == metadata
+    assert client.session.calls == 20
+    print("PASS discovery page cap returns a loud truncated partial scan")
+
+
+def test_discovery_rejects_malformed_and_repeated_cursors():
+    from kalshi_client import KalshiClient
+
+    class Client(KalshiClient):
+        def __init__(self, responses):
+            self.cfg = Config()
+            self.responses = list(responses)
+            self.calls = 0
+            self.last_market_skips = {}
+
+        def _request(self, method, endpoint, params=None, body=None,
+                     auth=False):
+            response = self.responses[self.calls]
+            self.calls += 1
+            return response
+
+    bad_cases = [
+        [{"markets": [current_market(ticker="ATP")]}],
+        [{"markets": [current_market(ticker="ATP")], "cursor": 7}],
+        [{"markets": [current_market(ticker="OTHER")], "cursor": "same"},
+         {"markets": [current_market(ticker="OTHER-2")], "cursor": "same"}],
+    ]
+    for responses in bad_cases:
+        try:
+            Client(responses).scan_markets(lambda market: False, 1)
+            assert False, responses
+        except SchemaError:
+            pass
+    print("PASS discovery rejects malformed and repeated cursors")
 
 
 def test_response_format_errors_include_raw_values():
@@ -2994,13 +4160,13 @@ def test_replay_reports_halt_and_resets_daily_risk_at_utc_midnight():
             writer.writerow(research_row(
                 cfg=cfg, session="MIDNIGHT", starting_pnl=100,
                 starting_day="2026-01-01", day=day, ts=ts,
-                event_id="EVENT-T", mid=mid, bid=bid, ask=ask,
+                event_ticker="EVENT-T", mid=mid, bid=bid, ask=ask,
                 bid_qty=bid_qty, ask_qty=ask_qty))
         terminal_ts = rows[-1][0] + 1
         writer.writerow(research_row(
             cfg=cfg, session="MIDNIGHT", starting_pnl=100,
             starting_day="2026-01-01", day="2026-01-02", ts=terminal_ts,
-            event_id="", ticker="", event="session_end",
+            event_ticker="", ticker="", event="session_end",
             detail="operator interrupt", mid="", bid="", ask="",
             bid_qty="", ask_qty=""))
     result = replay(path, cfg=cfg)
@@ -3042,9 +4208,12 @@ def test_malformed_executable_books_fail_closed():
     with open(missing_event, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
-        writer.writerow(research_row(session="NOEVENT", event_id=""))
-    result = replay(missing_event)
-    assert result["rows_processed"] == 0 and not result["evaluable"]
+        writer.writerow(research_row(session="NOEVENT", event_ticker=""))
+    try:
+        replay(missing_event)
+        assert False
+    except ValueError as error:
+        assert "event_ticker" in str(error)
     print("PASS malformed/nonfinite/crossed/ungrouped books fail closed")
 
 
@@ -3061,7 +4230,7 @@ def test_replay_honors_logged_same_day_starting_loss():
             cfg=cfg, session="RESTART", starting_pnl=-31))
         writer.writerow(research_row(
             cfg=cfg, session="RESTART", starting_pnl=-31, ts=2,
-            event_id="", ticker="", event="session_end",
+            event_ticker="", ticker="", event="session_end",
             detail="operator interrupt", mid="", bid="", ask="",
             bid_qty="", ask_qty=""))
     result = replay(path, cfg=cfg)
@@ -3081,13 +4250,14 @@ def test_replay_uses_log_creation_day_when_first_quote_is_after_midnight():
     after = datetime(2026, 1, 2, 0, 0, 1,
                      tzinfo=timezone.utc).timestamp()
     now = [before]
-    cfg = Config(max_daily_loss_usd=30)
-    log = ResearchLog(tempfile.mkdtemp(), clock=lambda: now[0],
-                      session_id="DELAYED-FIRST", starting_pnl=-31,
-                      config=cfg)
+    cfg = Config(max_daily_loss_usd=30, sports=["Tennis"])
+    log = ResearchLog(
+        tempfile.mkdtemp(), clock=lambda: now[0],
+        session_id="DELAYED-FIRST", starting_pnl=-31, config=cfg,
+        provenance_by_ticker={"T": research_provenance()})
     now[0] = after
     log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-             Decimal(10), Decimal(10), group_id="E",
+             Decimal(10), Decimal(10),
              close_ts=4070908800.0, can_close_early=False)
     now[0] = after + 1
     log.end(clean=True, reason="operator interrupt")
@@ -3102,17 +4272,20 @@ def test_replay_requires_durable_clean_session_terminal():
     from replay import replay
 
     now = [1.0]
-    log = ResearchLog(tempfile.mkdtemp(), clock=lambda: now[0],
-                      session_id="TERMINAL", config=Config())
+    cfg = Config(sports=["Tennis"])
+    log = ResearchLog(
+        tempfile.mkdtemp(), clock=lambda: now[0],
+        session_id="TERMINAL", config=cfg,
+        provenance_by_ticker={"T": research_provenance()})
     log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-             Decimal(10), Decimal(10), group_id="E",
+             Decimal(10), Decimal(10),
              close_ts=4070908800.0, can_close_early=False)
-    incomplete = replay(log.tick_path)
+    incomplete = replay(log.tick_path, cfg=cfg)
     assert not incomplete["evaluable"]
     assert incomplete["terminal_status"] == "missing"
     now[0] = 2.0
     log.end(clean=True, reason="operator interrupt")
-    complete = replay(log.tick_path)
+    complete = replay(log.tick_path, cfg=cfg)
     assert complete["terminal_status"] == "clean"
     assert complete["evaluable"]
     print("PASS replay requires one durable clean terminal record")
@@ -3122,15 +4295,18 @@ def test_replay_rejects_nonmonotonic_observation_order():
     from research_log import ResearchLog
     from replay import replay
 
-    log = ResearchLog(tempfile.mkdtemp(), clock=lambda: 0.0,
-                      session_id="ORDER", config=Config())
+    cfg = Config(sports=["Tennis"])
+    log = ResearchLog(
+        tempfile.mkdtemp(), clock=lambda: 0.0,
+        session_id="ORDER", config=cfg,
+        provenance_by_ticker={"T": research_provenance()})
     for ts in (2.0, 1.0):
         log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-                 Decimal(10), Decimal(10), ts=ts, group_id="E",
+                 Decimal(10), Decimal(10), ts=ts,
                  close_ts=4070908800.0, can_close_early=False)
     log.end(clean=True, reason="operator interrupt", ts=3.0)
     try:
-        replay(log.tick_path)
+        replay(log.tick_path, cfg=cfg)
         assert False
     except ValueError as error:
         assert "non-monotonic" in str(error)
@@ -3141,16 +4317,19 @@ def test_replay_rejects_config_or_code_provenance_mismatch():
     from research_log import ResearchLog
     from replay import replay
 
-    original = Config()
-    log = ResearchLog(tempfile.mkdtemp(), clock=lambda: 1.0,
-                      session_id="PROVENANCE", config=original)
+    original = Config(sports=["Tennis"])
+    log = ResearchLog(
+        tempfile.mkdtemp(), clock=lambda: 1.0,
+        session_id="PROVENANCE", config=original,
+        provenance_by_ticker={"T": research_provenance()})
     log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-             Decimal(10), Decimal(10), group_id="E",
+             Decimal(10), Decimal(10),
              close_ts=4070908800.0, can_close_early=False)
     log.end(clean=True, reason="operator interrupt", ts=2.0)
-    for changed in (Config(dip_threshold=8), Config(poll_interval=2.0),
-                    Config(market_keywords=["basketball"]),
-                    Config(max_monitored_markets=9)):
+    for changed in (
+            Config(dip_threshold=8), Config(poll_interval=2.0),
+            Config(tickers=["OTHER"]),
+            Config(max_monitored_markets=9)):
         try:
             replay(log.tick_path, cfg=changed)
             assert False
@@ -3244,6 +4423,7 @@ def test_close_horizon_and_live_requote_block_unsafe_entries():
 
     cfg = Config(max_hold_seconds=300, close_buffer_seconds=60)
     feed = PriceFeed(cfg, MarketClient(), clock=lambda: 100.0)
+    feed.install_discovery(_task4_discovery(_task4_contract()))
     feed.subscribe(["T"])
     mid, bid, ask, observed_at = feed.get_quote("T")
     for ts in range(80, 100):
@@ -3352,7 +4532,7 @@ def test_replay_enforces_logged_market_lifecycle():
                 cfg=cfg, session=name, ts=21, mid=52, bid=51, ask=53,
                 close_ts=close_ts, can_close_early=early))
             writer.writerow(research_row(
-                cfg=cfg, session=name, ts=22, event_id="", ticker="",
+                cfg=cfg, session=name, ts=22, event_ticker="", ticker="",
                 event="session_end", detail="operator interrupt",
                 mid="", bid="", ask="", bid_qty="", ask_qty=""))
         result = replay(path, cfg=cfg)
@@ -3378,13 +4558,2633 @@ def test_termination_signals_route_through_interrupt():
     print("PASS SIGTERM/SIGHUP route through safe-shutdown interrupt path")
 
 
+def test_sport_selection_is_case_insensitive_and_canonical():
+    """API spelling/order, not operator casing/order, is the identity."""
+    from sports_discovery import canonicalize_sports, list_supported_sports
+
+    filters = {
+        "sport_ordering": ("All sports", "Tennis", "Cricket"),
+        "sports": {
+            "All sports": {"scopes": frozenset(("Games",)),
+                           "competitions": {}},
+            "Tennis": {"scopes": frozenset(("Games",)),
+                       "competitions": {"ATP": frozenset(("Games",))}},
+            "Cricket": {"scopes": frozenset(("Games",)),
+                        "competitions": {"IPL": frozenset(("Games",))}},
+        },
+    }
+
+    class Client:
+        def get_sports_filters(self):
+            return filters
+
+    assert list_supported_sports(Client()) == ("All sports", "Tennis", "Cricket")
+    assert canonicalize_sports(("cricket", "TENNIS"), filters) == (
+        "Tennis", "Cricket")
+    print("PASS Sports selection is API-canonical and case-insensitive")
+
+
+def test_all_sports_and_unknown_sports_are_rejected_with_choices():
+    """Pseudo and unknown selections must show the live canonical choices."""
+    from sports_discovery import canonicalize_sports
+
+    filters = {
+        "sport_ordering": ("All sports", "Tennis"),
+        "sports": {
+            "All sports": {"scopes": frozenset(("Games",)),
+                           "competitions": {}},
+            "Tennis": {"scopes": frozenset(("Games",)),
+                       "competitions": {"ATP": frozenset(("Games",))}},
+        },
+    }
+    for requested in (("All sports",), ("Soccer",)):
+        try:
+            canonicalize_sports(requested, filters)
+            assert False, requested
+        except ValueError as error:
+            assert "All sports, Tennis" in str(error)
+    print("PASS pseudo/unknown Sports include canonical choices in errors")
+
+
+def test_selected_sport_requires_games_scope_and_competition():
+    """A Sport needs Games both at its own scope and at a competition."""
+    from sports_discovery import canonicalize_sports
+
+    for sport in (
+            {"scopes": frozenset(("Futures",)),
+             "competitions": {"ATP": frozenset(("Games",))}},
+            {"scopes": frozenset(("Games",)),
+             "competitions": {"ATP": frozenset(("Futures",))}}):
+        filters = {"sport_ordering": ("Tennis",),
+                   "sports": {"Tennis": sport}}
+        try:
+            canonicalize_sports(("tennis",), filters)
+            assert False, sport
+        except ValueError as error:
+            assert "Games" in str(error)
+    invalid_details = {"sport_ordering": ("All sports", "Tennis"),
+                       "sports": {"All sports": {"scopes": frozenset(("Games",)),
+                                                 "competitions": {}},
+                                  "Tennis": []}}
+    try:
+        canonicalize_sports(("Tennis",), invalid_details)
+        assert False
+    except ValueError as error:
+        assert "choices: All sports, Tennis" in str(error)
+    print("PASS selected Sports require Games scope and competition")
+
+
+def test_local_day_window_is_half_open_and_dst_safe():
+    """A local calendar day is not always 86,400 seconds in UTC."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from sports_discovery import local_day_window
+
+    zone = ZoneInfo("America/Los_Angeles")
+    spring = local_day_window(datetime(2026, 3, 8, 12, tzinfo=zone))
+    assert spring.local_timezone == "America/Los_Angeles"
+    assert spring.session_start_local == "2026-03-08T00:00:00-08:00"
+    assert spring.session_end_local == "2026-03-09T00:00:00-07:00"
+    assert spring.session_end_utc - spring.session_start_utc == 23 * 3600
+    fall = local_day_window(datetime(2026, 11, 1, 12, tzinfo=zone))
+    assert fall.session_end_utc - fall.session_start_utc == 25 * 3600
+    print("PASS local day window remains half-open through DST changes")
+
+
+def test_default_local_day_window_uses_system_dst_rules():
+    """The no-argument runtime path must not freeze today's UTC offset."""
+    import os
+    import time as system_time
+    import sports_discovery
+
+    real_datetime = sports_discovery.datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2026, 3, 8, 12)
+            return value if tz is None else value.replace(tzinfo=tz)
+
+    old_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/Los_Angeles"
+        system_time.tzset()
+        sports_discovery.datetime = FrozenDateTime
+        window = sports_discovery.local_day_window()
+    finally:
+        sports_discovery.datetime = real_datetime
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        system_time.tzset()
+
+    assert window.session_start_local == "2026-03-08T00:00:00-08:00"
+    assert window.session_end_local == "2026-03-09T00:00:00-07:00"
+    assert window.session_end_utc - window.session_start_utc == 23 * 3600
+    print("PASS default local-day path applies system DST rules per midnight")
+
+
+def test_contract_ranking_uses_all_five_tie_breakers():
+    """Selection must be deterministic after every executable-book tie."""
+    from sports_discovery import (ContractProvenance, SelectedContract,
+                                  rank_contracts)
+
+    def contract(ticker, *, bid=10, ask=20, bid_size=10, ask_size=10,
+                 start=10):
+        return SelectedContract(
+            ticker=ticker, title=ticker, game_title="game",
+            bid=Decimal(bid), ask=Decimal(ask),
+            bid_size=Decimal(bid_size), ask_size=Decimal(ask_size),
+            provenance=ContractProvenance(
+                sport="Tennis", league=None, series_ticker="KXATP",
+                milestone_id="m-" + ticker, event_ticker="e-" + ticker,
+                scheduled_start_ts=start))
+
+    rank = lambda rows: tuple(item.ticker for item in rank_contracts(
+        rows, Decimal(10)))
+    assert rank((contract("cap-low", bid_size=9, ask_size=50),
+                 contract("cap-high", bid_size=10, ask_size=10,
+                          ask=99))) == ("cap-high", "cap-low")
+    assert rank((contract("wide", ask=21), contract("tight", ask=20))) == (
+        "tight", "wide")
+    assert rank((contract("shallow", bid_size=10, ask_size=10),
+                 contract("deep", bid_size=20, ask_size=20))) == (
+        "deep", "shallow")
+    assert rank((contract("late", start=11), contract("early", start=10))) == (
+        "early", "late")
+    assert rank((contract("B"), contract("A"))) == ("A", "B")
+    print("PASS contract ranking uses all five deterministic tie-breakers")
+
+
+def test_series_resolution_uses_unique_longest_official_prefix():
+    """Only the official delimiter prefix, never event text, resolves a Series."""
+    from sports_discovery import (build_series_index, resolve_series)
+
+    stats = {}
+    index = build_series_index((
+        {"series_ticker": "KXGAME", "category": "Sports",
+         "tags": ("Tennis",)},
+        {"series_ticker": "KXGAME-PLAY", "category": "Sports",
+         "tags": ("Tennis",)},
+        {"series_ticker": "KXOTHER", "category": "Weather", "tags": ()},
+    ), ("Tennis",), stats)
+    assert resolve_series("KXGAME-PLAY-26JUL", index.official_series_tickers) \
+        == "KXGAME-PLAY"
+    assert resolve_series("KXGAMEPLAY-26JUL", index.official_series_tickers) \
+        is None
+    assert stats["skip_series_off_category"] == 1
+    assert resolve_series("OTHER-1", ("KXGAME", "KXGAME")) is None
+    try:
+        resolve_series("KXGAME-26JUL", ("KXGAME", "KXGAME"))
+        assert False
+    except ValueError:
+        pass
+    print("PASS Series resolution uses only unique longest official prefixes")
+
+
+def test_domain_values_reject_invalid_identity_numeric_and_duplicates():
+    """Malformed immutable provenance cannot enter a discovery result."""
+    from sports_discovery import (ContractProvenance, DiscoveryResult,
+                                  SelectedContract)
+
+    try:
+        ContractProvenance("", None, "KX", "m", "e", 1)
+        assert False
+    except ValueError:
+        pass
+    provenance = ContractProvenance("Tennis", None, "KX", "m", "e", 1)
+    try:
+        SelectedContract("KX-1", "yes", "game", Decimal("NaN"),
+                         Decimal(20), Decimal(1), Decimal(1), provenance)
+        assert False
+    except ValueError:
+        pass
+    contract = SelectedContract("KX-1", "yes", "game", Decimal(10),
+                                Decimal(20), Decimal(1), Decimal(1), provenance)
+    try:
+        DiscoveryResult((contract, contract), ("Tennis",), "UTC",
+                        "2026-01-01T00:00:00+00:00",
+                        "2026-01-02T00:00:00+00:00", 0, 86400, {})
+        assert False
+    except ValueError:
+        pass
+    print("PASS invalid domain identities, values, and duplicate tickers fail")
+
+
+def _dynamic_discovery_client(*, sports=("Tennis",), competitions=None,
+                              series=(), milestones=None, events=None):
+    """Task 2-normalized public discovery double; no raw HTTP payloads."""
+    competitions = competitions or {
+        sport: {sport + " League": frozenset(("Games",))}
+        for sport in sports
+    }
+    filters = {
+        "sport_ordering": ("All sports",) + tuple(sports),
+        "sports": {"All sports": {"scopes": frozenset(("Games",)),
+                                  "competitions": {}}},
+    }
+    for sport in sports:
+        filters["sports"][sport] = {
+            "scopes": frozenset(("Games",)),
+            "competitions": competitions[sport],
+        }
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get_sports_filters(self):
+            self.calls.append(("filters",))
+            return filters
+
+        def get_sports_series(self):
+            self.calls.append(("series",))
+            return tuple(series)
+
+        def get_sports_milestones(self, *, competition, minimum_start_date):
+            self.calls.append(("milestones", competition, minimum_start_date))
+            return tuple((milestones or {}).get(competition, ())), {
+                "pages": 1, "rows": len((milestones or {}).get(competition, ())),
+                "raw_rows": len((milestones or {}).get(competition, ())),
+                "market_skips": {},
+            }
+
+        def get_open_events(self, *, series_ticker):
+            self.calls.append(("events", series_ticker))
+            rows = tuple((events or {}).get(series_ticker, ()))
+            market_skips = {}
+            for row in rows:
+                for market_type, count in row["market_skips"].items():
+                    market_skips[market_type] = market_skips.get(market_type, 0) + count
+            return rows, {"pages": 1, "rows": len(rows), "raw_rows": len(rows),
+                          "market_skips": market_skips}
+
+    return Client()
+
+
+def _normalized_game(*, milestone_id, event_ticker, start=1785088800.0,
+                     league=None, main=True, primary=None, related=None,
+                     title="Game"):
+    return {
+        "milestone_id": milestone_id, "category": "Sports", "type": "game",
+        "start_ts": start, "title": title, "league": league,
+        "main_game_event_ticker": event_ticker if main else None,
+        "primary_event_tickers": tuple(primary if primary is not None
+                                         else (event_ticker,)),
+        "related_event_tickers": tuple(
+            related if related is not None else (event_ticker,)),
+    }
+
+
+def _normalized_event(*, event_ticker, series_ticker, markets=(), title="Game",
+                      market_skips=None):
+    return {"event_ticker": event_ticker, "series_ticker": series_ticker,
+            "category": "Sports", "title": title, "markets": tuple(markets),
+            "market_skips": dict(market_skips or {})}
+
+
+def _normalized_market(*, ticker, event_ticker, bid=Decimal(50), ask=Decimal(52),
+                       bid_size=Decimal(10), ask_size=Decimal(10), status="active",
+                       title="Yes", close_ts=1893456000.0,
+                       can_close_early=False):
+    return {"ticker": ticker, "event_ticker": event_ticker, "title": title,
+            "yes_sub_title": "Yes", "no_sub_title": "No",
+            "market_type": "binary", "status": status,
+            "notional_value": Decimal(1), "close_ts": close_ts,
+            "can_close_early": can_close_early,
+            "yes_bid": bid, "yes_ask": ask, "yes_bid_size": bid_size,
+            "yes_ask_size": ask_size}
+
+
+def _discover_cfg(*, sports=(), tickers=(), max_markets=10, max_spread=3):
+    return Config(sports=list(sports), tickers=list(tickers),
+                  max_monitored_markets=max_markets, max_spread=max_spread,
+                  state_root=tempfile.mkdtemp())
+
+
+def test_api_only_new_sport_works_without_source_change():
+    """Removing Basketball's API metadata must make dynamic discovery fail."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXBASKET-26JUL26-GAME"
+    client = _dynamic_discovery_client(
+        sports=("Basketball",),
+        series=({"series_ticker": "KXBASKET", "category": "Sports",
+                 "tags": ("Basketball",)},),
+        milestones={"Basketball League": (_normalized_game(
+            milestone_id="basketball-1", event_ticker=event),)},
+        events={"KXBASKET": (_normalized_event(
+            event_ticker=event, series_ticker="KXBASKET", markets=(
+                _normalized_market(ticker=event + "-M", event_ticker=event),)),)},)
+    result = discover_game_contracts(
+        _discover_cfg(sports=("basketball",)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    assert result.selected_sports == ("Basketball",)
+    assert result.tickers == (event + "-M",)
+    print("PASS API-only Sports metadata supports a newly selected Sport")
+
+
+def test_wimbledon_soccer_is_not_classified_as_tennis():
+    """Changing the Series tag, not the Wimbledon title, changes inclusion."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXCLUBF-26JUL26-WIMB"
+    series = ({"series_ticker": "KXCLUBF", "category": "Sports",
+               "tags": ("Soccer",)},)
+    milestone = _normalized_game(milestone_id="soccer-wimbledon",
+                                 event_ticker=event,
+                                 title="AFC Wimbledon vs Team B")
+    # The Tennis query sees the same valid row first but its Series tag says
+    # Soccer. Identity dedupe must not suppress its later Soccer query.
+    games = {"Tennis League": (milestone,), "Soccer League": (milestone,)}
+    events = {"KXCLUBF": (_normalized_event(
+        event_ticker=event, series_ticker="KXCLUBF", title="AFC Wimbledon vs Team B",
+        markets=(_normalized_market(ticker=event + "-M", event_ticker=event),)),)}
+    now = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+    tennis = discover_game_contracts(_discover_cfg(sports=("Tennis",)),
+        _dynamic_discovery_client(sports=("Tennis", "Soccer"), series=series,
+            milestones=games, events=events), now=now)
+    soccer = discover_game_contracts(_discover_cfg(sports=("Soccer",)),
+        _dynamic_discovery_client(sports=("Tennis", "Soccer"), series=series,
+            milestones=games, events=events), now=now)
+    combined = discover_game_contracts(_discover_cfg(sports=("Tennis", "Soccer")),
+        _dynamic_discovery_client(sports=("Tennis", "Soccer"), series=series,
+            milestones=games, events=events), now=now)
+    assert tennis.tickers == ()
+    assert tennis.stats["skip_competition_sport_mismatch"] == 1
+    assert "skip_event_unmapped_sport" not in tennis.stats
+    assert soccer.tickers == (event + "-M",)
+    assert combined.tickers == (event + "-M",)
+    print("PASS Wimbledon text does not classify Soccer as Tennis")
+
+
+def test_series_mapping_uses_every_canonical_api_sport():
+    """An unselected Sport tag must still make a Series assignment ambiguous."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXMULTI-26JUL26-GAME"
+    client = _dynamic_discovery_client(
+        sports=("Tennis", "Soccer"),
+        series=({"series_ticker": "KXMULTI", "category": "Sports",
+                 "tags": ("Tennis", "Soccer")},),
+        milestones={"Tennis League": (_normalized_game(
+            milestone_id="multi-tag", event_ticker=event),)},
+        events={"KXMULTI": (_normalized_event(
+            event_ticker=event, series_ticker="KXMULTI",
+            markets=(_normalized_market(
+                ticker=event + "-M", event_ticker=event),)),)})
+    result = discover_game_contracts(
+        _discover_cfg(sports=("Tennis",)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    assert result.tickers == ()
+    assert result.stats["skip_series_ambiguous_sport"] == 1
+    assert result.stats["skip_event_unmapped_sport"] == 1
+    print("PASS Series mapping uses the full canonical API Sport set")
+
+
+def test_main_game_event_is_preferred_over_props():
+    """Replacing main-game selection with primary-list selection is a bug."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    game, prop = "KXATP-26JUL26-GAME", "KXATP-26JUL26-TOTAL"
+    milestone = _normalized_game(milestone_id="main-wins", event_ticker=game,
+        primary=(prop, game))
+    client = _dynamic_discovery_client(series=({"series_ticker": "KXATP",
+        "category": "Sports", "tags": ("Tennis",)},),
+        milestones={"Tennis League": (milestone,)}, events={"KXATP": (
+            _normalized_event(event_ticker=game, series_ticker="KXATP", markets=(
+                _normalized_market(ticker=game + "-M", event_ticker=game),)),
+            _normalized_event(event_ticker=prop, series_ticker="KXATP", markets=(
+                _normalized_market(ticker=prop + "-M", event_ticker=prop),)),)})
+    result = discover_game_contracts(_discover_cfg(sports=("Tennis",)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    assert result.tickers == (game + "-M",)
+    print("PASS main Games event wins over listed prop events")
+
+
+def test_sole_primary_game_fallback_and_ambiguous_skip():
+    """A sole primary is usable; a multi-primary milestone must be skipped."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    good, other = "KXATP-26JUL26-GOOD", "KXATP-26JUL26-OTHER"
+    client = _dynamic_discovery_client(series=({"series_ticker": "KXATP",
+        "category": "Sports", "tags": ("Tennis",)},),
+        milestones={"Tennis League": (
+            _normalized_game(milestone_id="fallback", event_ticker=good,
+                             main=False, primary=(good,)),
+            _normalized_game(milestone_id="ambiguous", event_ticker=other,
+                             main=False, primary=(good, other)),)},
+        events={"KXATP": (_normalized_event(event_ticker=good,
+            series_ticker="KXATP", markets=(
+                _normalized_market(ticker=good + "-M", event_ticker=good),)),)})
+    result = discover_game_contracts(_discover_cfg(sports=("Tennis",)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    assert result.tickers == (good + "-M",)
+    assert result.stats["skip_games_ambiguous"] == 1
+    print("PASS sole primary Games fallback skips ambiguous primary lists")
+
+
+def test_empty_primary_list_uses_main_or_skips_as_ambiguous():
+    """Zero primary Events are valid metadata, not a schema failure."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    main_event = "KXATP-26JUL26-MAIN"
+    ambiguous_event = "KXATP-26JUL26-AMBIGUOUS"
+    client = _dynamic_discovery_client(
+        series=({"series_ticker": "KXATP", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        milestones={"Tennis League": (
+            _normalized_game(
+                milestone_id="main-empty-primary",
+                event_ticker=main_event, primary=(), related=()),
+            _normalized_game(
+                milestone_id="no-main-empty-primary",
+                event_ticker=ambiguous_event, main=False, primary=(),
+                related=()),
+        )},
+        events={"KXATP": (_normalized_event(
+            event_ticker=main_event, series_ticker="KXATP",
+            markets=(_normalized_market(
+                ticker=main_event + "-M", event_ticker=main_event),)),)})
+
+    result = discover_game_contracts(
+        _discover_cfg(sports=("Tennis",)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+
+    assert result.tickers == (main_event + "-M",)
+    assert result.stats["skip_games_ambiguous"] == 1
+    print("PASS empty primary list uses main Event or skips as ambiguous")
+
+
+def test_duplicate_metadata_must_be_identical():
+    """Conflicting duplicates must abort instead of silently selecting either."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    first = _normalized_game(milestone_id="same", event_ticker=event,
+                             title="First game")
+    second = dict(first, title="Conflicting game")
+    client = _dynamic_discovery_client(
+        competitions={"Tennis": {"A": frozenset(("Games",)),
+                                  "B": frozenset(("Games",))}},
+        series=({"series_ticker": "KXATP", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        milestones={"A": (first,), "B": (second,)})
+    try:
+        discover_game_contracts(_discover_cfg(sports=("Tennis",)), client,
+            now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+        assert False
+    except ValueError as error:
+        assert "duplicate milestone" in str(error)
+    print("PASS conflicting duplicate milestone metadata fails discovery")
+
+
+def test_identical_cross_competition_milestone_without_league_dedupes():
+    """Competition query names must not become invented league provenance."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    milestone = _normalized_game(
+        milestone_id="shared", event_ticker=event, league=None)
+    client = _dynamic_discovery_client(
+        competitions={"Tennis": {
+            "Competition A": frozenset(("Games",)),
+            "Competition B": frozenset(("Games",)),
+        }},
+        series=({"series_ticker": "KXATP", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        milestones={
+            "Competition A": (milestone,),
+            "Competition B": (milestone,),
+        },
+        events={"KXATP": (_normalized_event(
+            event_ticker=event, series_ticker="KXATP",
+            markets=(_normalized_market(
+                ticker=event + "-M", event_ticker=event),)),)})
+
+    result = discover_game_contracts(
+        _discover_cfg(sports=("Tennis",)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+
+    assert result.tickers == (event + "-M",)
+    assert result.contracts[0].provenance.league is None
+    print("PASS identical cross-competition milestone dedupes without league")
+
+
+def test_incomplete_inventory_prevents_ranking():
+    """An event-inventory error must propagate before candidates are ranked."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    client = _dynamic_discovery_client(series=({"series_ticker": "KXATP",
+        "category": "Sports", "tags": ("Tennis",)},), milestones={
+            "Tennis League": (_normalized_game(milestone_id="one",
+                event_ticker=event),)})
+    def incomplete(*, series_ticker):
+        raise ValueError("events inventory cursor repeated")
+    client.get_open_events = incomplete
+    try:
+        discover_game_contracts(_discover_cfg(sports=("Tennis",)), client,
+            now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+        assert False
+    except ValueError as error:
+        assert "cursor repeated" in str(error)
+    print("PASS incomplete events inventory prevents ranking")
+
+
+def test_best_ten_are_global_across_selected_sports():
+    """Per-Sport caps would incorrectly retain the shallow Tennis contract."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    tennis_event = "KXTEN-26JUL26-GAME"
+    basketball_events = tuple("KXBASKET-26JUL26-%02d" % index
+                              for index in range(10))
+    series = ({"series_ticker": "KXTEN", "category": "Sports", "tags": ("Tennis",)},
+              {"series_ticker": "KXBASKET", "category": "Sports", "tags": ("Basketball",)})
+    milestones = {"Tennis League": (_normalized_game(milestone_id="tennis",
+                  event_ticker=tennis_event),), "Basketball League": tuple(
+        _normalized_game(milestone_id="basket-%02d" % index, event_ticker=ticker)
+        for index, ticker in enumerate(basketball_events))}
+    events = {"KXTEN": (_normalized_event(event_ticker=tennis_event,
+              series_ticker="KXTEN", markets=(_normalized_market(
+                  ticker=tennis_event + "-M", event_ticker=tennis_event,
+                  bid_size=Decimal(1), ask_size=Decimal(1)),)),),
+              "KXBASKET": tuple(_normalized_event(event_ticker=ticker,
+                  series_ticker="KXBASKET", markets=(_normalized_market(
+                      ticker=ticker + "-M", event_ticker=ticker),))
+                  for ticker in basketball_events)}
+    result = discover_game_contracts(_discover_cfg(sports=("Tennis", "Basketball")),
+        _dynamic_discovery_client(sports=("Tennis", "Basketball"), series=series,
+            milestones=milestones, events=events),
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    assert len(result.contracts) == 10
+    assert tennis_event + "-M" not in result.tickers
+    assert result.stats["candidates"] == 11 and result.stats["selected"] == 10
+    print("PASS best ten selection is global across selected Sports")
+
+
+def test_dynamic_contract_cap_allows_siblings_from_one_game():
+    """The cap counts contracts, so one Games Event may occupy two slots."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    sibling_event = "KXGAME-26JUL26-SIBLINGS"
+    other_event = "KXGAME-26JUL26-OTHER"
+    client = _dynamic_discovery_client(
+        series=({"series_ticker": "KXGAME", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        milestones={"Tennis League": (
+            _normalized_game(
+                milestone_id="siblings", event_ticker=sibling_event),
+            _normalized_game(
+                milestone_id="other", event_ticker=other_event),
+        )},
+        events={"KXGAME": (
+            _normalized_event(
+                event_ticker=sibling_event, series_ticker="KXGAME",
+                markets=(
+                    _normalized_market(
+                        ticker=sibling_event + "-A",
+                        event_ticker=sibling_event,
+                        bid=Decimal(50), ask=Decimal(51),
+                        bid_size=Decimal(20), ask_size=Decimal(20)),
+                    _normalized_market(
+                        ticker=sibling_event + "-B",
+                        event_ticker=sibling_event,
+                        bid=Decimal(50), ask=Decimal(51),
+                        bid_size=Decimal(15), ask_size=Decimal(15)),
+                )),
+            _normalized_event(
+                event_ticker=other_event, series_ticker="KXGAME",
+                markets=(_normalized_market(
+                    ticker=other_event + "-A", event_ticker=other_event,
+                    bid=Decimal(50), ask=Decimal(51),
+                    bid_size=Decimal(1), ask_size=Decimal(1)),)),
+        )})
+
+    result = discover_game_contracts(
+        _discover_cfg(sports=("Tennis",), max_markets=2), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+
+    assert result.tickers == (
+        sibling_event + "-A", sibling_event + "-B")
+    assert result.stats["candidates"] == 3
+    assert result.stats["selected"] == 2
+    print("PASS dynamic cap allows sibling contracts from one Games Event")
+
+
+def test_dynamic_discovery_filters_books_and_reports_stable_stats():
+    """Each book eligibility branch and summary counter is externally visible."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    markets = (
+        _normalized_market(ticker="ACTIVE", event_ticker=event, title=""),
+        _normalized_market(ticker="INACTIVE", event_ticker=event, status="closed"),
+        _normalized_market(ticker="NOQUOTE", event_ticker=event, bid=None),
+        _normalized_market(ticker="NODEPTH", event_ticker=event,
+                           bid_size=Decimal(0)),
+        _normalized_market(ticker="MISSINGDEPTH", event_ticker=event,
+                           ask_size=None),
+        _normalized_market(ticker="WIDE", event_ticker=event, ask=Decimal(60)),
+    )
+    off_day = _normalized_game(milestone_id="tomorrow", event_ticker=event,
+                               start=1785196800.0)
+    client = _dynamic_discovery_client(series=(
+        {"series_ticker": "KXATP", "category": "Sports", "tags": ("Tennis",)},
+        {"series_ticker": "KXWEATHER", "category": "Weather", "tags": ()},),
+        milestones={"Tennis League": (
+            _normalized_game(milestone_id="game", event_ticker=event), off_day,
+            dict(_normalized_game(milestone_id="off-category", event_ticker=event),
+                 category="Weather"),)},
+        events={"KXATP": (_normalized_event(event_ticker=event,
+            series_ticker="KXATP", markets=markets,
+            market_skips={"scalar": 2}),)})
+    try:
+        result = discover_game_contracts(_discover_cfg(sports=("Tennis",)), client,
+            now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    except ValueError as error:
+        assert False, f"missing parsed depth must be skipped, got {error}"
+    assert result.tickers == ("ACTIVE",)
+    assert result.contracts[0].title == "Yes"
+    assert result.stats == {
+        "candidates": 1, "event_pages": 1, "event_rows": 1,
+        "milestone_pages": 1, "milestone_rows": 3, "selected": 1,
+        "series_rows": 2, "skip_market_inactive": 1,
+        "skip_market_missing_quote": 1, "skip_market_no_depth": 2,
+        "skip_market_wide_spread": 1, "skip_milestone_off_category": 1,
+        "skip_milestone_outside_day": 1, "skip_series_off_category": 1,
+        "skip_unsupported_market_scalar": 2,
+    }
+    malformed = _dynamic_discovery_client(
+        series=({"series_ticker": "KXATP", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        milestones={"Tennis League": (_normalized_game(
+            milestone_id="bad-depth", event_ticker=event),)},
+        events={"KXATP": (_normalized_event(
+            event_ticker=event, series_ticker="KXATP",
+            markets=(_normalized_market(
+                ticker="BADDEPTH", event_ticker=event,
+                bid_size=None, ask_size="10"),)),)})
+    try:
+        discover_game_contracts(_discover_cfg(sports=("Tennis",)), malformed,
+            now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+        assert False
+    except ValueError as error:
+        assert "invalid parsed book" in str(error)
+    print("PASS dynamic discovery filters books and reports stable stats")
+
+
+def _explicit_discovery_client(*, sports=("Tennis",), filters=None, series=(),
+                               markets=None, events=None, milestones=None,
+                               milestone_metadata=None):
+    """Task 2-normalized explicit-discovery double; no raw HTTP payloads."""
+    if filters is None:
+        filters = {
+            "sport_ordering": ("All sports",) + tuple(sports),
+            "sports": {
+                "All sports": {
+                    "scopes": frozenset(("Games",)), "competitions": {}},
+            },
+        }
+        for sport in sports:
+            filters["sports"][sport] = {
+                "scopes": frozenset(("Games",)),
+                "competitions": {
+                    sport + " League": frozenset(("Games",))},
+            }
+    markets = dict(markets or {})
+    events = dict(events or {})
+    milestones = dict(milestones or {})
+    milestone_metadata = dict(milestone_metadata or {})
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get_sports_filters(self):
+            self.calls.append(("filters",))
+            return filters
+
+        def get_sports_series(self):
+            self.calls.append(("series",))
+            return tuple(series)
+
+        def get_market(self, ticker):
+            self.calls.append(("market", ticker))
+            return markets[ticker]
+
+        def get_event(self, event_ticker, *, with_nested_markets=True):
+            self.calls.append(("event", event_ticker, with_nested_markets))
+            return events[event_ticker]
+
+        def get_sports_milestones(self, *, related_event_ticker,
+                                   minimum_start_date):
+            self.calls.append(
+                ("milestones", related_event_ticker, minimum_start_date))
+            rows = tuple(milestones.get(related_event_ticker, ()))
+            metadata = milestone_metadata.get(related_event_ticker, {
+                "pages": 1, "rows": len(rows), "raw_rows": len(rows),
+                "market_skips": {},
+            })
+            return rows, metadata
+
+    return Client()
+
+
+def test_discovery_requires_exactly_one_source():
+    """The domain entry point must reject both and neither selection source."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    for cfg in (_discover_cfg(),
+                _discover_cfg(sports=("Tennis",), tickers=("T",))):
+        try:
+            discover_game_contracts(
+                cfg, object(),
+                now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+            assert False, cfg
+        except ValueError as error:
+            assert "exactly one" in str(error)
+    print("PASS discovery requires exactly one initial source")
+
+
+def test_explicit_tickers_must_be_today_games_and_within_cap():
+    """A configured ticker needs one current-day Games milestone proof."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    ticker = event + "-YES"
+    market = _normalized_market(ticker=ticker, event_ticker=event)
+    series = ({"series_ticker": "KXATP", "category": "Sports",
+               "tags": ("Tennis",)},)
+    event_row = _normalized_event(
+        event_ticker=event, series_ticker="KXATP", markets=(market,))
+    today = _normalized_game(
+        milestone_id="today", event_ticker=event, league="ATP")
+    now = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+    client = _explicit_discovery_client(
+        series=series, markets={ticker: market}, events={event: event_row},
+        milestones={event: (today,)})
+    result = discover_game_contracts(
+        _discover_cfg(tickers=(ticker,), max_markets=1), client, now=now)
+    assert result.tickers == (ticker,)
+    assert result.contracts[0].provenance.milestone_id == "today"
+
+    tomorrow = dict(today, start_ts=1785196800.0)
+    client = _explicit_discovery_client(
+        series=series, markets={ticker: market}, events={event: event_row},
+        milestones={event: (tomorrow,)})
+    try:
+        discover_game_contracts(
+            _discover_cfg(tickers=(ticker,), max_markets=1), client, now=now)
+        assert False
+    except ValueError as error:
+        assert ticker in str(error) or event in str(error)
+    print("PASS explicit tickers require a current-day Games proof within cap")
+
+
+def test_explicit_tickers_reject_duplicates_and_over_cap_before_network():
+    """Invalid requested cardinality must not be truncated or touch metadata."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from sports_discovery import discover_game_contracts
+
+    cases = (
+        (SimpleNamespace(sports=[], tickers=["T", "T"],
+                         max_monitored_markets=10, max_spread=3),
+         "duplicate"),
+        (SimpleNamespace(sports=[], tickers=["T1", "T2"],
+                         max_monitored_markets=1, max_spread=3),
+         "monitoring cap"),
+    )
+    for cfg, expected in cases:
+        client = _explicit_discovery_client()
+        try:
+            discover_game_contracts(
+                cfg, client,
+                now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+            assert False, cfg.tickers
+        except ValueError as error:
+            assert expected in str(error).lower()
+        assert client.calls == []
+    print("PASS duplicate/over-cap explicit tickers fail before network")
+
+
+def test_explicit_tickers_reject_unordered_or_lazy_inputs_before_network():
+    """Only an ordered materialized ticker sequence can define result order."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from sports_discovery import discover_game_contracts
+
+    invalid = (
+        {"T1", "T2"},
+        {"T1": True, "T2": True},
+        (ticker for ticker in ("T1", "T2")),
+        "T1",
+    )
+    for tickers in invalid:
+        cfg = SimpleNamespace(
+            sports=[], tickers=tickers, max_monitored_markets=10,
+            max_spread=3)
+        client = _explicit_discovery_client()
+        try:
+            discover_game_contracts(
+                cfg, client,
+                now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+            assert False, type(tickers)
+        except ValueError as error:
+            assert "ordered" in str(error)
+        assert client.calls == []
+    print("PASS unordered/lazy explicit ticker inputs fail before network")
+
+
+def test_explicit_tickers_preserve_order_and_derive_api_ordered_sports():
+    """Contract order follows config; canonical Sports follow API ordering."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    tennis_event = "KXTEN-26JUL26-GAME"
+    soccer_event = "KXSOCCER-26JUL26-WIMB"
+    tennis_ticker = tennis_event + "-YES"
+    soccer_ticker = soccer_event + "-YES"
+    direct_soccer = _normalized_market(
+        ticker=soccer_ticker, event_ticker=soccer_event,
+        bid=Decimal(40), ask=Decimal(43), title="Direct display")
+    nested_soccer = _normalized_market(
+        ticker=soccer_ticker, event_ticker=soccer_event,
+        bid=Decimal(50), ask=Decimal(52), title="Nested display",
+        close_ts=1893456100.0, can_close_early=True)
+    tennis_market = _normalized_market(
+        ticker=tennis_ticker, event_ticker=tennis_event)
+    client = _explicit_discovery_client(
+        sports=("Tennis", "Soccer"),
+        series=(
+            {"series_ticker": "KXTEN", "category": "Sports",
+             "tags": ("Tennis",)},
+            {"series_ticker": "KXSOCCER", "category": "Sports",
+             "tags": ("Soccer",)},
+        ),
+        markets={soccer_ticker: direct_soccer, tennis_ticker: tennis_market},
+        events={
+            soccer_event: _normalized_event(
+                event_ticker=soccer_event, series_ticker="KXSOCCER",
+                title="AFC Wimbledon vs Team B", markets=(nested_soccer,)),
+            tennis_event: _normalized_event(
+                event_ticker=tennis_event, series_ticker="KXTEN",
+                markets=(tennis_market,)),
+        },
+        milestones={
+            soccer_event: (_normalized_game(
+                milestone_id="soccer", event_ticker=soccer_event),),
+            tennis_event: (_normalized_game(
+                milestone_id="tennis", event_ticker=tennis_event),),
+        })
+    result = discover_game_contracts(
+        _discover_cfg(tickers=(soccer_ticker, tennis_ticker)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    assert result.tickers == (soccer_ticker, tennis_ticker)
+    assert result.selected_sports == ("Tennis", "Soccer")
+    assert result.contracts[0].provenance.sport == "Soccer"
+    assert result.contracts[0].title == "Nested display"
+    assert result.contracts[0].bid == Decimal(50)
+    print("PASS explicit order is preserved while Sports use API ordering")
+
+
+def test_explicit_ticker_requires_matching_market_event_series_and_nested_identity():
+    """Every direct identity must converge with exactly one nested Market."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    ticker = event + "-YES"
+    market = _normalized_market(ticker=ticker, event_ticker=event)
+    series = ({"series_ticker": "KXATP", "category": "Sports",
+               "tags": ("Tennis",)},)
+    proof = _normalized_game(milestone_id="proof", event_ticker=event)
+
+    cases = (
+        (_normalized_market(ticker="WRONG", event_ticker=event),
+         _normalized_event(event_ticker=event, series_ticker="KXATP",
+                           markets=(market,))),
+        (market, _normalized_event(
+            event_ticker="KXATP-26JUL26-OTHER", series_ticker="KXATP",
+            markets=(market,))),
+        (market, _normalized_event(
+            event_ticker=event, series_ticker="KXOTHER", markets=(market,))),
+        (market, _normalized_event(
+            event_ticker=event, series_ticker="KXATP", markets=())),
+        (market, _normalized_event(
+            event_ticker=event, series_ticker="KXATP",
+            markets=(market, dict(market)))),
+    )
+    for direct, event_row in cases:
+        client = _explicit_discovery_client(
+            series=series, markets={ticker: direct}, events={event: event_row},
+            milestones={event: (proof,)})
+        try:
+            discover_game_contracts(
+                _discover_cfg(tickers=(ticker,)), client,
+                now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+            assert False, event_row
+        except ValueError as error:
+            assert "Task 3C" not in str(error)
+        assert any(call[0] == "market" for call in client.calls)
+    print("PASS explicit Market/Event/Series/nested identities must converge")
+
+
+def test_explicit_ticker_requires_games_capable_canonical_sport():
+    """Series tags and both Games scopes must prove a canonical Sport."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    ticker = event + "-YES"
+    market = _normalized_market(ticker=ticker, event_ticker=event)
+    event_row = _normalized_event(
+        event_ticker=event, series_ticker="KXATP", markets=(market,))
+    proof = _normalized_game(milestone_id="proof", event_ticker=event)
+    bad_filters = (
+        {
+            "sport_ordering": ("All sports", "Tennis"),
+            "sports": {
+                "All sports": {"scopes": frozenset(("Games",)),
+                               "competitions": {}},
+                "Tennis": {"scopes": frozenset(("Futures",)),
+                           "competitions": {
+                               "ATP": frozenset(("Games",))}},
+            },
+        },
+        {
+            "sport_ordering": ("All sports", "Tennis"),
+            "sports": {
+                "All sports": {"scopes": frozenset(("Games",)),
+                               "competitions": {}},
+                "Tennis": {"scopes": frozenset(("Games",)),
+                           "competitions": {
+                               "ATP": frozenset(("Futures",))}},
+            },
+        },
+    )
+    cases = (
+        (None, ({"series_ticker": "KXATP", "category": "Sports",
+                 "tags": ("Unknown",)},)),
+        (bad_filters[0], ({"series_ticker": "KXATP", "category": "Sports",
+                           "tags": ("Tennis",)},)),
+        (bad_filters[1], ({"series_ticker": "KXATP", "category": "Sports",
+                           "tags": ("Tennis",)},)),
+    )
+    for filters, series in cases:
+        client = _explicit_discovery_client(
+            filters=filters, series=series, markets={ticker: market},
+            events={event: event_row}, milestones={event: (proof,)})
+        try:
+            discover_game_contracts(
+                _discover_cfg(tickers=(ticker,)), client,
+                now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+            assert False, filters
+        except ValueError as error:
+            assert "Sport" in str(error) or "Series" in str(error)
+    print("PASS explicit Series requires one Games-capable canonical Sport")
+
+
+def test_explicit_ticker_requires_unique_main_or_sole_primary_milestone():
+    """Main and sole-primary are valid; zero or multiple proofs are not."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    ticker = event + "-YES"
+    market = _normalized_market(ticker=ticker, event_ticker=event)
+    series = ({"series_ticker": "KXATP", "category": "Sports",
+               "tags": ("Tennis",)},)
+    event_row = _normalized_event(
+        event_ticker=event, series_ticker="KXATP", markets=(market,))
+    now = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+
+    for proof in (
+            _normalized_game(
+                milestone_id="main", event_ticker=event,
+                primary=(event + "-TOTAL", event)),
+            _normalized_game(
+                milestone_id="sole", event_ticker=event, main=False,
+                primary=(event,))):
+        result = discover_game_contracts(
+            _discover_cfg(tickers=(ticker,)),
+            _explicit_discovery_client(
+                series=series, markets={ticker: market},
+                events={event: event_row}, milestones={event: (proof,)}),
+            now=now)
+        assert result.contracts[0].provenance.milestone_id == \
+            proof["milestone_id"]
+
+    ambiguous = _normalized_game(
+        milestone_id="ambiguous", event_ticker=event, main=False,
+        primary=(event, event + "-TOTAL"))
+    two = (
+        _normalized_game(milestone_id="one", event_ticker=event),
+        _normalized_game(milestone_id="two", event_ticker=event),
+    )
+    for rows in ((ambiguous,), two):
+        try:
+            discover_game_contracts(
+                _discover_cfg(tickers=(ticker,)),
+                _explicit_discovery_client(
+                    series=series, markets={ticker: market},
+                    events={event: event_row}, milestones={event: rows}),
+                now=now)
+            assert False, rows
+        except ValueError:
+            pass
+    print("PASS explicit Games proof requires unique main or sole primary")
+
+
+def test_explicit_ticker_rejects_wrong_day_unrelated_and_conflicting_milestones():
+    """Wrong-day, ignored-filter, and conflicting proof metadata fail closed."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    ticker = event + "-YES"
+    market = _normalized_market(ticker=ticker, event_ticker=event)
+    series = ({"series_ticker": "KXATP", "category": "Sports",
+               "tags": ("Tennis",)},)
+    event_row = _normalized_event(
+        event_ticker=event, series_ticker="KXATP", markets=(market,))
+    base = _normalized_game(milestone_id="proof", event_ticker=event)
+    cases = (
+        (dict(base, start_ts=1785196800.0),),
+        (dict(base, related_event_tickers=("SOME-OTHER-EVENT",)),),
+        (base, dict(base, title="conflicting proof")),
+    )
+    for rows in cases:
+        try:
+            discover_game_contracts(
+                _discover_cfg(tickers=(ticker,)),
+                _explicit_discovery_client(
+                    series=series, markets={ticker: market},
+                    events={event: event_row}, milestones={event: rows}),
+                now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+            assert False, rows
+        except ValueError as error:
+            assert "Task 3C" not in str(error)
+    print("PASS wrong-day, unrelated, and conflicting milestones fail closed")
+
+
+def test_explicit_milestone_identity_conflicts_across_event_queries():
+    """One milestone ID cannot describe two different rows across Events."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    first_event = "KXATP-26JUL26-FIRST"
+    second_event = "KXATP-26JUL26-SECOND"
+    first_ticker = first_event + "-YES"
+    second_ticker = second_event + "-YES"
+    first_market = _normalized_market(
+        ticker=first_ticker, event_ticker=first_event)
+    second_market = _normalized_market(
+        ticker=second_ticker, event_ticker=second_event)
+    first_proof = _normalized_game(
+        milestone_id="shared-id", event_ticker=first_event,
+        title="First proof")
+    conflicting_proof = _normalized_game(
+        milestone_id="shared-id", event_ticker=second_event,
+        title="Second proof")
+    client = _explicit_discovery_client(
+        series=({"series_ticker": "KXATP", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        markets={
+            first_ticker: first_market, second_ticker: second_market},
+        events={
+            first_event: _normalized_event(
+                event_ticker=first_event, series_ticker="KXATP",
+                markets=(first_market,)),
+            second_event: _normalized_event(
+                event_ticker=second_event, series_ticker="KXATP",
+                markets=(second_market,)),
+        },
+        milestones={
+            first_event: (first_proof,),
+            second_event: (conflicting_proof,),
+        })
+    try:
+        discover_game_contracts(
+            _discover_cfg(tickers=(first_ticker, second_ticker)), client,
+            now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+        assert False
+    except ValueError as error:
+        assert "duplicate milestone" in str(error)
+        assert "conflicting metadata" in str(error)
+    assert [call[0] for call in client.calls].count("milestones") == 2
+    print("PASS milestone identity conflicts across Event queries fail")
+
+
+def test_explicit_ticker_rejects_each_ineligible_book_condition():
+    """Requested inactive, unquoted, shallow, or wide Markets cannot disappear."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    ticker = event + "-YES"
+    direct = _normalized_market(ticker=ticker, event_ticker=event)
+    series = ({"series_ticker": "KXATP", "category": "Sports",
+               "tags": ("Tennis",)},)
+    proof = _normalized_game(milestone_id="proof", event_ticker=event)
+    books = (
+        _normalized_market(ticker=ticker, event_ticker=event, status="closed"),
+        _normalized_market(ticker=ticker, event_ticker=event, bid=None),
+        _normalized_market(ticker=ticker, event_ticker=event,
+                           bid_size=Decimal(0)),
+        _normalized_market(ticker=ticker, event_ticker=event, ask_size=None),
+        _normalized_market(ticker=ticker, event_ticker=event,
+                           bid=Decimal(40), ask=Decimal(50)),
+    )
+    for book in books:
+        client = _explicit_discovery_client(
+            series=series, markets={ticker: direct}, events={
+                event: _normalized_event(
+                    event_ticker=event, series_ticker="KXATP",
+                    markets=(book,))},
+            milestones={event: (proof,)})
+        try:
+            discover_game_contracts(
+                _discover_cfg(tickers=(ticker,), max_spread=3), client,
+                now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+            assert False, book
+        except ValueError as error:
+            assert ticker in str(error)
+    print("PASS every ineligible requested book condition aborts discovery")
+
+
+def test_explicit_tickers_share_event_queries_and_count_stats_once():
+    """Sibling contracts share one Event/proof and one unsupported count."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    event = "KXATP-26JUL26-GAME"
+    first, second = event + "-A", event + "-B"
+    markets = (
+        _normalized_market(ticker=first, event_ticker=event),
+        _normalized_market(ticker=second, event_ticker=event,
+                           bid=Decimal(49), ask=Decimal(51)),
+    )
+    proof = _normalized_game(
+        milestone_id="shared", event_ticker=event, league="ATP")
+    client = _explicit_discovery_client(
+        series=({"series_ticker": "KXATP", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        markets={first: markets[0], second: markets[1]},
+        events={event: _normalized_event(
+            event_ticker=event, series_ticker="KXATP", markets=markets,
+            market_skips={"scalar": 2})},
+        milestones={event: (proof, dict(proof))},
+        milestone_metadata={
+            event: {"pages": 2, "rows": 2, "raw_rows": 2,
+                    "market_skips": {}}})
+    result = discover_game_contracts(
+        _discover_cfg(tickers=(second, first)), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
+    assert result.tickers == (second, first)
+    assert result.contracts[0].provenance == result.contracts[1].provenance
+    assert [call[:2] for call in client.calls].count(("event", event)) == 1
+    assert [call[:2] for call in client.calls].count(("milestones", event)) == 1
+    assert result.stats == {
+        "candidates": 2, "event_pages": 1, "event_rows": 1,
+        "milestone_pages": 2, "milestone_rows": 2, "selected": 2,
+        "series_rows": 1, "skip_unsupported_market_scalar": 2,
+    }
+    print("PASS sibling explicit contracts share proof calls and stats once")
+
+
+def _task4_contract(ticker="T", event_ticker="E", sport="Tennis",
+                    league="League", series_ticker="KXSERIES",
+                    milestone_id="M", start=3600.0, title="Yes",
+                    game_title="Game"):
+    from sports_discovery import ContractProvenance, SelectedContract
+
+    return SelectedContract(
+        ticker=ticker, title=title, game_title=game_title,
+        bid=Decimal(50), ask=Decimal(52),
+        bid_size=Decimal(10), ask_size=Decimal(11),
+        provenance=ContractProvenance(
+            sport=sport, league=league, series_ticker=series_ticker,
+            milestone_id=milestone_id, event_ticker=event_ticker,
+            scheduled_start_ts=start))
+
+
+def _task4_discovery(*contracts, selected_sports=("Tennis",), stats=None):
+    from sports_discovery import DiscoveryResult
+
+    return DiscoveryResult(
+        contracts=tuple(contracts), selected_sports=tuple(selected_sports),
+        local_timezone="UTC",
+        session_start_local="1970-01-01T00:00:00+00:00",
+        session_end_local="1970-01-02T00:00:00+00:00",
+        session_start_utc=0.0, session_end_utc=86400.0,
+        stats=stats or {
+            "series_rows": 1, "milestone_pages": 1, "milestone_rows": 1,
+            "event_pages": 1, "event_rows": 1, "candidates": len(contracts),
+            "selected": len(contracts),
+        })
+
+
+class _Task4RunFeed:
+    def __init__(self, result, *, subscribe_error=None):
+        self.result = result
+        self.subscribe_error = subscribe_error
+        self.discover_calls = 0
+        self.subscribe_calls = []
+
+    def discover(self, *, now=None):
+        self.discover_calls += 1
+        return self.result
+
+    def discover_tickers(self):
+        raise AssertionError("production startup called compatibility discovery")
+
+    def subscribe(self, tickers):
+        self.subscribe_calls.append(tuple(tickers))
+        if self.subscribe_error:
+            raise self.subscribe_error
+
+
+def _task4_clean_run_loop(ctx, reconciler, tickers):
+    ctx.log.end(clean=True, reason="operator interrupt")
+    return True
+
+
+def test_feed_installs_immutable_discovery_provenance():
+    """Discovery identity installs atomically once, including an empty result."""
+    from market_data import PriceFeed
+
+    contract = _task4_contract()
+    discovery = _task4_discovery(contract)
+    feed = PriceFeed(Config(), client=None)
+    feed.install_discovery(discovery)
+    assert feed.provenance("T") == contract.provenance
+    assert feed.group_id("T") == "E"
+    for mapping in (feed.contracts_by_ticker, feed.provenance_by_ticker):
+        try:
+            mapping["OTHER"] = contract
+            assert False
+        except TypeError:
+            pass
+    try:
+        feed.install_discovery(discovery)
+        assert False
+    except ValueError as error:
+        assert "already installed" in str(error)
+
+    empty_feed = PriceFeed(Config(), client=None)
+    empty_feed.install_discovery(_task4_discovery())
+    try:
+        empty_feed.install_discovery(discovery)
+        assert False
+    except ValueError:
+        pass
+
+    invalid = _task4_discovery(
+        contract, selected_sports=("Soccer",))
+    atomic = PriceFeed(Config(), client=None)
+    try:
+        atomic.install_discovery(invalid)
+        assert False
+    except ValueError:
+        pass
+    atomic.install_discovery(discovery)
+    assert atomic.group_id("T") == "E"
+    print("PASS feed installs immutable discovery provenance exactly once")
+
+
+def test_feed_rejects_unknown_subscription_ticker():
+    """Subscription validates its full input before starting any stale clocks."""
+    from market_data import PriceFeed
+
+    uninstalled = PriceFeed(Config(), client=None)
+    try:
+        uninstalled.subscribe(())
+        assert False
+    except SchemaError as error:
+        assert "not installed" in str(error)
+    assert uninstalled.last_good == {}
+
+    feed = PriceFeed(Config(), client=None, clock=lambda: 10.0)
+    feed.install_discovery(_task4_discovery(_task4_contract()))
+    for tickers in (("T", "T"), ("UNKNOWN",), ("T", 7), "T"):
+        before = dict(feed.last_good)
+        try:
+            feed.subscribe(tickers)
+            assert False, tickers
+        except (ValueError, SchemaError):
+            pass
+        assert feed.last_good == before
+    feed.subscribe(ticker for ticker in ("T",))
+    assert feed.last_good == {"T": 10.0}
+    print("PASS subscription rejects invalid/unknown tickers atomically")
+
+
+def test_quote_event_mismatch_fails_closed():
+    """A quote cannot teach or mutate immutable discovery identity."""
+    from market_data import PriceFeed
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get_market(self, ticker):
+            self.calls.append(ticker)
+            return _normalized_market(
+                ticker=ticker, event_ticker="DIFFERENT",
+                close_ts=99.0, can_close_early=True)
+
+    client = Client()
+    feed = PriceFeed(Config(), client, clock=lambda: 10.0)
+    feed.install_discovery(_task4_discovery(_task4_contract()))
+    feed.subscribe(("T",))
+    before = dict(feed.last_good)
+    try:
+        feed.get_quote("T")
+        assert False
+    except SchemaError as error:
+        assert "event" in str(error).lower()
+    assert feed.group_id("T") == "E"
+    assert feed.last_good == before
+    assert not feed.history["T"] and feed.last_book == {}
+    assert feed.close_times == {} and feed.can_close_early == {}
+
+    try:
+        feed.get_quote("UNKNOWN")
+        assert False
+    except SchemaError:
+        pass
+    assert client.calls == ["T"]
+
+    class WrongTickerClient:
+        def get_market(self, ticker):
+            return _normalized_market(
+                ticker="OTHER", event_ticker="E")
+
+    wrong_ticker = PriceFeed(
+        Config(), WrongTickerClient(), clock=lambda: 10.0)
+    wrong_ticker.install_discovery(
+        _task4_discovery(_task4_contract()))
+    wrong_ticker.subscribe(("T",))
+    try:
+        wrong_ticker.get_quote("T")
+        assert False
+    except SchemaError as error:
+        assert "identity mismatch" in str(error)
+    assert wrong_ticker.close_times == {}
+    assert wrong_ticker.can_close_early == {}
+    assert wrong_ticker.last_book == {}
+    print("PASS quote identity mismatch fails before mutable feed state")
+
+
+def test_discovery_failure_is_durable_and_returns_nonzero():
+    """Pre-canonical discovery failures write only the operational halt."""
+    import contextlib
+    import io
+    import json
+    import bot as bot_module
+
+    class Client:
+        def get_sports_filters(self):
+            raise SchemaError("filters drift")
+
+        def get_sports_series(self):
+            raise AssertionError("must fail at filters")
+
+        def get_sports_milestones(self, **kwargs):
+            raise AssertionError("must fail at filters")
+
+        def get_open_events(self, **kwargs):
+            raise AssertionError("must fail at filters")
+
+    workdir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(workdir)
+        cfg = Config(sports=["tennis"],
+                     state_root=os.path.join(workdir, "state"))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert bot_module.run_session(cfg, Client()) == 1
+        path = os.path.join("logs", "startup_halts_v6.jsonl")
+        with open(path) as handle:
+            rows = [json.loads(line) for line in handle]
+        assert rows == [{
+            "event": "session_halt", "reason":
+                "market discovery failed: SchemaError: filters drift",
+            "requested_sports": ["tennis"], "schema_version": 6,
+            "tickers": [], "ts": rows[0]["ts"],
+        }]
+        assert rows[0]["ts"] >= 0
+        assert not [name for name in os.listdir("logs")
+                    if name.startswith(("ticks_", "trades_"))]
+        assert "STARTUP FAILED" in output.getvalue()
+
+        original = bot_module.write_startup_halt
+        bot_module.write_startup_halt = lambda *args, **kwargs: (
+            (_ for _ in ()).throw(OSError("halt disk failure")))
+        try:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert bot_module.run_session(cfg, Client()) == 1
+            assert "filters drift" in output.getvalue()
+            assert "halt disk failure" in output.getvalue()
+        finally:
+            bot_module.write_startup_halt = original
+    finally:
+        os.chdir(old_cwd)
+    print("PASS pre-canonical failure is durable without masking primary error")
+
+
+def test_post_discovery_session_uses_canonical_sports():
+    """Research construction sees API-canonical Sports, including ticker mode."""
+    import bot as bot_module
+
+    result = _task4_discovery(
+        _task4_contract(sport="Tennis"),
+        selected_sports=("Basketball", "Tennis"))
+    feed = _Task4RunFeed(result)
+    captured = {}
+    original_feed = bot_module.PriceFeed
+    original_log = bot_module.ResearchLog
+    original_loop = bot_module.run_loop
+
+    def log_factory(*args, **kwargs):
+        captured["sports"] = tuple(kwargs["config"].sports)
+        return original_log(*args, **kwargs)
+
+    workdir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(workdir)
+        bot_module.PriceFeed = lambda cfg, client: feed
+        bot_module.ResearchLog = log_factory
+        bot_module.run_loop = _task4_clean_run_loop
+        cfg = Config(tickers=["T"], state_root=os.path.join(workdir, "state"))
+        assert bot_module.run_session(cfg, object()) == 0
+        assert captured["sports"] == ("Basketball", "Tennis")
+        assert cfg.sports == ["Basketball", "Tennis"]
+    finally:
+        bot_module.PriceFeed = original_feed
+        bot_module.ResearchLog = original_log
+        bot_module.run_loop = original_loop
+        os.chdir(old_cwd)
+    print("PASS post-discovery config and ResearchLog use canonical Sports")
+
+
+def test_run_session_discovers_and_reports_only_once():
+    """Production startup uses one quiet discover call and one pure formatter."""
+    import contextlib
+    import io
+    import bot as bot_module
+
+    result = _task4_discovery(
+        _task4_contract(),
+        stats={
+            "series_rows": 3, "milestone_pages": 2, "milestone_rows": 4,
+            "event_pages": 1, "event_rows": 2, "candidates": 1,
+            "selected": 1, "skip_z": 2, "skip_a": 1,
+        })
+    expected = "\n".join((
+        "[discover] Sports=Tennis",
+        "[discover] day timezone=UTC",
+        "  local=[1970-01-01T00:00:00+00:00, "
+        "1970-01-02T00:00:00+00:00)",
+        "  utc=[1970-01-01T00:00:00Z, 1970-01-02T00:00:00Z)",
+        "[discover] series_rows=3 milestone_pages=2 milestone_rows=4 "
+        "event_pages=1 event_rows=2 candidates=1 selected=1",
+        "  skips=skip_a=1, skip_z=2",
+        "[discover] Tennis | League | Game | T | "
+        "1970-01-01T01:00:00Z | bid=50 ask=52 spread=2 "
+        "depth=(10,11)",
+    ))
+    assert bot_module.format_discovery_telemetry(result) == expected
+
+    feed = _Task4RunFeed(result)
+    formatter_calls = []
+    original_feed = bot_module.PriceFeed
+    original_formatter = bot_module.format_discovery_telemetry
+    original_loop = bot_module.run_loop
+    workdir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(workdir)
+        bot_module.PriceFeed = lambda cfg, client: feed
+        bot_module.format_discovery_telemetry = lambda discovery: (
+            formatter_calls.append(discovery) or expected)
+        bot_module.run_loop = _task4_clean_run_loop
+        cfg = Config(sports=["Tennis"],
+                     state_root=os.path.join(workdir, "state"))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert bot_module.run_session(cfg, object()) == 0
+        assert feed.discover_calls == 1
+        assert formatter_calls == [result]
+        assert feed.subscribe_calls == [("T",)]
+        assert output.getvalue().count("[discover] Sports=Tennis") == 1
+    finally:
+        bot_module.PriceFeed = original_feed
+        bot_module.format_discovery_telemetry = original_formatter
+        bot_module.run_loop = original_loop
+        os.chdir(old_cwd)
+    print("PASS startup discovers and formats exactly once")
+
+
+def test_complete_empty_discovery_writes_clean_terminal():
+    """Empty complete discovery succeeds only after one durable clean terminal."""
+    import csv
+    import bot as bot_module
+
+    result = _task4_discovery(selected_sports=("Tennis",))
+    feed = _Task4RunFeed(result)
+    original_feed = bot_module.PriceFeed
+    original_loop = bot_module.run_loop
+    original_log = bot_module.ResearchLog
+    workdir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(workdir)
+        bot_module.PriceFeed = lambda cfg, client: feed
+        bot_module.run_loop = lambda *args, **kwargs: (
+            (_ for _ in ()).throw(AssertionError("run loop entered")))
+        cfg = Config(sports=["Tennis"],
+                     state_root=os.path.join(workdir, "state"))
+        assert bot_module.run_session(cfg, object()) == 0
+        assert feed.subscribe_calls == []
+        tick_path = os.path.join("logs", [
+            name for name in os.listdir("logs")
+            if name.startswith("ticks_v6_")][0])
+        with open(tick_path, newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        assert [(row["event"], row["detail"]) for row in rows] == [(
+            "session_end", "no eligible Games contracts for selected Sports")]
+
+        class BrokenTerminalLog(original_log):
+            def end(self, **kwargs):
+                raise OSError("terminal disk failure")
+
+        broken = _Task4RunFeed(result)
+        bot_module.PriceFeed = lambda cfg, client: broken
+        bot_module.ResearchLog = BrokenTerminalLog
+        assert bot_module.run_session(cfg, object()) == 1
+        assert broken.subscribe_calls == []
+    finally:
+        bot_module.PriceFeed = original_feed
+        bot_module.run_loop = original_loop
+        bot_module.ResearchLog = original_log
+        os.chdir(old_cwd)
+    print("PASS empty discovery requires one durable clean terminal")
+
+
+def test_subscription_failure_ends_canonical_log_noncleanly():
+    """Failures after ResearchLog construction use its non-clean terminal."""
+    import csv
+    import bot as bot_module
+
+    result = _task4_discovery(_task4_contract())
+    feed = _Task4RunFeed(result, subscribe_error=ValueError("bad subscribe"))
+    original_feed = bot_module.PriceFeed
+    original_loop = bot_module.run_loop
+    workdir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(workdir)
+        bot_module.PriceFeed = lambda cfg, client: feed
+        bot_module.run_loop = lambda *args, **kwargs: (
+            (_ for _ in ()).throw(AssertionError("run loop entered")))
+        cfg = Config(sports=["Tennis"],
+                     state_root=os.path.join(workdir, "state"))
+        assert bot_module.run_session(cfg, object()) == 1
+        assert not os.path.exists(
+            os.path.join("logs", "startup_halts_v6.jsonl"))
+        tick_path = os.path.join("logs", [
+            name for name in os.listdir("logs")
+            if name.startswith("ticks_v6_")][0])
+        with open(tick_path, newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        assert rows[-1]["event"] == "session_halt"
+        assert "bad subscribe" in rows[-1]["detail"]
+    finally:
+        bot_module.PriceFeed = original_feed
+        bot_module.run_loop = original_loop
+        os.chdir(old_cwd)
+    print("PASS post-log subscription failure writes non-clean terminal")
+
+
+def test_keyboard_interrupt_and_system_exit_are_not_swallowed_by_discovery():
+    """BaseException control flow cannot become an ordinary startup failure."""
+    import bot as bot_module
+
+    original_feed = bot_module.PriceFeed
+    workdir = tempfile.mkdtemp()
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(workdir)
+        cfg = Config(sports=["Tennis"],
+                     state_root=os.path.join(workdir, "state"))
+        for raised in (KeyboardInterrupt(), SystemExit(7)):
+            class Feed:
+                def __init__(self, config, client):
+                    pass
+
+                def discover(self):
+                    raise raised
+
+            bot_module.PriceFeed = Feed
+            try:
+                bot_module.run_session(cfg, object())
+                assert False, type(raised)
+            except type(raised) as error:
+                if isinstance(error, SystemExit):
+                    assert error.code == 7
+        assert not os.path.exists("logs")
+    finally:
+        bot_module.PriceFeed = original_feed
+        os.chdir(old_cwd)
+    print("PASS discovery preserves KeyboardInterrupt and SystemExit")
+
+
+def _write_research_csv(rows, header=None):
+    import csv
+
+    path = tempfile.mktemp(suffix=".csv")
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(RESEARCH_HEADER if header is None else header)
+        writer.writerows(rows)
+    return path
+
+
+def _clean_v6_rows(*, cfg=None, selected_sports=("Tennis",),
+                   quotes=None, session="V6"):
+    cfg = cfg or Config(sports=list(selected_sports))
+    rows = []
+    for i, overrides in enumerate(quotes or ({},), start=1):
+        params = {
+            "cfg": cfg, "session": session, "ts": i,
+            "selected_sports": selected_sports,
+        }
+        params.update(overrides)
+        rows.append(research_row(**params))
+    rows.append(research_row(
+        cfg=cfg, session=session, ts=len(rows) + 1,
+        selected_sports=selected_sports, ticker="",
+        event="session_end", detail="operator interrupt"))
+    return rows
+
+
+def test_v6_config_fingerprint_uses_canonical_sports():
+    from research_log import config_fingerprint
+
+    first = Config(sports=["Basketball", "Tennis"])
+    same = Config(sports=["Basketball", "Tennis"])
+    reordered = Config(sports=["Tennis", "Basketball"])
+    different = Config(sports=["Tennis"])
+    assert config_fingerprint(first) == config_fingerprint(same)
+    assert config_fingerprint(first) != config_fingerprint(reordered)
+    assert config_fingerprint(first) != config_fingerprint(different)
+    print("PASS v6 config fingerprint records canonical Sports order")
+
+
+def test_v6_quote_and_trade_rows_share_full_provenance():
+    import csv
+    from research_log import ResearchLog, TICK_HEADER, TRADE_HEADER
+
+    directory = tempfile.mkdtemp()
+    cfg = Config(sports=["Basketball", "Tennis"])
+    provenance = {
+        "T": research_provenance(
+            sport="Tennis", league=None, series_ticker="KXATP",
+            milestone_id="MATCH-1", event_ticker="EVENT-1",
+            scheduled_start_ts=100),
+    }
+    log = ResearchLog(
+        directory, clock=lambda: 1.0, session_id="V6-PROVENANCE",
+        config=cfg, provenance_by_ticker=provenance)
+    log.tick(
+        "T", Decimal(50), Decimal(49), Decimal(51),
+        Decimal(10), Decimal(11), close_ts=1000,
+        can_close_early=False)
+    log.trade(
+        "T", "BUY", Decimal(52), Decimal(2), "dip",
+        fee=Decimal("0.02"), ts=2)
+    log.event("T", "api_error", ts=3, detail="timeout")
+    log.event("T", "quarantined", ts=4, detail="bounded failures")
+    log.end(clean=True, reason="operator interrupt", ts=5)
+    with open(log.tick_path, newline="") as handle:
+        tick_reader = csv.DictReader(handle)
+        ticks = list(tick_reader)
+        assert tick_reader.fieldnames == TICK_HEADER == RESEARCH_HEADER
+    with open(log.trade_path, newline="") as handle:
+        trade_reader = csv.DictReader(handle)
+        trades = list(trade_reader)
+        assert trade_reader.fieldnames == TRADE_HEADER
+    expected = {
+        "sport": "Tennis", "league": "",
+        "series_ticker": "KXATP", "milestone_id": "MATCH-1",
+        "event_ticker": "EVENT-1", "scheduled_start_ts": "100.0",
+    }
+    for row in ticks[:-1] + trades:
+        assert {field: row[field] for field in expected} == expected
+        assert row["selected_sports"] == '["Basketball","Tennis"]'
+    assert [row["event"] for row in ticks] == [
+        "quote", "api_error", "quarantined", "session_end"]
+    assert all(ticks[-1][field] == "" for field in (
+        "ticker", "sport", "league", "series_ticker", "milestone_id",
+        "event_ticker", "scheduled_start_ts", "close_ts",
+        "can_close_early", "mid", "bid", "ask", "bid_qty", "ask_qty"))
+    print("PASS v6 quote, trade, API-error and quarantine provenance is complete")
+
+
+def test_delayed_paper_fill_logs_full_provenance():
+    from collections import defaultdict, deque
+    from research_log import ResearchLog
+
+    class Feed:
+        def __init__(self):
+            self.history = defaultdict(lambda: deque(maxlen=600))
+            self.history["T"].append((1.0, Decimal(50)))
+
+        def top_of_book(self, ticker):
+            return Decimal(49), Decimal(10), Decimal(51), Decimal(10)
+
+        def lifecycle(self, ticker):
+            return 1000.0, False
+
+    cfg = Config(sports=["Tennis"])
+    cfg.sim_latency_s = 1.0
+    feed = Feed()
+    strategy = ScalpStrategy(cfg)
+    executor = Executor(cfg, None, feed, clock=lambda: 2.0,
+                        sleep=lambda _: None)
+    log = ResearchLog(
+        tempfile.mkdtemp(), clock=lambda: 2.0, session_id="DELAYED",
+        config=cfg,
+        provenance_by_ticker={"T": research_provenance(
+            event_ticker="EVENT-DELAYED")})
+    executor.submit_paper("T", "BUY", Decimal(2), "dip", now=1.0)
+    ctx = Context(
+        cfg, feed, strategy, executor, log, Safety(cfg), clock=lambda: 2.0)
+    process_tick(
+        ctx, "T", Decimal(50), Decimal(49), Decimal(51),
+        observed_at=2.0)
+    import csv
+    with open(log.trade_path, newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1 and rows[0]["side"] == "BUY"
+    assert rows[0]["sport"] == "Tennis"
+    assert rows[0]["event_ticker"] == "EVENT-DELAYED"
+    print("PASS delayed paper fill uses logger-owned full provenance")
+
+
+def test_immediate_buy_sell_paths_log_full_provenance():
+    from collections import defaultdict
+    from types import SimpleNamespace
+    from research_log import ResearchLog
+
+    class Feed:
+        history = defaultdict(list)
+
+        def top_of_book(self, ticker):
+            return Decimal(50), Decimal(10), Decimal(52), Decimal(10)
+
+        def lifecycle(self, ticker):
+            return 1000.0, False
+
+        def entry_allowed(self, *args):
+            return True
+
+        def early_close_risk(self, ticker):
+            return False
+
+    class Strategy:
+        realized_pnl = Decimal(0)
+
+        def __init__(self, side):
+            self.side = side
+            self.positions = (
+                {"T": SimpleNamespace(
+                    contracts=Decimal(2), entry_price=Decimal(50),
+                    entry_fee_usd=Decimal(0))}
+                if side == "SELL" else {})
+
+        def refresh_daily_pnl(self, now):
+            return None
+
+        def check_exit(self, ticker, bid, now=None):
+            return ({"reason": "stop"} if self.side == "SELL" else None)
+
+        def check_entry(self, *args):
+            return ({"reason": "dip"} if self.side == "BUY" else None)
+
+        def record_fill(self, ticker, side, price, count, fee, **kwargs):
+            self.positions.pop(ticker, None)
+
+    class Immediate:
+        journal = None
+        last_outcome_id = None
+        last_observation = None
+
+        def execute(self, ticker, side, contracts, **kwargs):
+            return Decimal(51), Decimal(contracts), Decimal("0.01")
+
+    directory = tempfile.mkdtemp()
+    cfg = Config(paper_trading=False, sports=["Tennis"])
+    log = ResearchLog(
+        directory, clock=lambda: 1.0, session_id="IMMEDIATE",
+        config=cfg,
+        provenance_by_ticker={"T": research_provenance(
+            event_ticker="EVENT-IMMEDIATE")})
+    for side in ("BUY", "SELL"):
+        ctx = Context(
+            cfg, Feed(), Strategy(side), Immediate(), log, Safety(cfg),
+            clock=lambda: 1.0)
+        process_tick(
+            ctx, "T", Decimal(51), Decimal(50), Decimal(52),
+            observed_at=1.0)
+    import csv
+    with open(log.trade_path, newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["side"] for row in rows] == ["BUY", "SELL"]
+    assert {row["event_ticker"] for row in rows} == {"EVENT-IMMEDIATE"}
+    print("PASS immediate BUY/SELL paths use logger-owned provenance")
+
+
+def test_v6_logger_rejects_missing_or_unknown_ticker_provenance():
+    from research_log import ResearchLog
+
+    for cfg, provenance in (
+            (Config(), {}),
+            (Config(sports=["Tennis"]), {"T": object()}),
+            (Config(sports=["Tennis"]), {
+                "T": research_provenance(sport="Basketball")}),
+            (Config(sports=["Tennis"], tickers=["T"]), {}),
+            (Config(sports=["Tennis"], tickers=["T"]), {
+                "OTHER": research_provenance()}),
+    ):
+        directory = tempfile.mkdtemp()
+        before = os.listdir(directory)
+        try:
+            ResearchLog(
+                directory, config=cfg,
+                provenance_by_ticker=provenance)
+            assert False, (cfg.sports, provenance)
+        except (TypeError, ValueError):
+            pass
+        assert os.listdir(directory) == before
+
+    empty = ResearchLog(
+        tempfile.mkdtemp(), config=Config(sports=["Tennis"]),
+        provenance_by_ticker={})
+    empty.end(clean=True, reason="empty discovery")
+
+    directory = tempfile.mkdtemp()
+    log = ResearchLog(
+        directory, config=Config(sports=["Tennis"]),
+        provenance_by_ticker={"T": research_provenance()})
+    before = os.path.getsize(log.tick_path)
+    for writer in (
+            lambda: log.tick(
+                "UNKNOWN", 50, 49, 51, 10, 10,
+                close_ts=1000, can_close_early=False),
+            lambda: log.trade(
+                "UNKNOWN", "BUY", 51, 1, "dip", fee=0),
+            lambda: log.event("UNKNOWN", "api_error", detail="bad"),
+    ):
+        try:
+            writer()
+            assert False
+        except ValueError:
+            pass
+        assert os.path.getsize(log.tick_path) == before
+    print("PASS v6 logger validates/freeze provenance before appending")
+
+
+def test_v6_terminal_rows_are_unscoped_and_final():
+    import csv
+    from research_log import ResearchLog
+
+    log = ResearchLog(
+        tempfile.mkdtemp(), config=Config(sports=["Tennis"]),
+        provenance_by_ticker={"T": research_provenance()})
+    for invalid in (
+            lambda: log.event("", "api_error", detail="unscoped"),
+            lambda: log.end(clean=True, reason=""),
+    ):
+        try:
+            invalid()
+            assert False
+        except ValueError:
+            pass
+    log.end(clean=False, reason="loss limit", ts=2)
+    with open(log.tick_path, newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    row = rows[-1]
+    assert row["event"] == "session_halt"
+    assert row["detail"] == "loss limit"
+    assert row["selected_sports"] == '["Tennis"]'
+    assert all(row[field] == "" for field in (
+        "ticker", "sport", "league", "series_ticker", "milestone_id",
+        "event_ticker", "scheduled_start_ts", "close_ts",
+        "can_close_early", "mid", "bid", "ask", "bid_qty", "ask_qty"))
+    for writer in (
+            lambda: log.tick(
+                "T", 50, 49, 51, 10, 10,
+                close_ts=1000, can_close_early=False),
+            lambda: log.trade("T", "BUY", 51, 1, "dip", fee=0),
+            lambda: log.event("T", "api_error", detail="late"),
+            lambda: log.end(clean=True, reason="again"),
+    ):
+        try:
+            writer()
+            assert False
+        except ValueError:
+            pass
+    print("PASS v6 terminal rows are unscoped, reasoned, and final")
+
+
+def test_replay_rejects_v5_and_mixed_schema_logs():
+    from replay import load_log
+
+    v5_header = [
+        "schema_version", "session_id", "starting_daily_pnl_usd",
+        "starting_utc_day", "utc_day", "config_fingerprint",
+        "code_fingerprint", "ts", "event_id", "ticker", "event",
+        "detail", "close_ts", "can_close_early", "mid", "bid", "ask",
+        "bid_qty", "ask_qty",
+    ]
+    v5_row = [
+        5, "OLD", 0, "1970-01-01", "1970-01-01", "cfg",
+        "archived-code-fingerprint", 1, "E", "T", "quote", "",
+        1000, "false", 50, 49, 51, 10, 10,
+    ]
+    path = _write_research_csv([v5_row], header=v5_header)
+    before = open(path, "rb").read()
+    try:
+        load_log(path)
+        assert False
+    except ValueError as error:
+        text = str(error)
+        assert "archived v5" in text
+        assert "archived-code-fingerprint" in text
+    assert open(path, "rb").read() == before
+
+    mixed = research_row()
+    mixed[0] = 5
+    path = _write_research_csv([mixed])
+    try:
+        load_log(path)
+        assert False
+    except ValueError as error:
+        assert "archived v5" in str(error)
+    print("PASS replay rejects legacy/mixed schemas without modifying input")
+
+
+def test_replay_rejects_whitespace_only_terminal_reason():
+    from replay import load_log
+
+    path = _write_research_csv([
+        research_row(ts=1),
+        research_row(
+            ts=2, ticker="", event="session_end", detail="   "),
+    ])
+    try:
+        load_log(path)
+        assert False
+    except ValueError as error:
+        assert "reason" in str(error)
+    print("PASS replay rejects a whitespace-only terminal reason")
+
+
+def test_replay_rejects_each_missing_provenance_field():
+    from replay import load_log
+
+    for index in (10, 12, 13, 14):
+        row = research_row()
+        row[index] = ""
+        try:
+            load_log(_write_research_csv([row]))
+            assert False, RESEARCH_HEADER[index]
+        except ValueError as error:
+            assert RESEARCH_HEADER[index] in str(error)
+    for raw in ("", "NaN", "-1"):
+        row = research_row()
+        row[15] = raw
+        try:
+            load_log(_write_research_csv([row]))
+            assert False, raw
+        except ValueError as error:
+            assert "scheduled_start_ts" in str(error)
+    print("PASS strict v6 replay requires every provenance field")
+
+
+def test_replay_rejects_invalid_or_drifting_provenance():
+    from replay import load_log
+
+    cfg = Config(sports=["Basketball", "Tennis"])
+    malformed_selected = (
+        '["Tennis", "Basketball"]',
+        '["Tennis","Tennis"]',
+        '["Tennis",""]',
+        '"Tennis"',
+    )
+    for text in malformed_selected:
+        row = research_row(
+            cfg=cfg, selected_sports=("Basketball", "Tennis"),
+            selected_sports_text=text)
+        try:
+            load_log(_write_research_csv([row]), cfg=cfg)
+            assert False, text
+        except ValueError as error:
+            assert "selected_sports" in str(error)
+
+    drift = [
+        research_row(
+            cfg=cfg, ts=1,
+            selected_sports=("Basketball", "Tennis")),
+        research_row(
+            cfg=cfg, ts=2, ticker="T", sport="Basketball",
+            selected_sports=("Basketball", "Tennis")),
+    ]
+    try:
+        load_log(_write_research_csv(drift), cfg=cfg)
+        assert False
+    except ValueError as error:
+        assert "provenance" in str(error)
+
+    cross_event = [
+        research_row(
+            cfg=cfg, ts=1, ticker="A", sport="Tennis",
+            event_ticker="SHARED",
+            selected_sports=("Basketball", "Tennis")),
+        research_row(
+            cfg=cfg, ts=2, ticker="B", sport="Basketball",
+            series_ticker="KXNBA", milestone_id="M2",
+            event_ticker="SHARED", scheduled_start_ts=7200,
+            selected_sports=("Basketball", "Tennis")),
+    ]
+    try:
+        load_log(_write_research_csv(cross_event), cfg=cfg)
+        assert False
+    except ValueError as error:
+        assert "event" in str(error) and "provenance" in str(error)
+
+    # Filtering is applied only after every row has passed strict validation.
+    hidden = [
+        research_row(cfg=cfg, ts=1, ticker="A", sport="Tennis",
+                     event_ticker="A-EVENT",
+                     selected_sports=("Basketball", "Tennis")),
+        research_row(cfg=cfg, ts=2, ticker="B", sport="Basketball",
+                     series_ticker="", event_ticker="B-EVENT",
+                     selected_sports=("Basketball", "Tennis")),
+    ]
+    try:
+        load_log(_write_research_csv(hidden), tickers=["A"], cfg=cfg)
+        assert False
+    except ValueError as error:
+        assert "series_ticker" in str(error)
+
+    duplicate = research_row(
+        cfg=cfg, selected_sports=("Basketball", "Tennis"))
+    try:
+        load_log(_write_research_csv([duplicate, duplicate]), cfg=cfg)
+        assert False
+    except ValueError as error:
+        assert "duplicate" in str(error)
+    print("PASS replay rejects selected-Sports/provenance drift before filtering")
+
+
+def test_replay_accepts_empty_league_but_preserves_supplied_league():
+    from replay import load_log
+
+    cfg = Config(sports=["Tennis"])
+    rows = _clean_v6_rows(
+        cfg=cfg,
+        quotes=(
+            {"ticker": "A", "league": "", "event_ticker": "EA"},
+            {"ticker": "B", "league": "ATP",
+             "event_ticker": "EB", "ts": 2},
+        ))
+    metadata = load_log(
+        _write_research_csv(rows), cfg=cfg, include_metadata=True)
+    provenance = metadata[7]
+    assert provenance["A"].league is None
+    assert provenance["B"].league == "ATP"
+    print("PASS replay round-trips unavailable and supplied leagues")
+
+
+def test_replay_exposes_market_provenance():
+    from replay import replay
+
+    cfg = Config(sports=["Basketball", "Tennis"])
+    shared = {
+        "sport": "Tennis", "league": "ATP",
+        "series_ticker": "KXATP", "milestone_id": "M1",
+        "event_ticker": "EVENT-1", "scheduled_start_ts": 100,
+        "selected_sports": ("Basketball", "Tennis"),
+    }
+    rows = _clean_v6_rows(
+        cfg=cfg, selected_sports=("Basketball", "Tennis"),
+        quotes=(
+            dict(shared, ticker="A", ts=1),
+            dict(shared, ticker="B", ts=2),
+        ))
+    result = replay(_write_research_csv(rows), cfg=cfg)
+    assert result["selected_sports"] == ("Basketball", "Tennis")
+    assert set(result["market_provenance"]) == {"A", "B"}
+    assert (result["market_provenance"]["A"].event_ticker
+            == result["market_provenance"]["B"].event_ticker
+            == "EVENT-1")
+    print("PASS replay exposes typed provenance and selected Sports")
+
+
+def test_runtime_v6_log_replays_same_fills_and_pnl():
+    from collections import defaultdict, deque
+    from replay import ReplayFeed, VirtualClock, replay
+    from research_log import ResearchLog
+
+    rows = [
+        (float(ts), Decimal(60), Decimal(59), Decimal(61),
+         Decimal(100), Decimal(100))
+        for ts in range(1, 21)
+    ] + [
+        (21.0, Decimal(52), Decimal(51), Decimal(53),
+         Decimal(100), Decimal(100)),
+        (22.0, Decimal("51.75"), Decimal(51), Decimal("52.5"),
+         Decimal(100), Decimal(6)),
+        (24.0, Decimal(61), Decimal(60), Decimal(62),
+         Decimal(6), Decimal(100)),
+        (25.0, Decimal(61), Decimal(60), Decimal(62),
+         Decimal(6), Decimal(100)),
+    ]
+    cfg = Config(sports=["Tennis"])
+    cfg.sim_latency_s = 1.0
+    clock = VirtualClock()
+    feed = ReplayFeed(clock)
+    strategy = ScalpStrategy(cfg)
+    executor = Executor(cfg, None, feed, clock=clock.time,
+                        sleep=clock.sleep)
+    log = ResearchLog(
+        tempfile.mkdtemp(), clock=clock.time, session_id="RUNTIME-V6",
+        config=cfg, provenance_by_ticker={"T": research_provenance(
+            event_ticker="EVENT-T")})
+    ctx = Context(
+        cfg, feed, strategy, executor, log, Safety(cfg), clock=clock.time)
+    runtime_trades = []
+    original = strategy.record_fill
+
+    def capture(ticker, side, price, count, fee, now=None):
+        runtime_trades.append((ticker, side, price, count))
+        return original(ticker, side, price, count, fee, now=now)
+
+    strategy.record_fill = capture
+    for ts, mid, bid, ask, bid_qty, ask_qty in rows:
+        clock.t = ts
+        feed.apply(
+            ts, "T", mid, bid, ask, bid_qty, ask_qty,
+            close_ts=4070908800.0, can_close_early=False)
+        process_tick(ctx, "T", mid, bid, ask, observed_at=ts)
+    clock.t = 26
+    log.end(clean=True, reason="operator interrupt")
+    result = replay(log.tick_path, cfg=cfg)
+    assert result["trades"] == runtime_trades
+    assert result["realized"] == strategy.realized_pnl
+    print("PASS runtime v6 log replays identical fills and realized P&L")
+
+
+def test_analyzer_delegates_to_strict_v6_loader():
+    import analyze
+
+    cfg = Config(sports=["Tennis"])
+    path = _write_research_csv(_clean_v6_rows(cfg=cfg))
+    original_cfg = analyze.CFG
+    original_loader = getattr(analyze, "load_log", None)
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_loader(*args, **kwargs)
+
+    try:
+        analyze.CFG = cfg
+        analyze.load_log = capture
+        series, groups, selected_sports, provenance = analyze.load(path)
+        assert calls and calls[0][1]["include_metadata"] is True
+        assert list(series) == ["T"]
+        assert groups == {"T": "E"}
+        assert selected_sports == ("Tennis",)
+        assert provenance["T"] == research_provenance()
+    finally:
+        analyze.CFG = original_cfg
+        analyze.load_log = original_loader
+    print("PASS analyzer delegates to the one strict v6 replay loader")
+
+
+def _task7_result(*, selected_sports, provenance, totals=None, trades=(),
+                  evaluable=True):
+    totals = dict(totals or {})
+    return {
+        "trades": list(trades),
+        "per_ticker_total": totals,
+        "residuals": {},
+        "residual_contracts": Decimal(0),
+        "pending_orders": 0,
+        "data_gaps": 0,
+        "halted": False,
+        "halt_reason": None,
+        "terminal_status": "clean",
+        "terminal_reason": "operator interrupt",
+        "rows_processed": max(1, len(provenance)),
+        "rows_available": max(1, len(provenance)),
+        "evaluable": evaluable,
+        "selected_sports": tuple(selected_sports),
+        "market_provenance": dict(provenance),
+    }
+
+
+def _task7_series(*tickers):
+    return {
+        ticker: [(1.0, Decimal(50), Decimal(49), Decimal(51))]
+        for ticker in tickers
+    }
+
+
+def test_analyzer_requires_complete_consistent_v6_provenance():
+    import analyze
+
+    series = _task7_series("TENNIS-NAME-IS-NOT-PROVENANCE")
+    provenance = {
+        "TENNIS-NAME-IS-NOT-PROVENANCE": research_provenance(
+            sport="Tennis", event_ticker="EVENT-0"),
+    }
+    groups = {"TENNIS-NAME-IS-NOT-PROVENANCE": "EVENT-0"}
+    partitions = analyze.build_partitions(
+        series, groups, ("Tennis",), provenance)
+    assert partitions["overall"]["TEST"] == (
+        "TENNIS-NAME-IS-NOT-PROVENANCE",)
+
+    invalid = (
+        (series, groups, ("Tennis",), {}),
+        (series, {}, ("Tennis",), provenance),
+        (series, {"TENNIS-NAME-IS-NOT-PROVENANCE": "OTHER"},
+         ("Tennis",), provenance),
+        (series, groups, ("Basketball",), provenance),
+    )
+    for args in invalid:
+        try:
+            analyze.build_partitions(*args)
+            assert False, args
+        except ValueError:
+            pass
+
+    result = _task7_result(
+        selected_sports=("Tennis",), provenance=provenance)
+    analyze.validate_replay_metadata(
+        ("Tennis",), provenance, result)
+    for changed in (
+            dict(result, selected_sports=("Basketball",)),
+            dict(result, market_provenance={}),
+    ):
+        try:
+            analyze.validate_replay_metadata(
+                ("Tennis",), provenance, changed)
+            assert False
+        except ValueError:
+            pass
+    print("PASS analyzer requires complete consistent v6 provenance")
+
+
+def test_analyzer_groups_sibling_contracts_by_event_ticker():
+    import analyze
+
+    siblings = {
+        "WINNER": research_provenance(
+            sport="Tennis", event_ticker="EVENT-0"),
+        "MARGIN": research_provenance(
+            sport="Tennis", event_ticker="EVENT-0"),
+    }
+    groups = {ticker: "EVENT-0" for ticker in siblings}
+    baseline = analyze.build_partitions(
+        _task7_series("WINNER", "MARGIN"), groups,
+        ("Tennis",), siblings)
+    assert baseline["bucket_by_ticker"] == {
+        "WINNER": "TEST", "MARGIN": "TEST"}
+
+    extended_provenance = dict(siblings)
+    extended_provenance["UNRELATED"] = research_provenance(
+        sport="Tennis", event_ticker="EVENT-5")
+    extended_groups = dict(groups, UNRELATED="EVENT-5")
+    extended = analyze.build_partitions(
+        _task7_series("UNRELATED", "MARGIN", "WINNER"),
+        extended_groups, ("Tennis",), extended_provenance)
+    assert extended["bucket_by_ticker"]["WINNER"] == "TEST"
+    assert extended["bucket_by_ticker"]["MARGIN"] == "TEST"
+    assert extended["bucket_by_ticker"]["UNRELATED"] == "TRAIN"
+    print("PASS analyzer keeps sibling contracts in one stable Event bucket")
+
+
+def test_analyzer_reports_overall_and_each_sport_train_test():
+    import analyze
+
+    selected = ("Basketball", "Tennis")
+    provenance = {
+        "T-TEST": research_provenance(
+            sport="Tennis", event_ticker="TENNIS-0"),
+        "T-TRAIN": research_provenance(
+            sport="Tennis", event_ticker="TENNIS-1"),
+        "B-TEST": research_provenance(
+            sport="Basketball", event_ticker="BASKET-0"),
+        "B-TRAIN": research_provenance(
+            sport="Basketball", event_ticker="BASKET-1"),
+    }
+    series = _task7_series("T-TEST", "B-TRAIN", "T-TRAIN", "B-TEST")
+    groups = {
+        ticker: item.event_ticker for ticker, item in provenance.items()}
+    partitions = analyze.build_partitions(
+        series, groups, selected, provenance)
+    result = _task7_result(
+        selected_sports=selected, provenance=provenance,
+        totals={
+            "B-TRAIN": Decimal("0.25"), "B-TEST": Decimal("1.00"),
+            "T-TRAIN": Decimal("-0.25"), "T-TEST": Decimal("0.50"),
+        },
+        trades=(
+            ("B-TRAIN", "SELL", Decimal(55), Decimal(1)),
+            ("B-TEST", "SELL", Decimal(55), Decimal(1)),
+            ("T-TRAIN", "SELL", Decimal(55), Decimal(1)),
+            ("T-TEST", "SELL", Decimal(55), Decimal(1)),
+        ))
+    text = analyze.format_replay_report(partitions, result)
+    assert text.startswith(
+        "FULL REPLAY through one shared portfolio path:\n\nOVERALL\n")
+    assert text.index("SPORT: Basketball") < text.index("SPORT: Tennis")
+    assert text.count("SPORT: ") == 2
+    for section in ("OVERALL", "SPORT: Basketball", "SPORT: Tennis"):
+        body = text.split(section, 1)[1]
+        if section != "SPORT: Tennis":
+            body = body.split("\n\n", 1)[0]
+        assert "  TRAIN:" in body and "  TEST:" in body
+    assert "1 markets, 1 exits" in text
+    print("PASS analyzer reports overall and every Sport TRAIN/TEST partition")
+
+
+def test_positive_overall_does_not_qualify_nonpositive_sport():
+    import analyze
+
+    selected = ("Basketball", "Tennis")
+    provenance = {
+        "B": research_provenance(
+            sport="Basketball", event_ticker="BASKET-0"),
+        "T": research_provenance(
+            sport="Tennis", event_ticker="TENNIS-0"),
+    }
+    groups = {"B": "BASKET-0", "T": "TENNIS-0"}
+    partitions = analyze.build_partitions(
+        _task7_series("B", "T"), groups, selected, provenance)
+    result = _task7_result(
+        selected_sports=selected, provenance=provenance,
+        totals={"B": Decimal("2.00"), "T": Decimal("-1.00")})
+    text = analyze.format_replay_report(partitions, result)
+    overall = text.split("OVERALL\n", 1)[1].split(
+        "\n\nSPORT: Basketball", 1)[0]
+    basketball = text.split("SPORT: Basketball\n", 1)[1].split(
+        "\n\nSPORT: Tennis", 1)[0]
+    tennis = text.split("SPORT: Tennis\n", 1)[1]
+    assert "net P&L +1.00 USD" in overall
+    assert basketball.endswith(
+        "Held-out: SUPPORTED HYPOTHESIS: TEST is evaluable "
+        "and net P&L > 0")
+    assert tennis.endswith(
+        "Held-out: NOT SUPPORTED: TEST <= 0, empty, or not evaluable")
+    print("PASS positive overall TEST cannot qualify a losing Sport")
+
+
+def test_selected_sport_with_empty_test_or_zero_markets_is_not_supported():
+    import analyze
+
+    selected = ("Basketball", "Tennis", "Cricket")
+    provenance = {
+        "B-TRAIN": research_provenance(
+            sport="Basketball", event_ticker="BASKET-1"),
+        "T-TEST": research_provenance(
+            sport="Tennis", event_ticker="TENNIS-0"),
+    }
+    groups = {
+        ticker: item.event_ticker for ticker, item in provenance.items()}
+    partitions = analyze.build_partitions(
+        _task7_series("B-TRAIN", "T-TEST"),
+        groups, selected, provenance)
+    result = _task7_result(
+        selected_sports=selected, provenance=provenance,
+        totals={"B-TRAIN": Decimal(1), "T-TEST": Decimal(1)})
+    text = analyze.format_replay_report(partitions, result)
+    basketball = text.split("SPORT: Basketball\n", 1)[1].split(
+        "\n\nSPORT: Tennis", 1)[0]
+    tennis = text.split("SPORT: Tennis\n", 1)[1].split(
+        "\n\nSPORT: Cricket", 1)[0]
+    cricket = text.split("SPORT: Cricket\n", 1)[1]
+    assert "TEST: 0 markets" in basketball
+    assert basketball.endswith(
+        "Held-out: NOT SUPPORTED: TEST <= 0, empty, or not evaluable")
+    assert tennis.endswith(
+        "Held-out: SUPPORTED HYPOTHESIS: TEST is evaluable "
+        "and net P&L > 0")
+    assert "TRAIN: 0 markets" in cricket and "TEST: 0 markets" in cricket
+    assert cricket.endswith(
+        "Held-out: NOT SUPPORTED: TEST <= 0, empty, or not evaluable")
+    print("PASS empty TEST and zero-market selected Sports remain unsupported")
+
+
+def test_global_incompleteness_disqualifies_every_sport():
+    import copy
+    import analyze
+
+    selected = ("Basketball", "Tennis")
+    provenance = {
+        "A": research_provenance(
+            sport="Basketball", event_ticker="BASKET-1"),
+        "B": research_provenance(
+            sport="Tennis", event_ticker="TENNIS-0"),
+    }
+    groups = {"A": "BASKET-1", "B": "TENNIS-0"}
+    partitions = analyze.build_partitions(
+        _task7_series("A", "B"), groups, selected, provenance)
+    base = _task7_result(
+        selected_sports=selected, provenance=provenance,
+        totals={"A": Decimal(0), "B": Decimal(2)})
+    variants = []
+
+    residual = copy.deepcopy(base)
+    residual.update({
+        "residuals": {"A": {
+            "contracts": Decimal(1), "marked_pnl": Decimal("-1")}},
+        "residual_contracts": Decimal(1),
+    })
+    variants.append(residual)
+    for updates in (
+            {"pending_orders": 1},
+            {"halted": True, "halt_reason": "loss limit"},
+            {"data_gaps": 1},
+            {"terminal_status": "missing", "terminal_reason": None},
+            {"rows_processed": 1, "rows_available": 2},
+    ):
+        variant = copy.deepcopy(base)
+        variant.update(updates)
+        variants.append(variant)
+
+    for result in variants:
+        # Even a contradictory optimistic flag cannot override concrete
+        # global incompleteness.
+        result["evaluable"] = True
+        text = analyze.format_replay_report(partitions, result)
+        assert "SUPPORTED HYPOTHESIS" not in text
+        assert text.count(
+            "Held-out: NOT SUPPORTED: TEST <= 0, empty, or not evaluable"
+        ) == 2
+        assert "[RESEARCH-EVALUABLE" not in text
+    print("PASS global incompleteness disqualifies every Sport")
+
+
+def test_sport_attribution_is_stable_across_input_order():
+    import analyze
+
+    selected = ("Tennis", "Basketball")
+    first_provenance = {
+        "T-Z": research_provenance(
+            sport="Tennis", event_ticker="TENNIS-0"),
+        "B": research_provenance(
+            sport="Basketball", event_ticker="BASKET-0"),
+        "T-A": research_provenance(
+            sport="Tennis", event_ticker="TENNIS-0"),
+    }
+    second_provenance = dict(reversed(tuple(first_provenance.items())))
+    first_series = _task7_series("T-Z", "B", "T-A")
+    second_series = _task7_series("T-A", "B", "T-Z")
+    first_groups = {
+        ticker: item.event_ticker
+        for ticker, item in first_provenance.items()}
+    second_groups = {
+        ticker: item.event_ticker
+        for ticker, item in second_provenance.items()}
+    original_points = tuple(first_series["T-Z"])
+    first = analyze.build_partitions(
+        first_series, first_groups, selected, first_provenance)
+    second = analyze.build_partitions(
+        second_series, second_groups, selected, second_provenance)
+    assert first == second
+    assert first["sports"]["Tennis"]["TEST"] == ("T-A", "T-Z")
+    assert tuple(first_series["T-Z"]) == original_points
+
+    result = _task7_result(
+        selected_sports=selected, provenance=first_provenance,
+        totals={"T-A": Decimal(1), "T-Z": Decimal(1), "B": Decimal(1)})
+    text = analyze.format_replay_report(first, result)
+    assert text.index("SPORT: Tennis") < text.index("SPORT: Basketball")
+    print("PASS Sport attribution is stable across mapping input order")
+
+
 if __name__ == "__main__":
+    test_sport_selection_is_case_insensitive_and_canonical()
+    test_all_sports_and_unknown_sports_are_rejected_with_choices()
+    test_selected_sport_requires_games_scope_and_competition()
+    test_local_day_window_is_half_open_and_dst_safe()
+    test_default_local_day_window_uses_system_dst_rules()
+    test_contract_ranking_uses_all_five_tie_breakers()
+    test_series_resolution_uses_unique_longest_official_prefix()
+    test_domain_values_reject_invalid_identity_numeric_and_duplicates()
+    test_api_only_new_sport_works_without_source_change()
+    test_wimbledon_soccer_is_not_classified_as_tennis()
+    test_series_mapping_uses_every_canonical_api_sport()
+    test_main_game_event_is_preferred_over_props()
+    test_sole_primary_game_fallback_and_ambiguous_skip()
+    test_empty_primary_list_uses_main_or_skips_as_ambiguous()
+    test_duplicate_metadata_must_be_identical()
+    test_identical_cross_competition_milestone_without_league_dedupes()
+    test_incomplete_inventory_prevents_ranking()
+    test_best_ten_are_global_across_selected_sports()
+    test_dynamic_contract_cap_allows_siblings_from_one_game()
+    test_dynamic_discovery_filters_books_and_reports_stable_stats()
+    test_discovery_requires_exactly_one_source()
+    test_explicit_tickers_must_be_today_games_and_within_cap()
+    test_explicit_tickers_reject_duplicates_and_over_cap_before_network()
+    test_explicit_tickers_reject_unordered_or_lazy_inputs_before_network()
+    test_explicit_tickers_preserve_order_and_derive_api_ordered_sports()
+    test_explicit_ticker_requires_matching_market_event_series_and_nested_identity()
+    test_explicit_ticker_requires_games_capable_canonical_sport()
+    test_explicit_ticker_requires_unique_main_or_sole_primary_milestone()
+    test_explicit_ticker_rejects_wrong_day_unrelated_and_conflicting_milestones()
+    test_explicit_milestone_identity_conflicts_across_event_queries()
+    test_explicit_ticker_rejects_each_ineligible_book_condition()
+    test_explicit_tickers_share_event_queries_and_count_stats_once()
+    test_feed_installs_immutable_discovery_provenance()
+    test_feed_rejects_unknown_subscription_ticker()
+    test_quote_event_mismatch_fails_closed()
+    test_discovery_failure_is_durable_and_returns_nonzero()
+    test_post_discovery_session_uses_canonical_sports()
+    test_run_session_discovers_and_reports_only_once()
+    test_complete_empty_discovery_writes_clean_terminal()
+    test_subscription_failure_ends_canonical_log_noncleanly()
+    test_keyboard_interrupt_and_system_exit_are_not_swallowed_by_discovery()
+    test_v6_config_fingerprint_uses_canonical_sports()
+    test_v6_quote_and_trade_rows_share_full_provenance()
+    test_delayed_paper_fill_logs_full_provenance()
+    test_immediate_buy_sell_paths_log_full_provenance()
+    test_v6_logger_rejects_missing_or_unknown_ticker_provenance()
+    test_v6_terminal_rows_are_unscoped_and_final()
+    test_replay_rejects_v5_and_mixed_schema_logs()
+    test_replay_rejects_whitespace_only_terminal_reason()
+    test_replay_rejects_each_missing_provenance_field()
+    test_replay_rejects_invalid_or_drifting_provenance()
+    test_replay_accepts_empty_league_but_preserves_supplied_league()
+    test_replay_exposes_market_provenance()
+    test_runtime_v6_log_replays_same_fills_and_pnl()
+    test_analyzer_delegates_to_strict_v6_loader()
     test_create_contract()
     test_ack_vs_poll_contract()
     test_current_orderbook_contract()
     test_current_market_contract_and_empty_book_normalization()
+    test_current_sports_filters_contract()
+    test_sports_filters_reject_malformed_scopes_and_competitions()
+    test_current_sports_series_contract()
+    test_series_response_accepts_off_category_and_null_tags()
+    test_series_response_rejects_duplicate_tickers_and_bad_tags()
+    test_series_response_rejects_nonempty_cursor_as_incomplete()
+    test_current_milestone_contract()
+    test_milestone_accepts_empty_event_ticker_lists()
+    test_milestone_contract_rejects_bad_details_dates_and_tickers()
+    test_current_nested_event_contract_uses_market_parser()
+    test_direct_event_uses_nested_markets_when_top_level_is_empty()
+    test_direct_event_rejects_nonempty_wrapper_when_nested_markets_empty()
+    test_nested_event_counts_only_recognized_unsupported_markets()
+    test_sports_client_uses_documented_public_queries()
+    test_public_discovery_metadata_requests_are_paced()
+    test_discovery_cursors_missing_nonstring_repeated_and_capped_fail()
     test_endpoint_separation()
     test_http_boundary_wiring_and_strict_envelopes()
+    test_public_sports_client_loads_private_key_only_for_auth()
+    test_cli_parses_sports_without_hardcoded_choices()
+    test_cli_rejects_empty_or_duplicate_sports()
+    test_config_validates_unique_selection_lists()
+    test_cli_rejects_sports_with_configured_tickers()
+    test_paper_startup_requires_sports_or_explicit_tickers()
+    test_list_sports_is_public_and_creates_no_session_artifact()
+    test_cli_reports_unknown_arguments_without_traceback()
     test_get_429_retries_with_exponential_backoff()
     test_get_429_retry_exhaustion_is_bounded()
     test_mutating_429_is_never_retried()
@@ -3444,13 +7244,20 @@ if __name__ == "__main__":
     test_analyzer_rejects_legacy_per_ticker_split()
     test_malformed_quote_rows_disqualify_research()
     test_malformed_executable_books_fail_closed()
-    test_analyzer_end_to_end_v5_smoke()
-    test_analyzer_attributes_one_shared_portfolio_replay()
+    test_analyzer_end_to_end_v6_smoke()
+    test_analyzer_requires_complete_consistent_v6_provenance()
+    test_analyzer_groups_sibling_contracts_by_event_ticker()
+    test_analyzer_reports_overall_and_each_sport_train_test()
+    test_positive_overall_does_not_qualify_nonpositive_sport()
+    test_selected_sport_with_empty_test_or_zero_markets_is_not_supported()
+    test_global_incompleteness_disqualifies_every_sport()
+    test_analyzer_replays_shared_portfolio_exactly_once()
+    test_sport_attribution_is_stable_across_input_order()
     test_aggregate_fee_rounding()
     test_residual_valuation_respects_depth_and_slippage()
     test_unknown_depth_never_means_unlimited_fill()
     test_subcent_sell_fill_is_never_improved()
-    test_pricefeed_learns_event_id_from_quote()
+    test_pricefeed_uses_installed_event_identity()
     test_market_envelope_to_research_log_preserves_event_identity()
     test_replay_exact_paper_path_and_residual()
     test_pending_paper_order_uses_first_observed_due_quote()
@@ -3461,13 +7268,23 @@ if __name__ == "__main__":
     test_pricefeed_and_replayfeed_produce_identical_paper_fills()
     test_actual_runtime_driver_matches_replay()
     test_staleness_is_checked_between_market_requests()
+    test_preflight_validates_public_sports_metadata_without_orders()
+    test_preflight_reports_metadata_skips_and_unobserved_portfolio_rows()
+    test_preflight_never_calls_order_mutation_endpoints()
+    test_preflight_counts_sports_without_assuming_pseudo_row()
+    test_preflight_warns_when_games_metadata_is_unavailable()
+    test_preflight_rejects_sampled_sports_schema_drift()
+    test_preflight_public_checks_run_without_credentials()
+    test_readme_documents_sports_commands_and_v6_break()
     test_preflight_warns_but_accepts_valid_empty_portfolio_collections()
     test_preflight_market_sample_uses_exactly_one_page()
     test_market_collections_skip_only_known_unsupported_products()
     test_market_collection_skips_never_hide_schema_drift()
+    test_discovery_stops_before_generic_pagination_cap_when_first_page_fills_cap()
+    test_discovery_filters_page_by_page_and_aggregates_skip_counts()
+    test_discovery_page_cap_returns_explicit_truncated_partial_scan()
+    test_discovery_rejects_malformed_and_repeated_cursors()
     test_discovery_and_preflight_report_unsupported_market_counts()
-    test_discovery_uses_maximum_page_and_caps_monitored_markets()
-    test_explicit_tickers_respect_monitoring_cap()
     test_response_format_errors_include_raw_values()
     test_replay_reports_halt_and_resets_daily_risk_at_utc_midnight()
     test_replay_honors_logged_same_day_starting_loss()
@@ -3483,4 +7300,4 @@ if __name__ == "__main__":
     test_replay_enforces_logged_market_lifecycle()
     test_termination_signals_route_through_interrupt()
     test_live_and_demo_disabled()
-    print("\nALL TESTS PASS (104 tests)")
+    print("\nALL TESTS PASS (200 tests)")

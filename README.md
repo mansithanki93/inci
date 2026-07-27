@@ -1,150 +1,126 @@
 # Inci — Kalshi Sports Scalping Research Bot
 
-Status: **paper-research build only**. Demo and live sessions are disabled in
-`bot.py`, and real-order mutation is independently disabled inside
-`Executor`. Changing configuration or an environment variable cannot unlock
-orders.
+Inci is a **paper-research build** for studying short-term price retracement in
+Kalshi Sports markets. It simulates latency, spread, depth, slippage, fees,
+position limits, and shutdown behavior. Research evidence does not prove live
+profitability.
 
-This build improves execution safety and research honesty. It does **not**
-prove that the dip-retracement strategy is profitable.
+The bot does not submit orders; demo/live remain disabled in `bot.py`, and
+real-order mutation is independently locked off inside `Executor`. No flag,
+configuration field, or environment variable unlocks it.
 
-## Run
+## Setup and commands
 
 ```bash
 pip install requests cryptography
 python tests.py
-python bot.py --check     # read-only V2 schema/auth preflight
-python bot.py             # paper mode
-python analyze.py logs/ticks_v5_<YYYYMMDD>_<session-id>.csv
+python bot.py --list-sports
+python bot.py --sports Tennis,Basketball
+python bot.py --check
+python analyze.py logs/ticks_v6_<YYYYMMDD>_<session-id>.csv
 ```
 
-`tests.py` contains 104 contract, lifecycle, safety, replay, and research
-regressions. The tests use fakes and local temporary files; they do not place
-orders or probe production order endpoints.
+`--list-sports` is public and reflects the current canonical API Sports.
+`--sports` accepts comma-separated, case-insensitive names and returns them
+API-canonicalized in the API's stable order.
 
-## What is enforced
+`--check` is read-only. It validates exchange, Market, bounded Sports metadata,
+and authenticated portfolio response contracts. Its Sports milestone and Event
+checks deliberately fetch one page each, report whether more pages exist, and
+never perform discovery, ranking, order creation, cancellation, or synthetic
+order polling. Missing credentials or malformed observed data fail the check;
+valid empty portfolio collections produce a coverage warning.
 
-- Every API field Inci consumes is validated through `schemas.py`: official
-  response envelopes, fixed-point strings, current order states, create and
-  cancel acknowledgements, `orderbook_fp`, endpoint-specific cursors, and
-  fail-closed pagination. Fake-HTTP tests cover request paths, signing,
-  parameters, bodies, subaccount scope, and invalid JSON.
-- Market parsing follows the current binary/$1 contract: `market_type`, side
-  subtitles, lifecycle status, four-decimal fixed-point prices, and notional
-  are validated. Deprecated `title` is optional. Zero-depth sides are treated
-  as absent liquidity, and only `active` markets can become fresh quotes.
-  Listing requests ask the API to exclude MVE products, then skip only known
-  scalar/MVE rows per item. Discovery and `--check` always print the skipped
-  count by type—even zero—while malformed binary or unknown product rows still
-  fail the whole request. Direct reads of unsupported markets remain strict.
-- IOC order acknowledgements, polled orders, order-filtered fills, exact live
-  `fee_cost`, and authoritative position changes must agree across two stable
-  observations before an outcome journal entry is written. Unfilled IOC
-  quantity is recorded explicitly as canceled; terminal remaining quantity is
-  not incorrectly forced to equal requested minus filled.
-- Cancel acknowledgement is never treated as terminal truth. Startup,
-  periodic checks, and shutdown attempt every identifiable order before
-  reporting collected ambiguity. A filled outcome not durably applied to
-  position/P&L state blocks restart and flattening.
-- Flattening starts from freshly fetched exchange positions and proceeds only
-  when each long exactly matches a local position with a known cost basis.
-  Exchange-only, negative, or quantity-mismatched exposure requires manual
-  reconciliation instead of inventing P&L. Safe partial exits are retried and
-  final exchange flatness is verified. Ambiguous or unapplied orders block
-  automatic flattening.
-- The process lock, order journal, and loss ledger share one absolute,
-  environment/subaccount directory. There is no user-selectable account
-  namespace or per-file path override that can split these three safety
-  records. Any future order-enabled mode must use the canonical state root.
-  The root is derived from the OS account rather than `$HOME`, and changing
-  environment/subaccount/root or derived paths after construction fails
-  validation before the process lock is acquired.
-  Realized UTC-day P&L is fsync-persisted, idempotent by event ID, validates
-  timestamp/day integrity, and rolls over at UTC midnight.
-- Open-risk marking includes fees, exit slippage, and executable bid depth;
-  inventory beyond available depth is conservatively valued at zero.
-- Authentication/authorization failures halt globally. Safe GET requests
-  receive four bounded 429 retries with exponential backoff and fresh
-  signatures; mutating POST/DELETE requests are never automatically retried.
-  Persistent rate limiting still halts globally. Discovery uses 1,000-row
-  pages and monitors at most 10 markets, reducing both startup pagination and
-  quote-loop bursts. Market-local failures quarantine only that market, and
-  one healthy ticker cannot erase global failures. Staleness is checked after
-  every blocking quote request, before another market can act. A quote failure
-  for a market with exposure or a pending order always halts; it can never be
-  quarantined and skipped.
-- Paper orders are non-blocking pending orders. They fill only on the first
-  newly observed quote for that same market whose immutable observation time
-  is at or after simulated latency. Blocking cached-book paper execution is
-  rejected. Pending entries count toward the maximum-position limit.
-- Real-time `PriceFeed` and `ReplayFeed` run the same decision and pending-fill
-  path. Both reject new positions too near scheduled close or when the market
-  can close early. Empty data partitions stay empty; future history cannot
-  trigger a signal.
-- A future live entry must carry the signal's original ask as a hard maximum;
-  an adverse requote is rejected even if it remains inside global bounds.
-  The executor's fresh requote is copied into the risk mark before the
-  immediate post-fill loss check.
-- Version-5 research logs use a unique file/session ID, process-start UTC day,
-  starting daily P&L, per-row UTC day, real event IDs, market lifecycle facts,
-  and config/code fingerprints. A durable clean terminal record is required;
-  halted or unterminated sessions cannot contribute even diagnostic mark-outs,
-  and reordered observations are rejected rather than sorted. Replay restores
-  same-day loss state and resets it at UTC midnight like runtime—even when the
-  first quote arrives after midnight. Sibling contracts remain in one stable
-  TRAIN/TEST bucket, while one shared portfolio replay supplies group P&L.
-  Nonfinite/crossed books, malformed rows, safety halts, unsupported horizons,
-  data gaps, pending orders, and residual inventory fail closed. Raw mark-outs
-  are non-executable diagnostics.
-- Ctrl-C, SIGTERM, and SIGHUP enter the same shutdown path. Later termination
-  signals are held while cancellation/reconciliation and the terminal research
-  record complete.
-- Paper fees include the aggregate taker-fee ceiling and documented account
-  balance-rounding charge at configured `$0.01` (non-direct) or `$0.0001`
-  (direct-member) precision. One simulated fill per order receives no
-  multi-fill accumulator rebate. Live accounting would use API `fee_cost`.
+Credentials stay outside Git:
 
-## What is not yet proven
+```bash
+export KALSHI_API_KEY_ID="your-key-id"
+export KALSHI_PRIVATE_KEY_PATH="/absolute/path/outside-the-repo/key.pem"
+```
 
-- The authenticated portfolio responses and order lifecycle have not been
-  validated from this environment. Run `python bot.py --check` on your machine;
-  missing credentials fail the check. Valid empty authenticated
-  order/fill/position collections produce a loud row-coverage warning while
-  their response envelopes remain accepted; malformed rows still fail.
-- No demo order has been submitted, and both `--demo` and `--live` exit before
-  creating files, making network calls, or entering an order path. Refusal is
-  a nonzero exit so automation cannot mistake it for successful startup.
-- The strategy still has no demonstrated edge. A valid result requires
-  positive, fee-inclusive, **evaluable** TEST performance across unseen events
-  and multiple tournaments. Any residual position, pending order, or logged
-  data gap makes a replay incomplete.
-- The generic paper fee model does not know every series-specific multiplier,
-  maker rebate, promotion, or real multi-fill rebate sequence. Analyzer output
-  is labeled `RESEARCH-EVALUABLE; ESTIMATED FEES`; use the current exchange fee
-  schedule when evaluating a specific market.
-- Price-only dip detection cannot tell market noise from match information.
-  Tennis latency and adverse selection remain major strategy risks.
-- `Config.subaccount` defaults to primary subaccount `0` and accepts only the
-  documented range `0` through `32`. Before any future demo enablement,
-  confirm every authenticated response remains in the configured subaccount.
+## Sports discovery
 
-## Deliberate enablement sequence
+- In dynamic mode, only Games contracts are considered across every
+  advertised Games-capable competition for each selected Sport.
+- No Sport or league names are embedded in selection code. Classification uses
+  official Sports filters, Series, Milestones, and nested Events; display
+  titles and ticker text are never classifiers.
+- The session window is the machine's local `[midnight, next midnight)`.
+  Startup prints both local and UTC bounds, including daylight-saving offsets.
+- Eligible individual contracts are ranked together across all selected
+  Sports. Inci monitors the best ten total, selected once at startup, with no
+  churn during discovery and no rotation during the session. Ranking favors
+  executable two-sided depth, tighter spread, greater depth, earlier start,
+  then ticker.
+- `Config.tickers` is an explicit alternative to `--sports`: the sources are
+  mutually exclusive, configured order is preserved, and the list is capped at ten.
+  Every ticker must prove the complete relationship
+  `Market → Event → official Series → current-day Games Milestone`.
+- Partial or malformed Series, Milestone, or Event inventory fails closed and
+  cannot claim a complete top ten. Recognized unsupported products are skipped
+  loudly by type; malformed binary products still fail.
 
-1. Run the complete local suite successfully.
-2. Run authenticated `python bot.py --check` and resolve every schema failure.
-3. Collect version-5, cleanly terminated single-session paper logs across
-   multiple tournaments.
-4. Freeze parameters, then evaluate untouched event-level TEST data. Require
-   positive net results with no residuals, pending orders, or data gaps.
-5. Review the current official API and fee documentation again.
-6. Enable demo only through a reviewed source change and validate many clean
-   lifecycle/restart sessions.
-7. Consider a separate reviewed live-enablement change at minimal size.
+The chosen set is immutable for that process. Start a new paper session to
+change Sports or refresh the day's candidates.
+
+## Paper execution and safety
+
+- Entries use executable ask prices; exits and risk marks use executable bids.
+  Simulated fills wait for a newly observed quote after the configured latency,
+  apply adverse slippage, respect available depth, and include estimated fees.
+- Market exposure, pending entries, stale quotes, gaps, ambiguous state, loss
+  limits, and API failures are handled conservatively. Critical failures halt
+  the shared portfolio instead of being hidden by a healthy market.
+- Paper shutdown cancels pending simulated orders and records residual
+  inventory honestly. It never reuses a stale book to fabricate an exit.
+- Ctrl-C, SIGTERM, and SIGHUP use the same terminal-record path.
+- Safe GETs have bounded 429 retry/backoff. Mutating requests are never
+  automatically retried, and all real-order paths remain unreachable.
+- Durable lock, journal, and loss-ledger paths share one account/environment
+  state root. Credentials are read from the two environment variables above.
+
+## Strict v6 research boundary
+
+v6 rows carry selected Sports plus each contract's Sport, optional league,
+Series ticker, Milestone ID, Event ticker, and scheduled start. They also carry
+configuration/code fingerprints, session identity, timestamps, lifecycle
+facts, book depth, fees, and a durable terminal state.
+
+Replay and analysis accept only strict v6 files with exact headers, immutable
+provenance, chronological rows, matching fingerprints, and a clean terminal.
+Unchanged v5 files require the archived v5 code matching their logged code
+fingerprint; they are not silently upgraded or mixed with v6.
+
+`analyze.py` runs one chronological shared-portfolio replay. Sibling contracts
+from one Event stay in the same stable TRAIN or TEST partition. It reports
+overall and per-Sport TRAIN/TEST results, including selected Sports with no
+eligible markets. A Sport is supported only when its own shared-portfolio TEST
+partition is evaluable and has strictly positive net P&L. Positive overall P&L
+cannot qualify a different Sport. Residual inventory, pending orders, data
+gaps, a safety halt, an invalid terminal, or unprocessed rows make the research
+non-evaluable.
+
+## What remains unproven
+
+- The dip-retracement hypothesis needs many clean sessions and untouched Events
+  before its held-out result means anything.
+- Price-only signals cannot distinguish temporary market noise from new game
+  information; latency and adverse selection remain central risks.
+- Paper fees are estimates and may omit Series-specific multipliers,
+  promotions, maker rebates, or multi-fill rebates.
+- Authenticated portfolio schemas still need a successful read-only `--check`
+  from the operator's machine.
+- No demo lifecycle has been exercised because order probing is intentionally
+  prohibited in this build.
+
+Do not discuss enabling orders until the full offline suite and authenticated
+preflight pass, code/config are frozen, and multiple unseen per-Sport TEST
+partitions remain positive after all simulated costs.
 
 ## Files
 
-`bot.py` · `config.py` · `engine.py` · `executor.py` ·
-`order_resolution.py` · `order_journal.py` · `safety.py` ·
-`process_lock.py` · `pnl_ledger.py` · `strategy.py` · `signals.py` ·
-`fees.py` · `schemas.py` · `kalshi_client.py` · `market_data.py` ·
-`research_log.py` · `replay.py` · `analyze.py` · `tests.py`
+`bot.py` · `config.py` · `sports_discovery.py` · `market_data.py` ·
+`schemas.py` · `kalshi_client.py` · `research_log.py` · `replay.py` ·
+`analyze.py` · `strategy.py` · `signals.py` · `engine.py` · `executor.py` ·
+`safety.py` · `order_resolution.py` · `order_journal.py` · `process_lock.py` ·
+`pnl_ledger.py` · `fees.py` · `tests.py`
