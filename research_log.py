@@ -19,7 +19,7 @@ from decimal import Decimal
 
 RESEARCH_SCHEMA_VERSION = 5
 RESEARCH_CONFIG_FIELDS = (
-    "use_demo_env", "tickers", "market_keywords",
+    "use_demo_env", "tickers", "market_keywords", "max_monitored_markets",
     "dip_threshold", "lookback_seconds", "take_profit", "stop_loss",
     "max_hold_seconds", "contracts_per_trade", "max_open_positions",
     "max_daily_loss_usd", "min_price", "max_price", "max_spread",

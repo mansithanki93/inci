@@ -18,7 +18,7 @@ python bot.py             # paper mode
 python analyze.py logs/ticks_v5_<YYYYMMDD>_<session-id>.csv
 ```
 
-`tests.py` contains 99 contract, lifecycle, safety, replay, and research
+`tests.py` contains 104 contract, lifecycle, safety, replay, and research
 regressions. The tests use fakes and local temporary files; they do not place
 orders or probe production order endpoints.
 
@@ -63,12 +63,16 @@ orders or probe production order endpoints.
   timestamp/day integrity, and rolls over at UTC midnight.
 - Open-risk marking includes fees, exit slippage, and executable bid depth;
   inventory beyond available depth is conservatively valued at zero.
-- Authentication/authorization and rate-limit failures halt globally.
-  Market-local failures quarantine only that market, and one healthy ticker
-  cannot erase global failures. Staleness is checked after every blocking
-  quote request, before another market can act. A quote failure for a market
-  with exposure or a pending order always halts; it can never be quarantined
-  and skipped.
+- Authentication/authorization failures halt globally. Safe GET requests
+  receive four bounded 429 retries with exponential backoff and fresh
+  signatures; mutating POST/DELETE requests are never automatically retried.
+  Persistent rate limiting still halts globally. Discovery uses 1,000-row
+  pages and monitors at most 10 markets, reducing both startup pagination and
+  quote-loop bursts. Market-local failures quarantine only that market, and
+  one healthy ticker cannot erase global failures. Staleness is checked after
+  every blocking quote request, before another market can act. A quote failure
+  for a market with exposure or a pending order always halts; it can never be
+  quarantined and skipped.
 - Paper orders are non-blocking pending orders. They fill only on the first
   newly observed quote for that same market whose immutable observation time
   is at or after simulated latency. Blocking cached-book paper execution is
@@ -104,9 +108,9 @@ orders or probe production order endpoints.
 
 - The authenticated portfolio responses and order lifecycle have not been
   validated from this environment. Run `python bot.py --check` on your machine;
-  missing credentials fail the check. Empty authenticated order/fill/position
-  collections are reported as envelope-only coverage and cannot produce an
-  `ALL PASSED` result.
+  missing credentials fail the check. Valid empty authenticated
+  order/fill/position collections produce a loud row-coverage warning while
+  their response envelopes remain accepted; malformed rows still fail.
 - No demo order has been submitted, and both `--demo` and `--live` exit before
   creating files, making network calls, or entering an order path. Refusal is
   a nonzero exit so automation cannot mistake it for successful startup.

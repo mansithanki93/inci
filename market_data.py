@@ -32,10 +32,15 @@ class PriceFeed:
 
     def discover_tickers(self):
         if self.cfg.tickers:
-            return self.cfg.tickers
+            selected = self.cfg.tickers[:self.cfg.max_monitored_markets]
+            if len(self.cfg.tickers) > len(selected):
+                print("[discover] monitoring cap applied: "
+                      f"{len(selected)}/{len(self.cfg.tickers)} explicit "
+                      "tickers")
+            return selected
         found = []
         markets = self.client.get_markets(
-            status="open", limit=200, mve_filter="exclude")
+            status="open", limit=1000, mve_filter="exclude")
         print("[discover] " + format_market_skips(
             getattr(self.client, "last_market_skips", {})))
         keywords = [k.lower() for k in self.cfg.market_keywords]
@@ -49,6 +54,10 @@ class PriceFeed:
                 found.append(m["ticker"])
                 self.group_ids[m["ticker"]] = m["event_ticker"]
                 print(f"[discover] {m['ticker']}: {m['title'][:60]}")
+                if len(found) >= self.cfg.max_monitored_markets:
+                    print("[discover] monitoring cap reached: "
+                          f"{self.cfg.max_monitored_markets}")
+                    break
         return found
 
     def get_quote(self, ticker):

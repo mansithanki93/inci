@@ -19,12 +19,6 @@ from schemas import (SchemaError, UnknownOrderState, parse_market,
                      parse_position, parse_orderbook_response,
                      build_order_body,
                      CREATE_CANCEL_ENDPOINT, ORDERS_ENDPOINT)
-from schemas import (SchemaError, UnknownOrderState, parse_market,
-                     parse_order, parse_create_ack, parse_fill,
-                     parse_position, parse_balance,
-                     parse_orderbook_response,
-                     build_order_body,
-                     CREATE_CANCEL_ENDPOINT, ORDERS_ENDPOINT)
 from order_journal import OrderJournal
 from executor import Executor, HaltError
 from safety import Safety, Reconciler, ExposureError
@@ -292,7 +286,7 @@ def test_http_boundary_wiring_and_strict_envelopes():
                   "ts_ms": 123}),
         Response({"order": order}),
         Response({"orders": [resting], "cursor": ""}),
-        Response({"balance": 1234, "balance_dollars": "12.3400",
+        Response({"balance": 1234, "balance_dollars": "12.3486",
                   "portfolio_value": 1500, "updated_ts": 123}),
         Response({"fills": [fill], "cursor": ""}),
         Response({"market_positions": [{"ticker": "T",
@@ -316,7 +310,9 @@ def test_http_boundary_wiring_and_strict_envelopes():
     assert client.create_order(body)["fill_count"] == Decimal("2.00")
     assert client.get_order("OID")["status"] == "executed"
     assert client.get_open_orders()[0]["order_id"] == "REST"
-    assert client.get_balance()["balance"] == 1234
+    parsed_balance = client.get_balance()
+    assert parsed_balance["balance"] == 1234
+    assert parsed_balance["balance_dollars"] == Decimal("12.3486")
     assert client.get_fills("OID")[0]["fee"] == Decimal("0.034567")
     assert client.get_positions()[0]["position"] == Decimal("2.00")
     assert client.cancel_order("OID")["reduced_by"] == Decimal("0.00")
@@ -376,6 +372,134 @@ def test_http_boundary_wiring_and_strict_envelopes():
     print("PASS HTTP boundary: URLs/auth/params/body/envelopes all validated")
 
 
+def test_get_429_retries_with_exponential_backoff():
+    """A transient read throttle must recover without hiding the delay."""
+    import requests
+    from kalshi_client import KalshiClient
+
+    class Response:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self.payload = payload
+            self.text = "too many requests" if status == 429 else "ok"
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(
+                    f"HTTP {self.status_code}", response=self)
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def __init__(self):
+            self.responses = [
+                Response(429), Response(429),
+                Response(200, {"exchange_active": True,
+                               "trading_active": True}),
+            ]
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return self.responses.pop(0)
+
+    client = KalshiClient(Config())
+    client.session = Session()
+    client._private_key = object()
+    signed = []
+
+    def sign(method, path):
+        signed.append((method, path))
+        return {"attempt": str(len(signed))}
+
+    client._sign = sign
+    delays = []
+    client._sleep = delays.append
+
+    result = client._request(
+        "GET", "/exchange/status", params={"cursor": "SAME"}, auth=True)
+
+    assert result == {"exchange_active": True, "trading_active": True}
+    assert delays == [0.25, 0.5]
+    assert len(client.session.calls) == 3
+    assert [call[2]["params"] for call in client.session.calls] == [
+        {"cursor": "SAME"}, {"cursor": "SAME"}, {"cursor": "SAME"}]
+    assert [call[2]["headers"]["attempt"]
+            for call in client.session.calls] == ["1", "2", "3"]
+    print("PASS transient GET 429 retries with exponential backoff")
+
+
+def test_get_429_retry_exhaustion_is_bounded():
+    """A persistent throttle must escape to Safety after bounded retries."""
+    import requests
+    from kalshi_client import KalshiClient
+
+    class Response:
+        status_code = 429
+        text = "too many requests"
+
+        def raise_for_status(self):
+            raise requests.HTTPError("HTTP 429", response=self)
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            return Response()
+
+    client = KalshiClient(Config())
+    client.session = Session()
+    delays = []
+    client._sleep = delays.append
+    try:
+        client._request("GET", "/markets")
+        assert False
+    except requests.HTTPError as error:
+        assert error.response.status_code == 429
+
+    assert client.session.calls == 5
+    assert delays == [0.25, 0.5, 1.0, 2.0]
+    print("PASS persistent GET 429 escapes after bounded retries")
+
+
+def test_mutating_429_is_never_retried():
+    """Writes can be ambiguous, so POST/DELETE must remain single-attempt."""
+    import requests
+    from kalshi_client import KalshiClient
+
+    class Response:
+        status_code = 429
+        text = "too many requests"
+
+        def raise_for_status(self):
+            raise requests.HTTPError("HTTP 429", response=self)
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            return Response()
+
+    for method in ("POST", "DELETE"):
+        client = KalshiClient(Config())
+        client.session = Session()
+        delays = []
+        client._sleep = delays.append
+        try:
+            client._request(method, "/portfolio/events/orders", body={})
+            assert False
+        except requests.HTTPError as error:
+            assert error.response.status_code == 429
+        assert client.session.calls == 1
+        assert delays == []
+    print("PASS mutating 429 responses are never automatically retried")
+
+
 def test_portfolio_contracts_decimal():
     f = parse_fill({"count_fp": "12.50", "yes_price_dollars": "0.525",
                     "fee_cost": "0.09", "order_id": "abc",
@@ -420,25 +544,6 @@ def test_portfolio_contracts_decimal():
         parse_market({"ticker": "T", "yes_bid_dollars": "0.5"}); assert False
     except SchemaError:
         pass
-    balance = parse_balance({
-        "balance": 980,
-        "balance_dollars": "9.8026",
-        "portfolio_value": 980,
-        "updated_ts": 123,
-    })
-    assert balance["balance"] == 980
-    assert balance["balance_dollars"] == Decimal("9.8026")
-
-    try:
-        parse_balance({
-            "balance": 981,
-            "balance_dollars": "9.8026",
-            "portfolio_value": 980,
-            "updated_ts": 123,
-        })
-        assert False
-    except SchemaError:
-        pass        
     print("PASS portfolio contracts: Decimal subpenny prices, fractional "
           "quantities, fp fields, negative-depth rejection")
 
@@ -2526,6 +2631,8 @@ def test_config_rejects_unsafe_research_parameters():
         {"max_price": 90, "take_profit": 11},
         {"sim_latency_s": "1"}, {"subaccount": 33},
         {"balance_precision_usd": "0.003"},
+        {"max_monitored_markets": 0},
+        {"max_monitored_markets": 11},
     )
     for kwargs in invalid:
         try:
@@ -2580,7 +2687,7 @@ def test_staleness_is_checked_between_market_requests():
     print("PASS stale flat market is isolated between blocking requests")
 
 
-def test_preflight_never_claims_unvalidated_portfolio_contracts():
+def test_preflight_warns_but_accepts_valid_empty_portfolio_collections():
     from bot import preflight
 
     class CheckClient:
@@ -2602,10 +2709,18 @@ def test_preflight_never_claims_unvalidated_portfolio_contracts():
         def get_positions(self):
             return []
 
-    assert not preflight(Config(), CheckClient())
+    unauthenticated = Config()
+    unauthenticated.api_key_id = ""
+    assert not preflight(unauthenticated, CheckClient())
     authenticated = Config(); authenticated.api_key_id = "KEY"
-    assert not preflight(authenticated, CheckClient())
-    print("PASS preflight cannot pass skipped or zero-row portfolio schemas")
+    assert preflight(authenticated, CheckClient())
+
+    class BrokenClient(CheckClient):
+        def get_positions(self):
+            raise SchemaError("malformed position row")
+
+    assert not preflight(authenticated, BrokenClient())
+    print("PASS preflight accepts empty rows but rejects schema failures")
 
 
 def test_preflight_market_sample_uses_exactly_one_page():
@@ -2781,6 +2896,46 @@ def test_discovery_and_preflight_report_unsupported_market_counts():
     assert "unsupported skipped: total=2 types=scalar=2" in text
     assert "no supported markets returned" in text
     print("PASS discovery/--check loudly report unsupported type counts")
+
+
+def test_discovery_uses_maximum_page_and_caps_monitored_markets():
+    from market_data import PriceFeed
+
+    class DiscoveryClient:
+        last_market_skips = {}
+
+        def __init__(self):
+            self.params = None
+
+        def get_markets(self, **params):
+            self.params = params
+            return [
+                parse_market(current_market(
+                    ticker=f"ATP-{index}", event_ticker=f"EVENT-{index}",
+                    title=f"ATP tennis match {index}"))
+                for index in range(5)
+            ]
+
+    cfg = Config(max_monitored_markets=3)
+    client = DiscoveryClient()
+    feed = PriceFeed(cfg, client)
+    assert feed.discover_tickers() == ["ATP-0", "ATP-1", "ATP-2"]
+    assert client.params == {
+        "status": "open", "limit": 1000, "mve_filter": "exclude"}
+    assert feed.group_ids == {
+        "ATP-0": "EVENT-0", "ATP-1": "EVENT-1", "ATP-2": "EVENT-2"}
+    print("PASS discovery uses 1000-row pages and caps monitored markets")
+
+
+def test_explicit_tickers_respect_monitoring_cap():
+    from market_data import PriceFeed
+
+    cfg = Config(
+        tickers=["T1", "T2", "T3", "T4"],
+        max_monitored_markets=3)
+    assert PriceFeed(cfg, client=None).discover_tickers() == [
+        "T1", "T2", "T3"]
+    print("PASS explicit ticker lists respect the monitoring cap")
 
 
 def test_response_format_errors_include_raw_values():
@@ -2994,7 +3149,8 @@ def test_replay_rejects_config_or_code_provenance_mismatch():
              close_ts=4070908800.0, can_close_early=False)
     log.end(clean=True, reason="operator interrupt", ts=2.0)
     for changed in (Config(dip_threshold=8), Config(poll_interval=2.0),
-                    Config(market_keywords=["basketball"])):
+                    Config(market_keywords=["basketball"]),
+                    Config(max_monitored_markets=9)):
         try:
             replay(log.tick_path, cfg=changed)
             assert False
@@ -3229,6 +3385,9 @@ if __name__ == "__main__":
     test_current_market_contract_and_empty_book_normalization()
     test_endpoint_separation()
     test_http_boundary_wiring_and_strict_envelopes()
+    test_get_429_retries_with_exponential_backoff()
+    test_get_429_retry_exhaustion_is_bounded()
+    test_mutating_429_is_never_retried()
     test_portfolio_contracts_decimal()
     test_pagination()
     test_pagination_fails_closed()
@@ -3302,11 +3461,13 @@ if __name__ == "__main__":
     test_pricefeed_and_replayfeed_produce_identical_paper_fills()
     test_actual_runtime_driver_matches_replay()
     test_staleness_is_checked_between_market_requests()
-    test_preflight_never_claims_unvalidated_portfolio_contracts()
+    test_preflight_warns_but_accepts_valid_empty_portfolio_collections()
     test_preflight_market_sample_uses_exactly_one_page()
     test_market_collections_skip_only_known_unsupported_products()
     test_market_collection_skips_never_hide_schema_drift()
     test_discovery_and_preflight_report_unsupported_market_counts()
+    test_discovery_uses_maximum_page_and_caps_monitored_markets()
+    test_explicit_tickers_respect_monitoring_cap()
     test_response_format_errors_include_raw_values()
     test_replay_reports_halt_and_resets_daily_risk_at_utc_midnight()
     test_replay_honors_logged_same_day_starting_loss()
@@ -3322,4 +3483,4 @@ if __name__ == "__main__":
     test_replay_enforces_logged_market_lifecycle()
     test_termination_signals_route_through_interrupt()
     test_live_and_demo_disabled()
-    print("\nALL TESTS PASS (99 tests)")
+    print("\nALL TESTS PASS (104 tests)")

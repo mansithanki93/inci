@@ -41,6 +41,7 @@ class Config:
         "tennis", "ATP", "WTA", "US Open", "Wimbledon",
         "Roland Garros", "Australian Open",
     ])
+    max_monitored_markets: int = 10
 
     # --- Strategy (cents). Defaults sized so TP clears fees near 50c (fix #4):
     # net_take_profit(50, 5) ~= +1.2c; a 2c TP would be net-negative there.
@@ -164,9 +165,11 @@ class Config:
             number(name, positive=True)
         for name in ("sim_latency_s", "sim_slippage_cents", "max_spread"):
             number(name, nonnegative=True)
-        for name in ("max_open_positions", "flatten_retries",
-                     "max_consec_errors"):
+        for name in ("max_open_positions", "max_monitored_markets",
+                     "flatten_retries", "max_consec_errors"):
             positive_int(name)
+        if self.max_monitored_markets > 10:
+            raise ValueError("max_monitored_markets cannot exceed 10")
         minimum = number("min_price", nonnegative=True)
         maximum = number("max_price", positive=True)
         if not (Decimal(0) < minimum < maximum < Decimal(100)):

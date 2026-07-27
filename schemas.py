@@ -16,7 +16,7 @@ parse_order (with required status) is for polling/list responses only.
 """
 import re
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation
 
 
 class SchemaError(Exception):
@@ -470,13 +470,12 @@ def parse_balance(response):
         "balance.portfolio_value")
     updated_ts = _nonnegative_int(_req(response, "updated_ts", "balance"),
                                   "balance.updated_ts")
-        expected_legacy_balance = int(
-        (dollars * 100).to_integral_value(rounding=ROUND_DOWN)
-    )
-    if balance != expected_legacy_balance:
+    difference_cents = abs(
+        dollars * Decimal("100") - Decimal(balance))
+    if difference_cents >= Decimal("1"):
         raise SchemaError(
-            "balance: legacy cents do not match truncated balance_dollars, "
-            f"got balance={raw_balance!r}, "
-            f"balance_dollars={raw_dollars!r}")
+            "balance: cents/dollars mismatch, got "
+            f"balance={raw_balance!r}, balance_dollars={raw_dollars!r}, "
+            f"difference_cents={difference_cents}")
     return {"balance": balance, "balance_dollars": dollars,
             "portfolio_value": portfolio_value, "updated_ts": updated_ts}

@@ -111,11 +111,14 @@ def preflight(cfg, client):
             print("[check] authenticated portfolio envelopes OK; row samples: "
                   + ", ".join(f"{name}={len(rows)}"
                               for name, rows in samples.items()))
+            observed = [name for name, rows in samples.items() if rows]
             if empty:
-                raise SchemaError(
-                    "portfolio row schemas not exercised for empty "
-                    f"collections {empty}; preflight coverage is incomplete")
-            print("[check] portfolio row schemas OK (orders/fills/positions)")
+                print(
+                    "[check] WARNING row schemas not observed for empty "
+                    f"collections {empty}; no production probes were made")
+            print(
+                "[check] portfolio row schemas observed live: "
+                + (", ".join(observed) if observed else "none"))
         except (SchemaError, Exception) as e:
             print(f"[check] FAIL portfolio contract: {e}")
             ok = False

@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 import schemas
 
 MAX_PAGES = 20
+GET_429_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0)
 
 
 def _diagnostic(value, limit=240):
@@ -36,6 +37,7 @@ class KalshiClient:
         self.cfg = config
         self.base = config.api_base
         self.session = requests.Session()
+        self._sleep = time.sleep
         self._private_key = None
         self.last_market_skips = {}
         if config.api_key_id and config.private_key_path:
@@ -63,9 +65,24 @@ class KalshiClient:
         if auth and self._private_key is None:
             raise schemas.SchemaError(
                 "authenticated request requires a loaded private key")
-        headers = self._sign(method, path) if auth else {}
-        r = self.session.request(method, self.base + endpoint, params=params,
-                                 json=body, headers=headers, timeout=10)
+        response = None
+        for attempt in range(len(GET_429_BACKOFF_SECONDS) + 1):
+            # Authentication timestamps/signatures must be fresh after a
+            # backoff; recompute them for every attempt.
+            headers = self._sign(method, path) if auth else {}
+            response = self.session.request(
+                method, self.base + endpoint, params=params,
+                json=body, headers=headers, timeout=10)
+            if (method == "GET"
+                    and getattr(response, "status_code", None) == 429
+                    and attempt < len(GET_429_BACKOFF_SECONDS)):
+                delay = GET_429_BACKOFF_SECONDS[attempt]
+                print(f"[rate-limit] GET {endpoint} throttled; "
+                      f"retrying in {delay:.2f}s")
+                self._sleep(delay)
+                continue
+            break
+        r = response
         r.raise_for_status()
         try:
             payload = r.json()
