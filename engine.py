@@ -21,6 +21,15 @@ class Context:
         self.clock = clock
         self.latest_bid = {}
         self.bid_ts = {}          # ticker -> time of last usable bid
+        self.entry_status = {}    # ticker -> stable lifecycle gate status
+
+
+def set_entry_status(ctx, ticker, status, message=None):
+    """Publish lifecycle gate state without repeating unchanged console text."""
+    previous = ctx.entry_status.get(ticker)
+    ctx.entry_status[ticker] = status
+    if message is not None and previous != status:
+        print(message)
 
 
 def sync_execution_observation(ctx, ticker):
@@ -113,10 +122,26 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
             and not ctx.feed.entry_allowed(
                 ticker, now,
                 ctx.cfg.max_hold_seconds + ctx.cfg.close_buffer_seconds)):
+        set_entry_status(
+            ctx, ticker, "blocked:close_horizon",
+            f"[entry] BLOCKED {ticker}: insufficient close horizon")
         return
-    if (hasattr(ctx.feed, "early_close_risk")
-            and ctx.feed.early_close_risk(ticker)):
-        return
+    early_close_risk = (
+        hasattr(ctx.feed, "early_close_risk")
+        and ctx.feed.early_close_risk(ticker))
+    if early_close_risk:
+        if not ctx.cfg.paper_trading:
+            set_entry_status(
+                ctx, ticker, "blocked:can_close_early",
+                f"[entry] BLOCKED {ticker}: can_close_early=true "
+                "outside paper mode")
+            return
+        set_entry_status(
+            ctx, ticker, "paper_allowed:can_close_early",
+            f"[entry] PAPER-ONLY {ticker}: can_close_early=true; "
+            "entry remains enabled")
+    else:
+        set_entry_status(ctx, ticker, "eligible")
     entry_sig = ctx.strategy.check_entry(ticker, hist, now,
                                          mid, bid, ask)
     if entry_sig:

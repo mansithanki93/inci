@@ -4433,6 +4433,17 @@ def test_close_horizon_and_live_requote_block_unsafe_entries():
     process_tick(ctx, "T", Decimal(52), Decimal(51), Decimal(53),
                  observed_at=observed_at)
     assert not ctx.executor.pending_paper
+    assert ctx.entry_status["T"] == "blocked:close_horizon"
+
+    nonpaper_cfg = Config(max_hold_seconds=300, close_buffer_seconds=60)
+    nonpaper_cfg.paper_trading = False
+    nonpaper_ctx = Context(
+        nonpaper_cfg, feed, ScalpStrategy(nonpaper_cfg), object(),
+        None, Safety(nonpaper_cfg), clock=lambda: 100.0)
+    process_tick(
+        nonpaper_ctx, "T", Decimal(52), Decimal(51), Decimal(53),
+        observed_at=observed_at)
+    assert nonpaper_ctx.entry_status["T"] == "blocked:close_horizon"
 
     class UnsafeRequote(BookFeed):
         def get_quote(self, ticker):
@@ -4457,6 +4468,88 @@ def test_close_horizon_and_live_requote_block_unsafe_entries():
         assert "signal cap" in str(error)
     assert client.created_bodies == [] and journal.load() == []
     print("PASS close horizon and unsafe live requote block new entries")
+
+
+def test_paper_early_close_risk_is_visible_but_does_not_block_entry():
+    from collections import defaultdict
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    class Feed:
+        def __init__(self):
+            self.history = defaultdict(list)
+            self.history["T"].extend(
+                (float(ts), Decimal(60)) for ts in range(1, 21))
+            self.history["T"].append((21.0, Decimal(52)))
+
+        def top_of_book(self, ticker):
+            return Decimal(51), Decimal(20), Decimal(53), Decimal(20)
+
+        def entry_allowed(self, ticker, now, required_seconds):
+            return True
+
+        def early_close_risk(self, ticker):
+            return True
+
+    cfg = Config()
+    feed = Feed()
+    executor = Executor(cfg, None, feed)
+    ctx = Context(cfg, feed, ScalpStrategy(cfg), executor, None, Safety(cfg),
+                  clock=lambda: 21.0)
+    output = StringIO()
+    with redirect_stdout(output):
+        process_tick(ctx, "T", Decimal(52), Decimal(51), Decimal(53),
+                     observed_at=21.0)
+
+    assert len(executor.pending_paper) == 1
+    assert executor.pending_paper[0].ticker == "T"
+    assert ctx.entry_status["T"] == "paper_allowed:can_close_early"
+    executor.cancel_pending_paper()
+    feed.history["T"] = [
+        (21.0, Decimal(52)), (22.0, Decimal(52))]
+    with redirect_stdout(output):
+        process_tick(ctx, "T", Decimal(52), Decimal(51), Decimal(53),
+                     observed_at=22.0)
+    assert output.getvalue().count(
+        "PAPER-ONLY T: can_close_early=true; entry remains enabled") == 1
+    print("PASS paper early-close risk is visible without blocking research")
+
+
+def test_nonpaper_early_close_risk_is_visible_and_blocks_entry():
+    from collections import defaultdict
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    class Feed:
+        def __init__(self):
+            self.history = defaultdict(list)
+            self.history["T"].extend(
+                (float(ts), Decimal(60)) for ts in range(1, 21))
+            self.history["T"].append((21.0, Decimal(52)))
+
+        def top_of_book(self, ticker):
+            return Decimal(51), Decimal(20), Decimal(53), Decimal(20)
+
+        def entry_allowed(self, ticker, now, required_seconds):
+            return True
+
+        def early_close_risk(self, ticker):
+            return True
+
+    cfg = Config()
+    cfg.paper_trading = False
+    feed = Feed()
+    ctx = Context(cfg, feed, ScalpStrategy(cfg), object(), None, Safety(cfg),
+                  clock=lambda: 21.0)
+    output = StringIO()
+    with redirect_stdout(output):
+        process_tick(ctx, "T", Decimal(52), Decimal(51), Decimal(53),
+                     observed_at=21.0)
+
+    assert ctx.entry_status["T"] == "blocked:can_close_early"
+    assert "BLOCKED T: can_close_early=true outside paper mode" \
+        in output.getvalue()
+    print("PASS non-paper early-close risk remains visibly blocked")
 
 
 def test_live_fill_risk_uses_executor_requote_immediately():
@@ -4516,6 +4609,7 @@ def test_replay_enforces_logged_market_lifecycle():
     from replay import replay
 
     cfg = Config(max_hold_seconds=300, close_buffer_seconds=60)
+    results = {}
     for name, close_ts, early in (
             ("near-close", 350.0, "false"),
             ("early-close", 1000.0, "true")):
@@ -4532,12 +4626,26 @@ def test_replay_enforces_logged_market_lifecycle():
                 cfg=cfg, session=name, ts=21, mid=52, bid=51, ask=53,
                 close_ts=close_ts, can_close_early=early))
             writer.writerow(research_row(
-                cfg=cfg, session=name, ts=22, event_ticker="", ticker="",
+                cfg=cfg, session=name, ts=22, mid=52, bid=51, ask=53,
+                close_ts=close_ts, can_close_early=early))
+            writer.writerow(research_row(
+                cfg=cfg, session=name, ts=23, mid=60, bid=59, ask=61,
+                close_ts=close_ts, can_close_early=early))
+            writer.writerow(research_row(
+                cfg=cfg, session=name, ts=24, mid=60, bid=59, ask=61,
+                close_ts=close_ts, can_close_early=early))
+            writer.writerow(research_row(
+                cfg=cfg, session=name, ts=25, event_ticker="", ticker="",
                 event="session_end", detail="operator interrupt",
                 mid="", bid="", ask="", bid_qty="", ask_qty=""))
-        result = replay(path, cfg=cfg)
-        assert result["trades"] == [] and result["evaluable"], result
-    print("PASS replay enforces logged close horizon and early-close risk")
+        results[name] = replay(path, cfg=cfg)
+
+    assert results["near-close"]["trades"] == []
+    assert results["near-close"]["evaluable"]
+    assert [trade[1] for trade in results["early-close"]["trades"]] == [
+        "BUY", "SELL"]
+    assert results["early-close"]["evaluable"]
+    print("PASS replay blocks close horizon but permits paper early-close data")
 
 
 def test_termination_signals_route_through_interrupt():
@@ -7296,8 +7404,10 @@ if __name__ == "__main__":
     test_analyzer_horizons_are_sorted_unique()
     test_unavailable_market_isolated_unless_exposed()
     test_close_horizon_and_live_requote_block_unsafe_entries()
+    test_paper_early_close_risk_is_visible_but_does_not_block_entry()
+    test_nonpaper_early_close_risk_is_visible_and_blocks_entry()
     test_live_fill_risk_uses_executor_requote_immediately()
     test_replay_enforces_logged_market_lifecycle()
     test_termination_signals_route_through_interrupt()
     test_live_and_demo_disabled()
-    print("\nALL TESTS PASS (200 tests)")
+    print("\nALL TESTS PASS (202 tests)")

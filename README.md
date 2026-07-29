@@ -73,6 +73,11 @@ change Sports or refresh the day's candidates.
   the shared portfolio instead of being hidden by a healthy market.
 - Paper shutdown cancels pending simulated orders and records residual
   inventory honestly. It never reuses a stale book to fabricate an exit.
+- `can_close_early=true` is retained as visible lifecycle risk metadata but
+  does not make paper research inert. Inci prints a one-time `PAPER-ONLY`
+  notice and continues evaluating entries. The same condition remains a
+  fail-closed entry block outside paper mode, while insufficient close horizon
+  blocks every mode.
 - Ctrl-C, SIGTERM, and SIGHUP use the same terminal-record path.
 - Safe GETs have bounded 429 retry/backoff. Mutating requests are never
   automatically retried, and all real-order paths remain unreachable.
