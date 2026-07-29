@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "provider_id": "EXAMPLE_DISABLED",
+  "product_tier": "UNQUALIFIED_TEMPLATE",
+  "entitlement_id": "NO_ENTITLEMENT",
+  "source_lineage_id": "EXAMPLE_DISABLED_LINEAGE",
+  "terms_url": "https://example.invalid/disabled",
+  "terms_version": "UNQUALIFIED_TEMPLATE",
+  "permission": {
+    "artifact_path": "DISABLED_DO_NOT_CREATE/permission.json",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "evidence_path": "DISABLED_DO_NOT_CREATE/permission-evidence.bin",
+    "evidence_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "billing_mode": "trial",
+  "auto_renew": false,
+  "access_starts_at": "2000-01-01T00:00:00Z",
+  "access_expires_at": "2000-01-02T00:00:00Z",
+  "analysis_expires_at": "2000-01-02T00:00:00Z",
+  "raw_retention_until": "2000-01-03T00:00:00Z",
+  "max_raw_retention_seconds": 172800,
+  "credential_env_names": [],
+  "quotas": {
+    "requests_per_rolling_60_seconds": 1,
+    "requests_per_utc_calendar_day": 1,
+    "requests_per_rolling_second": 1,
+    "max_connections": 1,
+    "max_subscriptions": 1,
+    "resync_requests_per_rolling_hour": 1
+  },
+  "capabilities": {
+    "stable_match_ids": false,
+    "stable_player_ids": false,
+    "point_state": false,
+    "current_server": false,
+    "match_format": false,
+    "source_event_time": false,
+    "provider_generated_time": false,
+    "monotonic_sequence_or_revision": false,
+    "correction_semantics": false,
+    "resync_snapshot": false,
+    "supported_formats": [
+      "rest_json"
+    ],
+    "declared_strata": [
+      {
+        "sport": "tennis",
+        "tour": "SYNTHETIC",
+        "competition_tier": "SYNTHETIC",
+        "match_format": "BEST_OF_3",
+        "round_code": "SYNTHETIC"
+      }
+    ]
+  },
+  "qualification": {
+    "artifact_path": "DISABLED_DO_NOT_CREATE/qualification.json",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "evidence_trace_path": "DISABLED_DO_NOT_CREATE/qualification-trace.json",
+    "evidence_trace_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
