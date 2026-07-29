@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "provider_id": "synthetic-provider",
+  "product_tier": "trial-v1",
+  "source_lineage_id": "synthetic-lineage-v1",
+  "adapter_code_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "auth_contract_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "quota_contract_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "qualification_protocol_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "evidence_trace_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "issuer_id": "issuer-test",
+  "approval_id": "qualification-approval",
+  "issued_at": "2026-07-27T12:11:00Z",
+  "status": "passed",
+  "qualified_at": "2026-07-27T12:10:00Z",
+  "qualified_until": "2026-08-02T12:10:00Z",
+  "observed_matches": 2,
+  "simultaneous_matches_tested": 2,
+  "strata": [{
+    "stratum": {
+      "sport": "tennis",
+      "tour": "ATP",
+      "competition_tier": "MASTERS-1000",
+      "match_format": "BEST_OF_3",
+      "round_code": "R16"
+    },
+    "observed_matches": 2,
+    "simultaneous_matches_tested": 2,
+    "tested_formats": ["rest_json", "websocket_json"],
+    "tested_capabilities": [
+      "correction_semantics",
+      "current_server",
+      "match_format",
+      "monotonic_sequence_or_revision",
+      "point_state",
+      "provider_generated_time",
+      "resync_snapshot",
+      "source_event_time",
+      "stable_match_ids",
+      "stable_player_ids"
+    ]
+  }]
+}
