@@ -1,0 +1,2894 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-expert:schema:expert-observation-rejected-v1",
+  "title": "Inci Tennis Expert Observation Rejected Payload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observation",
+    "reason"
+  ],
+  "properties": {
+    "observation": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ExpertSynchronizationObservationV1"
+        },
+        {
+          "$ref": "#/$defs/ExpertIgnoredObservationV1"
+        },
+        {
+          "$ref": "#/$defs/ExpertRejectedObservationV1"
+        }
+      ]
+    },
+    "reason": {
+      "$ref": "#/$defs/rejectReason"
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "$ref": "#/$defs/ExpertSynchronizationObservationV1"
+        },
+        "reason": {
+          "const": "synchronization_session_drift"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "$ref": "#/$defs/ExpertSynchronizationObservationV1"
+        },
+        "reason": {
+          "const": "reducer_exception"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "$ref": "#/$defs/ExpertSynchronizationObservationV1"
+        },
+        "reason": {
+          "const": "prior_outcome_halted"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "$ref": "#/$defs/ExpertIgnoredObservationV1"
+        },
+        "reason": {
+          "const": "static_session_halt"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "parent_contract_invalid"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "parent_contract_invalid"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "normalizer_schema_unknown"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "normalizer_schema_unknown"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "normalizer_payload_invalid"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "normalizer_payload_invalid"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "normalizer_contract_violation"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "normalizer_contract_violation"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "normalizer_exception"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "normalizer_exception"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "group_capacity_exceeded"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "group_capacity_exceeded"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "persistence_capacity_exceeded"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "persistence_capacity_exceeded"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "synchronization_session_drift"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "synchronization_session_drift"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "reducer_exception"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "reducer_exception"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "prior_outcome_halted"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "prior_outcome_halted"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "prior_group_halted"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "prior_group_halted"
+        }
+      }
+    },
+    {
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "properties": {
+        "observation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ExpertRejectedObservationV1"
+            },
+            {
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "static_session_halt"
+                }
+              }
+            }
+          ]
+        },
+        "reason": {
+          "const": "static_session_halt"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "safeId": {
+      "type": "string",
+      "pattern": "^(?![Hh][Tt][Tt][Pp][Ss]?:|[Ff][Ii][Ll][Ee]:)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:E-?[0-9]+)?$"
+    },
+    "nonnegative": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+    },
+    "positive": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+    },
+    "ExpertParentEvidenceV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "ingest_seq",
+        "record_sha256",
+        "event_type",
+        "event_version",
+        "local_wall_ns",
+        "local_monotonic_ns",
+        "clock_uncertainty_ns"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "ingest_seq": {
+          "$ref": "#/$defs/positive"
+        },
+        "record_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "event_type": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_version": {
+          "$ref": "#/$defs/positive"
+        },
+        "local_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "local_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "SetScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "games_home",
+        "games_away",
+        "tiebreak_points_home",
+        "tiebreak_points_away"
+      ],
+      "properties": {
+        "games_home": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "games_away": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "tiebreak_points_home": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tiebreak_points_away": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ProviderSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_source_id",
+        "revision_domain_id",
+        "source_lineage_sha256",
+        "provider_event_id",
+        "provider_match_id",
+        "home_player_id",
+        "away_player_id",
+        "scheduled_start_wall_ns",
+        "match_format",
+        "status",
+        "termination_kind",
+        "winner",
+        "retired_side",
+        "completed_sets",
+        "games_home",
+        "games_away",
+        "points_home",
+        "points_away",
+        "in_tiebreak",
+        "tiebreak_points_home",
+        "tiebreak_points_away",
+        "tiebreak_first_server",
+        "server_for_next_point",
+        "correction_epoch",
+        "revision",
+        "source_wall_ns",
+        "source_generated_wall_ns",
+        "received_monotonic_ns",
+        "clock_uncertainty_ns",
+        "snapshot_complete"
+      ],
+      "properties": {
+        "provider_source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "revision_domain_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provider_event_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "provider_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "home_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "away_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "scheduled_start_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "match_format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets",
+            "unsupported"
+          ]
+        },
+        "status": {
+          "enum": [
+            "scheduled",
+            "live",
+            "suspended",
+            "ended",
+            "cancelled"
+          ]
+        },
+        "termination_kind": {
+          "enum": [
+            "none",
+            "natural",
+            "walkover",
+            "retirement",
+            "cancellation"
+          ]
+        },
+        "winner": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retired_side": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_sets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SetScore"
+          },
+          "minItems": 0,
+          "maxItems": 5
+        },
+        "games_home": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "games_away": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "points_home": {
+          "enum": [
+            "love",
+            "fifteen",
+            "thirty",
+            "forty",
+            "advantage"
+          ]
+        },
+        "points_away": {
+          "enum": [
+            "love",
+            "fifteen",
+            "thirty",
+            "forty",
+            "advantage"
+          ]
+        },
+        "in_tiebreak": {
+          "type": "boolean"
+        },
+        "tiebreak_points_home": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "tiebreak_points_away": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "tiebreak_first_server": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "server_for_next_point": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correction_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "source_generated_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "received_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "snapshot_complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ProviderPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_source_id",
+        "revision_domain_id",
+        "source_lineage_sha256",
+        "provider_event_id",
+        "provider_match_id",
+        "home_player_id",
+        "away_player_id",
+        "scheduled_start_wall_ns",
+        "match_format",
+        "correction_epoch",
+        "revision",
+        "point_winner",
+        "server_before_point",
+        "source_wall_ns",
+        "source_generated_wall_ns",
+        "received_monotonic_ns",
+        "clock_uncertainty_ns"
+      ],
+      "properties": {
+        "provider_source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "revision_domain_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provider_event_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "provider_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "home_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "away_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "scheduled_start_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "match_format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets",
+            "unsupported"
+          ]
+        },
+        "correction_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "point_winner": {
+          "enum": [
+            "home",
+            "away"
+          ]
+        },
+        "server_before_point": {
+          "enum": [
+            "home",
+            "away"
+          ]
+        },
+        "source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "source_generated_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "received_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "ProviderLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_source_id",
+        "revision_domain_id",
+        "source_lineage_sha256",
+        "provider_event_id",
+        "provider_match_id",
+        "home_player_id",
+        "away_player_id",
+        "scheduled_start_wall_ns",
+        "match_format",
+        "correction_epoch",
+        "revision",
+        "kind",
+        "winner",
+        "retired_side",
+        "server_for_next_point",
+        "source_wall_ns",
+        "source_generated_wall_ns",
+        "received_monotonic_ns",
+        "clock_uncertainty_ns"
+      ],
+      "properties": {
+        "provider_source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "revision_domain_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provider_event_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "provider_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "home_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "away_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "scheduled_start_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "match_format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets",
+            "unsupported"
+          ]
+        },
+        "correction_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "kind": {
+          "enum": [
+            "start",
+            "suspend",
+            "resume",
+            "walkover",
+            "retirement",
+            "cancel",
+            "natural_end_confirmation"
+          ]
+        },
+        "winner": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retired_side": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "server_for_next_point": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "source_generated_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "received_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "TennisState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_source_id",
+        "revision_domain_id",
+        "source_lineage_sha256",
+        "provider_match_id",
+        "home_player_id",
+        "away_player_id",
+        "scheduled_start_wall_ns",
+        "match_format",
+        "status",
+        "termination_kind",
+        "winner",
+        "retired_side",
+        "completed_sets",
+        "games_home",
+        "games_away",
+        "points_home",
+        "points_away",
+        "in_tiebreak",
+        "tiebreak_points_home",
+        "tiebreak_points_away",
+        "tiebreak_first_server",
+        "server_for_next_point",
+        "correction_epoch",
+        "revision",
+        "snapshot_complete",
+        "last_provider_event_id",
+        "last_event_semantic_sha256",
+        "correction_lineage_sha256",
+        "last_source_wall_ns",
+        "last_source_generated_wall_ns",
+        "last_received_monotonic_ns",
+        "last_clock_uncertainty_ns",
+        "block_reason",
+        "expected_revision",
+        "observed_revision",
+        "blocked_event_semantic_sha256",
+        "blocked_received_monotonic_ns"
+      ],
+      "properties": {
+        "provider_source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "revision_domain_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provider_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "home_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "away_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "scheduled_start_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "match_format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets",
+            "unsupported"
+          ]
+        },
+        "status": {
+          "enum": [
+            "scheduled",
+            "live",
+            "suspended",
+            "ended",
+            "cancelled"
+          ]
+        },
+        "termination_kind": {
+          "enum": [
+            "none",
+            "natural",
+            "walkover",
+            "retirement",
+            "cancellation"
+          ]
+        },
+        "winner": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retired_side": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_sets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SetScore"
+          },
+          "minItems": 0,
+          "maxItems": 5
+        },
+        "games_home": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "games_away": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "points_home": {
+          "enum": [
+            "love",
+            "fifteen",
+            "thirty",
+            "forty",
+            "advantage"
+          ]
+        },
+        "points_away": {
+          "enum": [
+            "love",
+            "fifteen",
+            "thirty",
+            "forty",
+            "advantage"
+          ]
+        },
+        "in_tiebreak": {
+          "type": "boolean"
+        },
+        "tiebreak_points_home": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "tiebreak_points_away": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "tiebreak_first_server": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "server_for_next_point": {
+          "oneOf": [
+            {
+              "enum": [
+                "home",
+                "away"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correction_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "snapshot_complete": {
+          "type": "boolean"
+        },
+        "last_provider_event_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "last_event_semantic_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "correction_lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "last_source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "last_source_generated_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "last_received_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "last_clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "block_reason": {
+          "oneOf": [
+            {
+              "enum": [
+                "point_applied",
+                "lifecycle_applied",
+                "natural_end_confirmed",
+                "correction_applied",
+                "exact_duplicate",
+                "correction_required",
+                "provider_event_gap",
+                "provider_event_stale",
+                "provider_event_conflict",
+                "correction_epoch_stale",
+                "correction_epoch_ahead",
+                "identity_mismatch",
+                "format_mismatch",
+                "source_lineage_mismatch",
+                "revision_domain_mismatch",
+                "receive_time_regression",
+                "server_mismatch",
+                "point_while_not_live",
+                "terminal_absorbing",
+                "illegal_lifecycle_transition",
+                "unsupported_format",
+                "snapshot_invalid",
+                "correction_epoch_not_newer",
+                "correction_snapshot_invalid"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_revision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_revision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blocked_event_semantic_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blocked_received_monotonic_ns": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "TennisTransitionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "disposition",
+        "reason",
+        "event_semantic_sha256"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/TennisState"
+        },
+        "disposition": {
+          "enum": [
+            "applied",
+            "duplicate",
+            "blocked"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "point_applied",
+            "lifecycle_applied",
+            "natural_end_confirmed",
+            "correction_applied",
+            "exact_duplicate",
+            "correction_required",
+            "provider_event_gap",
+            "provider_event_stale",
+            "provider_event_conflict",
+            "correction_epoch_stale",
+            "correction_epoch_ahead",
+            "identity_mismatch",
+            "format_mismatch",
+            "source_lineage_mismatch",
+            "revision_domain_mismatch",
+            "receive_time_regression",
+            "server_mismatch",
+            "point_while_not_live",
+            "terminal_absorbing",
+            "illegal_lifecycle_transition",
+            "unsupported_format",
+            "snapshot_invalid",
+            "correction_epoch_not_newer",
+            "correction_snapshot_invalid"
+          ]
+        },
+        "event_semantic_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "BookLevel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "price",
+        "quantity"
+      ],
+      "properties": {
+        "price": {
+          "$ref": "#/$defs/decimal"
+        },
+        "quantity": {
+          "$ref": "#/$defs/decimal"
+        }
+      }
+    },
+    "BookSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticker",
+        "connection_epoch",
+        "sequence",
+        "market_status",
+        "scheduled_close_wall_ns",
+        "source_wall_ns",
+        "observed_monotonic_ns",
+        "clock_uncertainty_ns",
+        "yes_bids",
+        "no_bids"
+      ],
+      "properties": {
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "market_status": {
+          "enum": [
+            "preopen",
+            "open",
+            "suspended",
+            "closed",
+            "settled",
+            "cancelled"
+          ]
+        },
+        "scheduled_close_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "observed_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "yes_bids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookLevel"
+          },
+          "minItems": 0,
+          "maxItems": 131064
+        },
+        "no_bids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookLevel"
+          },
+          "minItems": 0,
+          "maxItems": 131064
+        }
+      }
+    },
+    "BookDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticker",
+        "connection_epoch",
+        "sequence",
+        "source_wall_ns",
+        "observed_monotonic_ns",
+        "clock_uncertainty_ns",
+        "contract_side",
+        "price",
+        "quantity"
+      ],
+      "properties": {
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "observed_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "contract_side": {
+          "enum": [
+            "yes",
+            "no"
+          ]
+        },
+        "price": {
+          "$ref": "#/$defs/decimal"
+        },
+        "quantity": {
+          "$ref": "#/$defs/decimal"
+        }
+      }
+    },
+    "MarketLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticker",
+        "connection_epoch",
+        "market_status",
+        "scheduled_close_wall_ns",
+        "source_wall_ns",
+        "observed_monotonic_ns",
+        "clock_uncertainty_ns"
+      ],
+      "properties": {
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "market_status": {
+          "enum": [
+            "preopen",
+            "open",
+            "suspended",
+            "closed",
+            "settled",
+            "cancelled"
+          ]
+        },
+        "scheduled_close_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "observed_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "BookState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticker",
+        "connection_epoch",
+        "sequence",
+        "market_status",
+        "scheduled_close_wall_ns",
+        "book_source_wall_ns",
+        "book_observed_monotonic_ns",
+        "book_clock_uncertainty_ns",
+        "lifecycle_source_wall_ns",
+        "lifecycle_observed_monotonic_ns",
+        "lifecycle_clock_uncertainty_ns",
+        "yes_bids",
+        "no_bids",
+        "trusted",
+        "sequence_gap",
+        "last_executable_move",
+        "last_executable_move_monotonic_ns",
+        "last_snapshot_sha256",
+        "last_event_sha256"
+      ],
+      "properties": {
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "market_status": {
+          "enum": [
+            "preopen",
+            "open",
+            "suspended",
+            "closed",
+            "settled",
+            "cancelled"
+          ]
+        },
+        "scheduled_close_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "book_source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "book_observed_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "book_clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "lifecycle_source_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "lifecycle_observed_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "lifecycle_clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "yes_bids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookLevel"
+          },
+          "minItems": 0,
+          "maxItems": 131064
+        },
+        "no_bids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookLevel"
+          },
+          "minItems": 0,
+          "maxItems": 131064
+        },
+        "trusted": {
+          "type": "boolean"
+        },
+        "sequence_gap": {
+          "type": "boolean"
+        },
+        "last_executable_move": {
+          "$ref": "#/$defs/decimal"
+        },
+        "last_executable_move_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "last_snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "last_event_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "BookTransitionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "accepted_event_kind",
+        "accepted_event_sha256",
+        "executable_move",
+        "move_observed_monotonic_ns",
+        "connection_epoch",
+        "sequence",
+        "top_of_book_changed"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/BookState"
+        },
+        "accepted_event_kind": {
+          "oneOf": [
+            {
+              "enum": [
+                "snapshot",
+                "delta",
+                "lifecycle"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accepted_event_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executable_move": {
+          "$ref": "#/$defs/decimal"
+        },
+        "move_observed_monotonic_ns": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "top_of_book_changed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "SynchronizationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "canonical_match_id",
+        "ticker",
+        "previous_state_sha256",
+        "provider_event",
+        "tennis_transition",
+        "book_event",
+        "book_transition",
+        "book_resnapshot_state"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "tennis_origin",
+            "tennis_transition",
+            "book_transition",
+            "book_resnapshot_required",
+            "clock"
+          ]
+        },
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "ticker": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/safeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previous_state_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_event": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ProviderSnapshot"
+            },
+            {
+              "$ref": "#/$defs/ProviderPoint"
+            },
+            {
+              "$ref": "#/$defs/ProviderLifecycle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tennis_transition": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TennisTransitionResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "book_event": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BookSnapshot"
+            },
+            {
+              "$ref": "#/$defs/BookDelta"
+            },
+            {
+              "$ref": "#/$defs/MarketLifecycle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "book_transition": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BookTransitionResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "book_resnapshot_state": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BookState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PairedTimeObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_ns",
+        "monotonic_ns",
+        "clock_uncertainty_ns"
+      ],
+      "properties": {
+        "wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "ExpertSynchronizationObservationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent",
+        "parent_output_index",
+        "parent_output_count",
+        "normalizer_id",
+        "normalizer_code_sha256",
+        "normalizer_schema_sha256",
+        "evidence",
+        "observation"
+      ],
+      "properties": {
+        "parent": {
+          "$ref": "#/$defs/ExpertParentEvidenceV1"
+        },
+        "parent_output_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "parent_output_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "normalizer_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "normalizer_code_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "normalizer_schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "evidence": {
+          "$ref": "#/$defs/SynchronizationInput"
+        },
+        "observation": {
+          "$ref": "#/$defs/PairedTimeObservation"
+        }
+      }
+    },
+    "BindingReviewDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_artifact_id",
+        "review_artifact_sha256",
+        "review_artifact_created_wall_ns",
+        "binding_artifact_id",
+        "binding_artifact_sha256",
+        "decision",
+        "reviewer_id",
+        "reviewed_wall_ns",
+        "review_evidence_sha256"
+      ],
+      "properties": {
+        "review_artifact_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "review_artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "review_artifact_created_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "binding_artifact_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "binding_artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "decision": {
+          "$ref": "#/$defs/safeId"
+        },
+        "reviewer_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "reviewed_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "review_evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "MatchBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_match_id",
+        "canonical_match_id",
+        "provider_source_id",
+        "revision_domain_id",
+        "source_lineage_sha256",
+        "provider_home_player_id",
+        "provider_away_player_id",
+        "kalshi_event_ticker",
+        "home_market_ticker",
+        "away_market_ticker",
+        "match_format",
+        "scheduled_start_wall_ns",
+        "start_tolerance_ns",
+        "artifact_created_wall_ns",
+        "binding_artifact_sha256"
+      ],
+      "properties": {
+        "provider_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "provider_source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "revision_domain_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provider_home_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "provider_away_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "kalshi_event_ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "home_market_ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "away_market_ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "match_format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets",
+            "unsupported"
+          ]
+        },
+        "scheduled_start_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "start_tolerance_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "artifact_created_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "binding_artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "SettlementSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_authority",
+        "natural_completion",
+        "retirement_after_point",
+        "walkover_before_point",
+        "default_after_point",
+        "disqualification_after_point",
+        "cancellation",
+        "postponement",
+        "abandonment",
+        "amendment",
+        "void_treatment",
+        "raw_rules_sha256",
+        "projection_sha256"
+      ],
+      "properties": {
+        "result_authority": {
+          "$ref": "#/$defs/safeId"
+        },
+        "natural_completion": {
+          "$ref": "#/$defs/safeId"
+        },
+        "retirement_after_point": {
+          "$ref": "#/$defs/safeId"
+        },
+        "walkover_before_point": {
+          "$ref": "#/$defs/safeId"
+        },
+        "default_after_point": {
+          "$ref": "#/$defs/safeId"
+        },
+        "disqualification_after_point": {
+          "$ref": "#/$defs/safeId"
+        },
+        "cancellation": {
+          "$ref": "#/$defs/safeId"
+        },
+        "postponement": {
+          "$ref": "#/$defs/safeId"
+        },
+        "abandonment": {
+          "$ref": "#/$defs/safeId"
+        },
+        "amendment": {
+          "$ref": "#/$defs/safeId"
+        },
+        "void_treatment": {
+          "$ref": "#/$defs/safeId"
+        },
+        "raw_rules_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "projection_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "BindingMarketMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "series_ticker",
+        "event_ticker",
+        "event_id",
+        "market_ticker",
+        "market_id",
+        "yes_player_side",
+        "yes_provider_player_id",
+        "yes_canonical_player_id",
+        "product",
+        "event_catalog_sha256",
+        "membership_source_id",
+        "membership_source_version",
+        "membership_captured_wall_ns",
+        "membership_evidence_sha256",
+        "membership_projection_sha256",
+        "market_text_sha256",
+        "settlement_rule_text_sha256",
+        "settlement"
+      ],
+      "properties": {
+        "series_ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "market_ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "market_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "yes_player_side": {
+          "enum": [
+            "home",
+            "away"
+          ]
+        },
+        "yes_provider_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "yes_canonical_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "product": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_catalog_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "membership_source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "membership_source_version": {
+          "$ref": "#/$defs/safeId"
+        },
+        "membership_captured_wall_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "membership_evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "membership_projection_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "market_text_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "settlement_rule_text_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "settlement": {
+          "$ref": "#/$defs/SettlementSemantics"
+        }
+      }
+    },
+    "BindingRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "player_side",
+        "market_ticker",
+        "contract_side"
+      ],
+      "properties": {
+        "player_side": {
+          "enum": [
+            "home",
+            "away"
+          ]
+        },
+        "market_ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "contract_side": {
+          "enum": [
+            "yes",
+            "no"
+          ]
+        }
+      }
+    },
+    "BindingMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_match_id",
+        "canonical_home_player_id",
+        "canonical_away_player_id",
+        "tournament_id",
+        "season_id",
+        "draw_id",
+        "round_id",
+        "tour_id",
+        "tier_id",
+        "surface",
+        "provider_snapshot_sha256",
+        "kalshi_event_sha256",
+        "markets",
+        "authorized_routes"
+      ],
+      "properties": {
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "canonical_home_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "canonical_away_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "tournament_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "season_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "draw_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "round_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "tour_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "tier_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "surface": {
+          "$ref": "#/$defs/safeId"
+        },
+        "provider_snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "kalshi_event_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "markets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingMarketMetadata"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "authorized_routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingRoute"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "BindingUniverse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw_artifact_id",
+        "raw_artifact_sha256",
+        "review",
+        "bindings",
+        "metadata",
+        "universe_sha256"
+      ],
+      "properties": {
+        "raw_artifact_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "raw_artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "review": {
+          "$ref": "#/$defs/BindingReviewDecision"
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MatchBinding"
+          },
+          "minItems": 1,
+          "maxItems": 128
+        },
+        "metadata": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingMetadata"
+          },
+          "minItems": 1,
+          "maxItems": 128
+        },
+        "universe_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "SyncPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "universe_sha256",
+        "max_score_age_ns",
+        "max_book_age_ns",
+        "max_lifecycle_age_ns",
+        "max_score_book_skew_ns",
+        "max_clock_uncertainty_ns",
+        "large_book_move_threshold",
+        "explanation_window_ns",
+        "minimum_close_horizon_ns"
+      ],
+      "properties": {
+        "universe_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "max_score_age_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "max_book_age_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "max_lifecycle_age_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "max_score_book_skew_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "max_clock_uncertainty_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "large_book_move_threshold": {
+          "$ref": "#/$defs/decimal"
+        },
+        "explanation_window_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "minimum_close_horizon_ns": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "CausalPointWitness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_match_id",
+        "correction_epoch",
+        "revision",
+        "event_semantic_sha256",
+        "received_monotonic_ns"
+      ],
+      "properties": {
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "correction_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "event_semantic_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "received_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "TennisSyncCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_match_id",
+        "binding_sha256",
+        "binding_metadata_sha256",
+        "tennis",
+        "last_state_sha256",
+        "last_input_sha256",
+        "last_point_witness"
+      ],
+      "properties": {
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "binding_metadata_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tennis": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TennisState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_state_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_input_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_point_witness": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CausalPointWitness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PendingBookMove": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_match_id",
+        "ticker",
+        "first_move_monotonic_ns",
+        "last_move_monotonic_ns",
+        "first_connection_epoch",
+        "first_sequence",
+        "first_event_sha256",
+        "last_connection_epoch",
+        "last_sequence",
+        "last_event_sha256",
+        "move_count",
+        "max_magnitude",
+        "tennis_correction_epoch_floor",
+        "book_connection_epoch_floor"
+      ],
+      "properties": {
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "first_move_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "last_move_monotonic_ns": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "first_connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "first_sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "first_event_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "last_connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "last_sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "last_event_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "move_count": {
+          "$ref": "#/$defs/positive"
+        },
+        "max_magnitude": {
+          "$ref": "#/$defs/decimal"
+        },
+        "tennis_correction_epoch_floor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "book_connection_epoch_floor": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "LastSyncEmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fingerprint_sha256",
+        "provider_correction_epoch",
+        "provider_revision",
+        "provider_event_semantic_sha256",
+        "book_connection_epoch",
+        "book_sequence"
+      ],
+      "properties": {
+        "fingerprint_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provider_correction_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "provider_revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "provider_event_semantic_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "book_connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "book_sequence": {
+          "$ref": "#/$defs/positive"
+        }
+      }
+    },
+    "BookSyncCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_match_id",
+        "ticker",
+        "binding_sha256",
+        "binding_metadata_sha256",
+        "book",
+        "last_state_sha256",
+        "last_input_sha256",
+        "pending_move",
+        "causal_point_witness",
+        "consumed_point_witness",
+        "last_emission"
+      ],
+      "properties": {
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "binding_metadata_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "book": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BookState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_state_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_input_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending_move": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PendingBookMove"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "causal_point_witness": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CausalPointWitness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consumed_point_witness": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CausalPointWitness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_emission": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LastSyncEmission"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SynchronizationSessionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "universe",
+        "policy",
+        "universe_sha256",
+        "sync_policy_sha256",
+        "decision_sequence",
+        "last_observation",
+        "tennis_cursors",
+        "book_cursors"
+      ],
+      "properties": {
+        "universe": {
+          "$ref": "#/$defs/BindingUniverse"
+        },
+        "policy": {
+          "$ref": "#/$defs/SyncPolicy"
+        },
+        "universe_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sync_policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "decision_sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "last_observation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PairedTimeObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tennis_cursors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TennisSyncCursor"
+          },
+          "minItems": 1,
+          "maxItems": 128
+        },
+        "book_cursors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BookSyncCursor"
+          },
+          "minItems": 2,
+          "maxItems": 256
+        }
+      }
+    },
+    "TrustedSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_sequence",
+        "decision_time",
+        "tennis",
+        "book",
+        "binding",
+        "sync_policy_sha256",
+        "causal_provider_revision"
+      ],
+      "properties": {
+        "decision_sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "decision_time": {
+          "$ref": "#/$defs/PairedTimeObservation"
+        },
+        "tennis": {
+          "$ref": "#/$defs/TennisState"
+        },
+        "book": {
+          "$ref": "#/$defs/BookState"
+        },
+        "binding": {
+          "$ref": "#/$defs/MatchBinding"
+        },
+        "sync_policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "causal_provider_revision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/nonnegative"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "OpportunityFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opportunity_id",
+        "universe_sha256",
+        "canonical_match_id",
+        "ticker",
+        "decision_sequence",
+        "decision_time",
+        "binding_sha256",
+        "provider_revision",
+        "book_connection_epoch",
+        "book_sequence",
+        "snapshot_sha256",
+        "snapshot"
+      ],
+      "properties": {
+        "opportunity_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "universe_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "decision_sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "decision_time": {
+          "$ref": "#/$defs/PairedTimeObservation"
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provider_revision": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "book_connection_epoch": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "book_sequence": {
+          "$ref": "#/$defs/positive"
+        },
+        "snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/TrustedSnapshot"
+        }
+      }
+    },
+    "SyncResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_match_id",
+        "ticker",
+        "snapshot",
+        "opportunity",
+        "reason"
+      ],
+      "properties": {
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "ticker": {
+          "$ref": "#/$defs/safeId"
+        },
+        "snapshot": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TrustedSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opportunity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/OpportunityFrame"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "enum": [
+            "trusted_synchronized",
+            "duplicate_state_suppressed",
+            "snapshot_incomplete",
+            "score_stale",
+            "book_stale",
+            "lifecycle_stale",
+            "book_untrusted",
+            "book_not_executable",
+            "market_not_open",
+            "market_suspended",
+            "market_ended",
+            "unknown_server",
+            "binding_ambiguous",
+            "binding_drift",
+            "sequence_gap",
+            "unexplained_book_move",
+            "match_not_started",
+            "match_suspended",
+            "match_ended",
+            "correction_pending",
+            "contract_mismatch",
+            "clock_uncertain",
+            "close_horizon_insufficient"
+          ]
+        }
+      }
+    },
+    "SynchronizationTransitionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "input",
+        "input_sha256",
+        "prior_session_sha256",
+        "prior_decision_sequence",
+        "observation",
+        "results"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/SynchronizationSessionState"
+        },
+        "input": {
+          "$ref": "#/$defs/SynchronizationInput"
+        },
+        "input_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "prior_session_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "prior_decision_sequence": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "observation": {
+          "$ref": "#/$defs/PairedTimeObservation"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SyncResult"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        }
+      }
+    },
+    "ignoreReason": {
+      "enum": [
+        "normalizer_not_registered",
+        "event_not_relevant"
+      ]
+    },
+    "rejectReason": {
+      "enum": [
+        "parent_contract_invalid",
+        "normalizer_schema_unknown",
+        "normalizer_payload_invalid",
+        "normalizer_contract_violation",
+        "normalizer_exception",
+        "group_capacity_exceeded",
+        "persistence_capacity_exceeded",
+        "synchronization_session_drift",
+        "reducer_exception",
+        "prior_outcome_halted",
+        "prior_group_halted",
+        "static_session_halt"
+      ]
+    },
+    "ExpertIgnoredObservationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent",
+        "parent_output_index",
+        "parent_output_count",
+        "normalizer_id",
+        "normalizer_code_sha256",
+        "normalizer_schema_sha256",
+        "reason"
+      ],
+      "properties": {
+        "parent": {
+          "$ref": "#/$defs/ExpertParentEvidenceV1"
+        },
+        "parent_output_index": {
+          "const": 0
+        },
+        "parent_output_count": {
+          "const": 1
+        },
+        "normalizer_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "normalizer_code_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "normalizer_schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reason": {
+          "$ref": "#/$defs/ignoreReason"
+        }
+      }
+    },
+    "ExpertRejectedObservationV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parent",
+        "parent_output_index",
+        "parent_output_count",
+        "normalizer_id",
+        "normalizer_code_sha256",
+        "normalizer_schema_sha256",
+        "reason"
+      ],
+      "properties": {
+        "parent": {
+          "$ref": "#/$defs/ExpertParentEvidenceV1"
+        },
+        "parent_output_index": {
+          "const": 0
+        },
+        "parent_output_count": {
+          "const": 1
+        },
+        "normalizer_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "normalizer_code_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "normalizer_schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reason": {
+          "$ref": "#/$defs/rejectReason"
+        }
+      }
+    }
+  }
+}

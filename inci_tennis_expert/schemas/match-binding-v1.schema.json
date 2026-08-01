@@ -1,0 +1,699 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-expert:schema:match-binding-v1",
+  "title": "Inci Tennis Expert Match Binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "artifact_created_wall_ns",
+    "bindings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "artifact_created_wall_ns": {
+      "$ref": "#/$defs/nonnegativeInt64"
+    },
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/binding"
+      }
+    }
+  },
+  "$comment": "Production additionally enforces byte limits, UTF-8/NFC rules, artifact pins, chronology, ordering, collisions, projections, and source-lineage player-ID bijection.",
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^(?![Hh][Tt][Tt][Pp][Ss]?:|[Ff][Ii][Ll][Ee]:)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "ticker": {
+      "type": "string",
+      "pattern": "^[A-Z0-9][A-Z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonnegativeInt64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "displayText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_player_id",
+        "canonical_player_id",
+        "display_name",
+        "participant_type",
+        "participant_status"
+      ],
+      "properties": {
+        "provider_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "canonical_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "display_name": {
+          "$ref": "#/$defs/displayText"
+        },
+        "participant_type": {
+          "const": "player"
+        },
+        "participant_status": {
+          "const": "confirmed"
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sport",
+        "competition_kind",
+        "competitor_count",
+        "source_id",
+        "revision_domain_id",
+        "source_lineage_sha256",
+        "match_id",
+        "home_player",
+        "away_player",
+        "scheduled_start_wall_ns",
+        "snapshot_sha256",
+        "snapshot_captured_wall_ns"
+      ],
+      "properties": {
+        "sport": {
+          "const": "tennis"
+        },
+        "competition_kind": {
+          "const": "real"
+        },
+        "competitor_count": {
+          "const": 2
+        },
+        "source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "revision_domain_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "home_player": {
+          "$ref": "#/$defs/participant"
+        },
+        "away_player": {
+          "$ref": "#/$defs/participant"
+        },
+        "scheduled_start_wall_ns": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        },
+        "snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "snapshot_captured_wall_ns": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        }
+      }
+    },
+    "competition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tournament_id",
+        "season_id",
+        "draw_id",
+        "round_id",
+        "tour_id",
+        "tier_id",
+        "surface",
+        "tournament_name"
+      ],
+      "properties": {
+        "tournament_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "season_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "draw_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "round_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "tour_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "tier_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "surface": {
+          "enum": [
+            "hard",
+            "clay",
+            "grass",
+            "carpet"
+          ]
+        },
+        "tournament_name": {
+          "$ref": "#/$defs/displayText"
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "match_type",
+        "product",
+        "format",
+        "start_tolerance_ns"
+      ],
+      "properties": {
+        "match_type": {
+          "const": "singles"
+        },
+        "product": {
+          "const": "match_winner"
+        },
+        "format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets"
+          ]
+        },
+        "start_tolerance_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 900000000000
+        }
+      }
+    },
+    "membership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "series_ticker",
+        "event_ticker",
+        "event_id",
+        "market_ticker",
+        "market_id",
+        "product",
+        "event_catalog_sha256",
+        "source_id",
+        "source_version",
+        "captured_wall_ns",
+        "membership_evidence_sha256",
+        "membership_projection_sha256"
+      ],
+      "properties": {
+        "series_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "event_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "event_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "market_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "market_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "product": {
+          "const": "match_winner"
+        },
+        "event_catalog_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_version": {
+          "$ref": "#/$defs/safeId"
+        },
+        "captured_wall_ns": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        },
+        "membership_evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "membership_projection_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "$comment": "Production enforces exact equality to enclosing event/market identity and recomputes the complete membership projection."
+    },
+    "settlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_authority",
+        "natural_completion",
+        "retirement_after_point",
+        "walkover_before_point",
+        "default_after_point",
+        "disqualification_after_point",
+        "cancellation",
+        "postponement",
+        "abandonment",
+        "amendment",
+        "void_treatment",
+        "raw_rules_sha256",
+        "projection_sha256"
+      ],
+      "properties": {
+        "result_authority": {
+          "const": "kalshi_finalized_market_result"
+        },
+        "natural_completion": {
+          "const": "yes_if_named_player_final_winner"
+        },
+        "retirement_after_point": {
+          "enum": [
+            "yes_if_named_player_final_winner",
+            "void"
+          ]
+        },
+        "walkover_before_point": {
+          "enum": [
+            "yes_if_named_player_final_winner",
+            "void"
+          ]
+        },
+        "default_after_point": {
+          "enum": [
+            "yes_if_named_player_final_winner",
+            "void"
+          ]
+        },
+        "disqualification_after_point": {
+          "enum": [
+            "yes_if_named_player_final_winner",
+            "void"
+          ]
+        },
+        "cancellation": {
+          "const": "void"
+        },
+        "postponement": {
+          "const": "defer"
+        },
+        "abandonment": {
+          "enum": [
+            "await_latest_finalized_result",
+            "void"
+          ]
+        },
+        "amendment": {
+          "const": "await_latest_finalized_result"
+        },
+        "void_treatment": {
+          "const": "no_directional_settlement"
+        },
+        "raw_rules_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "projection_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "$comment": "Production requires the raw-rules pin to equal the exact market-evidence rule-text pin and recomputes the semantics projection."
+    },
+    "marketEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_version",
+        "captured_wall_ns",
+        "market_text",
+        "market_text_sha256",
+        "settlement_rule_text",
+        "settlement_rule_text_sha256"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_version": {
+          "$ref": "#/$defs/safeId"
+        },
+        "captured_wall_ns": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        },
+        "market_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "market_text_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "settlement_rule_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "settlement_rule_text_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "marketBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "market_ticker",
+        "market_id",
+        "yes_player_side",
+        "yes_provider_player_id",
+        "yes_canonical_player_id",
+        "yes_outcome",
+        "membership",
+        "settlement",
+        "market_evidence"
+      ],
+      "properties": {
+        "market_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "market_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "yes_player_side": {
+          "enum": [
+            "home",
+            "away"
+          ]
+        },
+        "yes_provider_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "yes_canonical_player_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "yes_outcome": {
+          "const": "wins_match"
+        },
+        "membership": {
+          "$ref": "#/$defs/membership"
+        },
+        "settlement": {
+          "$ref": "#/$defs/settlement"
+        },
+        "market_evidence": {
+          "$ref": "#/$defs/marketEvidence"
+        }
+      }
+    },
+    "homeMarket": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/marketBase"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "market_ticker",
+            "market_id",
+            "yes_player_side",
+            "yes_provider_player_id",
+            "yes_canonical_player_id",
+            "yes_outcome",
+            "membership",
+            "settlement",
+            "market_evidence"
+          ],
+          "properties": {
+            "market_ticker": {
+              "$ref": "#/$defs/ticker"
+            },
+            "market_id": {
+              "$ref": "#/$defs/safeId"
+            },
+            "yes_player_side": {
+              "const": "home"
+            },
+            "yes_provider_player_id": {
+              "$ref": "#/$defs/safeId"
+            },
+            "yes_canonical_player_id": {
+              "$ref": "#/$defs/safeId"
+            },
+            "yes_outcome": {
+              "const": "wins_match"
+            },
+            "membership": {
+              "$ref": "#/$defs/membership"
+            },
+            "settlement": {
+              "$ref": "#/$defs/settlement"
+            },
+            "market_evidence": {
+              "$ref": "#/$defs/marketEvidence"
+            }
+          }
+        }
+      ]
+    },
+    "awayMarket": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/marketBase"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "market_ticker",
+            "market_id",
+            "yes_player_side",
+            "yes_provider_player_id",
+            "yes_canonical_player_id",
+            "yes_outcome",
+            "membership",
+            "settlement",
+            "market_evidence"
+          ],
+          "properties": {
+            "market_ticker": {
+              "$ref": "#/$defs/ticker"
+            },
+            "market_id": {
+              "$ref": "#/$defs/safeId"
+            },
+            "yes_player_side": {
+              "const": "away"
+            },
+            "yes_provider_player_id": {
+              "$ref": "#/$defs/safeId"
+            },
+            "yes_canonical_player_id": {
+              "$ref": "#/$defs/safeId"
+            },
+            "yes_outcome": {
+              "const": "wins_match"
+            },
+            "membership": {
+              "$ref": "#/$defs/membership"
+            },
+            "settlement": {
+              "$ref": "#/$defs/settlement"
+            },
+            "market_evidence": {
+              "$ref": "#/$defs/marketEvidence"
+            }
+          }
+        }
+      ]
+    },
+    "routeBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "player_side",
+        "market_ticker",
+        "contract_side"
+      ],
+      "properties": {
+        "player_side": {
+          "enum": [
+            "home",
+            "away"
+          ]
+        },
+        "market_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "contract_side": {
+          "const": "yes"
+        }
+      }
+    },
+    "homeRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "player_side",
+        "market_ticker",
+        "contract_side"
+      ],
+      "properties": {
+        "player_side": {
+          "const": "home"
+        },
+        "market_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "contract_side": {
+          "const": "yes"
+        }
+      }
+    },
+    "awayRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "player_side",
+        "market_ticker",
+        "contract_side"
+      ],
+      "properties": {
+        "player_side": {
+          "const": "away"
+        },
+        "market_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "contract_side": {
+          "const": "yes"
+        }
+      }
+    },
+    "kalshi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "series_ticker",
+        "event_ticker",
+        "event_id",
+        "scheduled_start_wall_ns",
+        "event_sha256",
+        "event_captured_wall_ns",
+        "event_catalog_sha256",
+        "route_authority",
+        "markets",
+        "authorized_routes"
+      ],
+      "properties": {
+        "series_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "event_ticker": {
+          "$ref": "#/$defs/ticker"
+        },
+        "event_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "scheduled_start_wall_ns": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        },
+        "event_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "event_captured_wall_ns": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        },
+        "event_catalog_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "route_authority": {
+          "const": "direct_yes_only"
+        },
+        "markets": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/homeMarket"
+            },
+            {
+              "$ref": "#/$defs/awayMarket"
+            }
+          ],
+          "items": false
+        },
+        "authorized_routes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/homeRoute"
+            },
+            {
+              "$ref": "#/$defs/awayRoute"
+            }
+          ],
+          "items": false
+        }
+      },
+      "$comment": "Production enforces enclosing identity equality, exact HOME/AWAY market order, exact direct-YES route tickers, and no cross-market complement authority."
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_match_id",
+        "provider",
+        "competition",
+        "match",
+        "kalshi"
+      ],
+      "properties": {
+        "canonical_match_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "competition": {
+          "$ref": "#/$defs/competition"
+        },
+        "match": {
+          "$ref": "#/$defs/match"
+        },
+        "kalshi": {
+          "$ref": "#/$defs/kalshi"
+        }
+      }
+    }
+  }
+}

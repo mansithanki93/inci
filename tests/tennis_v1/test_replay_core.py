@@ -68,7 +68,7 @@ from tests.tennis_v1 import test_events as event_test_module
 from tests.tennis_v1.test_entitlements import utc
 
 
-PYTHON = "/private/tmp/inci-tennis-v1.uDa8Ve/venv/bin/python"
+PYTHON = sys.executable
 
 
 @contextmanager

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inci.invalid/schemas/kalshi-market-lifecycle-synthetic-candidate-v1.schema.json",
+  "title": "Kalshi synthetic candidate market lifecycle v1",
+  "description": "Synthetic Task-8 candidate schema for deterministic offline testing only; it is not captured from or validated against current Kalshi wire data.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "ticker", "sequence", "status"],
+  "properties": {
+    "type": {"const": "MARKET_LIFECYCLE"},
+    "ticker": {"type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]{0,63}$"},
+    "sequence": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "status": {"enum": ["OPEN", "SUSPENDED", "CLOSED", "SETTLED"]}
+  }
+}

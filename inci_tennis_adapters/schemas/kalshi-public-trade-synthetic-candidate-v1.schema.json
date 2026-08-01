@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inci.invalid/schemas/kalshi-public-trade-synthetic-candidate-v1.schema.json",
+  "title": "Kalshi synthetic candidate public trade v1",
+  "description": "Synthetic Task-8 candidate schema for deterministic offline testing only; it is not captured from or validated against current Kalshi wire data.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "ticker", "sequence", "trade_id", "side", "price", "quantity"],
+  "properties": {
+    "type": {"const": "PUBLIC_TRADE"},
+    "ticker": {"type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]{0,63}$"},
+    "sequence": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "trade_id": {"type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]{0,63}$"},
+    "side": {"enum": ["YES", "NO"]},
+    "price": {"type": "string", "pattern": "^(?:0|1|0\\.[0-9]{0,3}[1-9])$"},
+    "quantity": {"type": "string", "pattern": "^(?:[1-9][0-9]{0,11}(?:\\.[0-9]{0,3}[1-9])?|0\\.[0-9]{0,3}[1-9])$"}
+  }
+}

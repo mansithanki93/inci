@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-adapters:schema:sportradar-tennis-candidate-manifest-v1",
+  "title": "Sportradar tennis candidate manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "artifact_created_wall_ns",
+    "provider_id",
+    "product_tier",
+    "source_lineage_id",
+    "terms_version",
+    "permission_artifact_sha256",
+    "authorization_artifact_sha256",
+    "credential_env_names",
+    "declared_quotas",
+    "session_start_wall_ns",
+    "session_end_wall_ns",
+    "required_retention_until_ns",
+    "access_expires_at_ns",
+    "analysis_expires_at_ns",
+    "requested_provider_match_ids",
+    "required_candidate_capabilities",
+    "required_strata",
+    "binding_manifest_path",
+    "binding_manifest_artifact_id",
+    "binding_manifest_sha256",
+    "binding_review_path",
+    "binding_review_artifact_id",
+    "binding_review_sha256",
+    "manifest_core_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_id": {"$ref": "#/$defs/safeId"},
+    "artifact_created_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+    "provider_id": {"const": "sportradar"},
+    "product_tier": {"$ref": "#/$defs/safeId"},
+    "source_lineage_id": {"$ref": "#/$defs/safeId"},
+    "terms_version": {"$ref": "#/$defs/safeId"},
+    "permission_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "authorization_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "credential_env_names": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [{"const": "SPORTRADAR_API_KEY"}],
+      "items": false
+    },
+    "declared_quotas": {"$ref": "#/$defs/quotas"},
+    "session_start_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+    "session_end_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+    "required_retention_until_ns": {
+      "$ref": "#/$defs/nonnegativeInt64"
+    },
+    "access_expires_at_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+    "analysis_expires_at_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+    "requested_provider_match_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/safeId"}
+    },
+    "required_candidate_capabilities": {
+      "$ref": "#/$defs/requiredCapabilities"
+    },
+    "required_strata": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/stratum"}
+    },
+    "binding_manifest_path": {"$ref": "#/$defs/absolutePath"},
+    "binding_manifest_artifact_id": {"$ref": "#/$defs/safeId"},
+    "binding_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "binding_review_path": {"$ref": "#/$defs/absolutePath"},
+    "binding_review_artifact_id": {"$ref": "#/$defs/safeId"},
+    "binding_review_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_core_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonnegativeInt64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "positiveInt64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/"
+    },
+    "quotas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requests_per_rolling_60_seconds",
+        "requests_per_utc_calendar_day",
+        "requests_per_rolling_second",
+        "max_connections",
+        "max_subscriptions",
+        "resync_requests_per_rolling_hour"
+      ],
+      "properties": {
+        "requests_per_rolling_60_seconds": {
+          "$ref": "#/$defs/positiveInt64"
+        },
+        "requests_per_utc_calendar_day": {
+          "$ref": "#/$defs/positiveInt64"
+        },
+        "requests_per_rolling_second": {
+          "$ref": "#/$defs/positiveInt64"
+        },
+        "max_connections": {"$ref": "#/$defs/positiveInt64"},
+        "max_subscriptions": {"$ref": "#/$defs/positiveInt64"},
+        "resync_requests_per_rolling_hour": {
+          "$ref": "#/$defs/positiveInt64"
+        }
+      }
+    },
+    "requiredCapabilities": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "correction_semantics",
+          "current_server",
+          "match_format",
+          "monotonic_sequence_or_revision",
+          "point_state",
+          "provider_generated_time",
+          "resync_snapshot",
+          "source_event_time",
+          "stable_match_ids",
+          "stable_player_ids"
+        ]
+      }
+    },
+    "stratum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sport",
+        "tour",
+        "competition_tier",
+        "match_format",
+        "round_code",
+        "matches"
+      ],
+      "properties": {
+        "sport": {"const": "tennis"},
+        "tour": {"$ref": "#/$defs/safeId"},
+        "competition_tier": {"$ref": "#/$defs/safeId"},
+        "match_format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets"
+          ]
+        },
+        "round_code": {"$ref": "#/$defs/safeId"},
+        "matches": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      }
+    }
+  }
+}

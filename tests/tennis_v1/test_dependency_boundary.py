@@ -24,14 +24,14 @@ EXPECTED_PRODUCTION_AST_SHA256 = {
     "entitlements.py": "220c15ee8f37d9645c551905ae3f8d52007e6a36d19a549f25756f4f96f9a25d",
     "events.py": "6fd257d629d43536a078889738259c4a9296194ae5b915c9c518b64f11d83db2",
     "fingerprints.py": "89ec41022c491edb74a759ce544cb23eb19291a69ae7487173cd7516c4814a74",
-    "ingress.py": "48f6a2e81339cd9d8818285e90c070f564a5ded1957dd775ebc987baf26e0bd3",
+    "ingress.py": "556540dddc47a96e5a8335f18d53daeca997c15884f596e168c8ccc93e558ad8",
     "mailbox.py": "7e3260f0046f966f60ba728509a2e10126b43ea553c1a202589b294a883902aa",
     "pinned_file.py": "9a014f9e4bef544f9f0fd1617b0dfa38d12cb5200cbf9d0e90be1951ce9483b5",
     "preflight.py": "af6906c62937ed57bc329340f4ae8bc709e535c3b56cc75605fd93da028c0623",
     "qualification_protocol.py": "5ef03ec162c858120cfb83dc87c4bf9e86dc969b4ec389b96d6b8d1a8a0d75de",
     "reducer.py": "2a17d3b76b49b7f202a8447e3c9f0c806976c3fba2435821a2119ef398c88916",
     "replay_core.py": "6df8de8ae1ce026157e21fe2f7549ccba2c861aad0bf7351bae7a49949ae79e0",
-    "retention.py": "3e1c7f945f926b013c952ebe1a521f5b0a9d59cac8fc8aba795911feda295f70",
+    "retention.py": "3e2131aacbc7b69d1460e9db0a6cb0e2c7aec7d5dc1341ccbf5a6316b1acc292",
     "sequencer.py": "da55de5d3e611197401b90a5f6dd4871cd1d6e0794e79d6e75ee335f72a32638",
     "session.py": "9839b3b10ecc6bba9a440165fbd0766105f0b31603be5c8297339e338863f8c3",
     "state.py": "92fbf5ac81481d0e107bc575c597f79afb9ac4f6e07cbc2cbd59da30ccaf8ac2",
@@ -286,6 +286,9 @@ ALLOWED_RELATIVE_MEMBERS = {
 PROTECTED_GUARD_NAMES = {
     "AdapterUsagePlan",
     "CaptureAuthority",
+    "EventRuntime",
+    "ExpertRetentionClockSampleCapabilityV1",
+    "ExpertStateRootAccountLockRequestV1",
     "PersistedEvent",
     "ProviderCapabilities",
     "ProviderQuotas",
@@ -294,6 +297,9 @@ PROTECTED_GUARD_NAMES = {
     "RetentionCoordinator",
     "RetentionMarker",
     "SessionManifest",
+    "_ExpertRootGrantAuthority",
+    "_ExpertRootRequestAuthority",
+    "_ExpertStateRootAccountLockGrantV1",
     "dict",
     "type",
 }
@@ -597,6 +603,8 @@ SAFE_GET_RECEIVERS = {
     "events.py": {"CONTROL_RECORD_CONTRACTS"},
     "reducer.py": {"epochs", "state_epochs"},
     "retention.py": {
+        "self._expert_clock_capabilities",
+        "self._expert_root_grants",
         "self._session_states",
         "self._write_capabilities",
         "self._write_tombstones",
@@ -606,11 +614,39 @@ SAFE_GET_RECEIVERS = {
     },
 }
 
+EXPECTED_MODULE_CONTAINER_ASSIGNMENTS = {
+    (
+        "retention.py",
+        "_validate_expert_root_binding",
+        ("original_values",),
+        (
+            "(os.fstat(self._state_fd), os.fstat(self._sessions_fd), "
+            "os.fstat(self._markers_fd), os.fstat(self._lock_fd))"
+        ),
+    ),
+    (
+        "retention.py",
+        "_validate_expert_root_binding",
+        ("duplicate_values",),
+        (
+            "(os.fstat(authority.state_fd), "
+            "os.fstat(authority.sessions_fd), "
+            "os.fstat(authority.markers_fd), "
+            "os.fstat(authority.lock_fd))"
+        ),
+    ),
+}
+
 EXPECTED_QUEUE_CALLS = Counter(
     {
         ("ingress.py", "__init__", "queue.Queue(maxsize=self._capacity)"): 1,
         ("ingress.py", "_next_action_locked", "self._queue.empty()"): 1,
         ("ingress.py", "_runtime_failure", "self._queue.get_nowait()"): 1,
+        (
+            "ingress.py",
+            "close_external_halt",
+            "self._queue.get_nowait()",
+        ): 1,
         ("ingress.py", "drain_one", "self._queue.get_nowait()"): 2,
         ("ingress.py", "enqueue", "self._queue.put_nowait(node)"): 1,
         ("mailbox.py", "__init__", "queue.Queue(maxsize=1)"): 1,
@@ -740,6 +776,26 @@ EXPECTED_PARAMETER_CALLS = Counter(
             "ingress.py",
             "_finalize",
             "runtime.close_ingress_session_end()",
+        ): 1,
+        (
+            "ingress.py",
+            "close_external_halt",
+            "runtime.close_halted('operator_halt')",
+        ): 1,
+        (
+            "ingress.py",
+            "close_external_halt",
+            "runtime.close_ingress_backpressure()",
+        ): 1,
+        (
+            "ingress.py",
+            "close_external_halt",
+            "runtime.close_ingress_owner_unresponsive()",
+        ): 1,
+        (
+            "ingress.py",
+            "close_external_halt",
+            "runtime.require_owner()",
         ): 1,
         ("ingress.py", "_process_node", "node.completion.set()"): 1,
         (
@@ -1106,6 +1162,12 @@ EXPECTED_REFLECTION_CALLS = Counter(
         ): 1,
         (
             "retention.py",
+            "_consume_expert_state_root_account_lock_request",
+            "object.__getattribute__",
+            "object.__getattribute__(request, '_dispatch')",
+        ): 1,
+        (
+            "retention.py",
             "_close_write_locked",
             "getattr",
             "getattr(state, name)",
@@ -1154,6 +1216,12 @@ EXPECTED_REFLECTION_CALLS = Counter(
         ): 1,
         (
             "retention.py",
+            "_revoke_expert_state_root_account_lock_grant",
+            "object.__getattribute__",
+            "object.__getattribute__(grant, '_dispatch')",
+        ): 1,
+        (
+            "retention.py",
             "_require_posix_features",
             "hasattr",
             "hasattr(fcntl, 'flock')",
@@ -1184,6 +1252,48 @@ EXPECTED_REFLECTION_CALLS = Counter(
         ): 1,
         (
             "retention.py",
+            "_validate_expert_root_authority_locked",
+            "object.__getattribute__",
+            "object.__getattribute__(capability, '_dispatch')",
+        ): 1,
+        (
+            "retention.py",
+            "_validate_expert_root_binding",
+            "object.__getattribute__",
+            "object.__getattribute__(authority.grant, '_clock_capability')",
+        ): 1,
+        (
+            "retention.py",
+            "_validate_expert_root_binding",
+            "object.__getattribute__",
+            "object.__getattribute__(authority.grant, '_dispatch')",
+        ): 1,
+        (
+            "retention.py",
+            "_validate_expert_root_binding",
+            "object.__getattribute__",
+            "object.__getattribute__(authority.grant, '_lock_fd')",
+        ): 1,
+        (
+            "retention.py",
+            "_validate_expert_root_binding",
+            "object.__getattribute__",
+            "object.__getattribute__(authority.grant, '_markers_fd')",
+        ): 1,
+        (
+            "retention.py",
+            "_validate_expert_root_binding",
+            "object.__getattribute__",
+            "object.__getattribute__(authority.grant, '_sessions_fd')",
+        ): 1,
+        (
+            "retention.py",
+            "_validate_expert_root_binding",
+            "object.__getattribute__",
+            "object.__getattribute__(authority.grant, '_state_fd')",
+        ): 1,
+        (
+            "retention.py",
             "_validate_file_stat",
             "hasattr",
             "hasattr(value, 'st_blocks')",
@@ -1211,6 +1321,12 @@ EXPECTED_REFLECTION_CALLS = Counter(
             "issue_read_capability",
             "locals",
             "locals()",
+        ): 1,
+        (
+            "retention.py",
+            "sample_expert_retention_wall_ns",
+            "object.__getattribute__",
+            "object.__getattribute__(capability, '_dispatch')",
         ): 1,
         (
             "session.py",
@@ -1585,6 +1701,71 @@ class DependencyPolicy:
             and not node.left.keywords
             and ast.unparse(node.left.args[0]) == receiver
         )
+
+    @staticmethod
+    def _is_exact_identity_compare(
+        node: ast.AST,
+        left: str,
+        right: str,
+        *,
+        positive: bool,
+    ) -> bool:
+        return (
+            isinstance(node, ast.Compare)
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Is if positive else ast.IsNot)
+            and len(node.comparators) == 1
+            and ast.unparse(node.left) == left
+            and ast.unparse(node.comparators[0]) == right
+        )
+
+    def _has_exact_identity_reject_guard(
+        self,
+        node: ast.AST,
+        left: str,
+        right: str,
+    ) -> bool:
+        current = node
+        while current in self.parents:
+            parent = self.parents[current]
+            if isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.Or):
+                guarded = False
+                for value in parent.values:
+                    if self._contains(value, node):
+                        return guarded
+                    if guarded and (
+                        self._statement_assigns(value, left)
+                        or self._statement_assigns(value, right)
+                    ):
+                        return False
+                    if self._is_exact_identity_compare(
+                        value,
+                        left,
+                        right,
+                        positive=False,
+                    ):
+                        guarded = True
+            current = parent
+
+        statements, _ = self._dominating_context(node)
+        for statement in reversed(statements):
+            if (
+                self._statement_assigns(statement, left)
+                or self._statement_assigns(statement, right)
+            ):
+                return False
+            if (
+                isinstance(statement, ast.If)
+                and self._is_exact_identity_compare(
+                    statement.test,
+                    left,
+                    right,
+                    positive=False,
+                )
+                and self._body_terminates(statement.body)
+            ):
+                return True
+        return False
 
     def _reject_guard_matches(
         self,
@@ -2091,6 +2272,14 @@ class DependencyPolicy:
                 ) and isinstance(
                     value,
                     (ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Lambda),
+                ) and (
+                    (
+                        self.filename,
+                        self._function_name(node),
+                        targets,
+                        ast.unparse(value),
+                    )
+                    not in EXPECTED_MODULE_CONTAINER_ASSIGNMENTS
                 ):
                     self._add(node, "module_container_escape_forbidden")
         elif isinstance(node, ast.Return) and node.value is not None:
@@ -2185,7 +2374,21 @@ class DependencyPolicy:
             "_getframe",
         } or node.attr.startswith(("spawn", "posix_spawn", "exec")):
             self._add(node, f"execution_attribute_forbidden:{node.attr}")
-        if node.attr in FORBIDDEN_CALL_NAMES | FORBIDDEN_TRANSPORT_NAMES:
+        approved_retention_request_field = (
+            self.filename == "retention.py"
+            and self._function_name(node)
+            == "_consume_expert_state_root_account_lock_request"
+            and ast.unparse(node) == "request_authority.request"
+            and self._has_exact_type_guard(
+                node,
+                "request_authority",
+                "_ExpertRootRequestAuthority",
+            )
+        )
+        if (
+            node.attr in FORBIDDEN_CALL_NAMES | FORBIDDEN_TRANSPORT_NAMES
+            and not approved_retention_request_field
+        ):
             self._add(node, f"transport_or_mutation_attribute:{node.attr}")
         if node.attr == "get":
             parent = self.parents.get(node)
@@ -2327,6 +2530,48 @@ class DependencyPolicy:
                     "RetentionMarker",
                 )
             if kind == "object.__getattribute__":
+                expert_reflection_guards = {
+                    "_consume_expert_state_root_account_lock_request": (
+                        "request",
+                        "ExpertStateRootAccountLockRequestV1",
+                    ),
+                    "_revoke_expert_state_root_account_lock_grant": (
+                        "grant",
+                        "_ExpertStateRootAccountLockGrantV1",
+                    ),
+                    "sample_expert_retention_wall_ns": (
+                        "capability",
+                        "ExpertRetentionClockSampleCapabilityV1",
+                    ),
+                    "_validate_expert_root_binding": (
+                        "authority",
+                        "_ExpertRootGrantAuthority",
+                    ),
+                    "_validate_expert_root_authority_locked": (
+                        "authority",
+                        "_ExpertRootGrantAuthority",
+                    ),
+                }
+                expert_guard = expert_reflection_guards.get(function)
+                if expert_guard is not None:
+                    exact_type_dominates = self._has_exact_type_guard(
+                        node,
+                        expert_guard[0],
+                        expert_guard[1],
+                    )
+                    if (
+                        function
+                        == "_validate_expert_root_authority_locked"
+                    ):
+                        return (
+                            exact_type_dominates
+                            and self._has_exact_identity_reject_guard(
+                                node,
+                                "authority.clock_capability",
+                                "capability",
+                            )
+                        )
+                    return exact_type_dominates
                 if "write_capability" in rendered:
                     return self._has_exact_type_guard(
                         node,
@@ -3187,6 +3432,17 @@ class DependencyPolicy:
             ast.unparse(node),
         )
         self.parameter_calls[key] += 1
+        if (
+            self.filename == "ingress.py"
+            and self._function_name(node) == "close_external_halt"
+            and key in EXPECTED_PARAMETER_CALLS
+            and not self._has_exact_type_guard(
+                node,
+                "runtime",
+                "EventRuntime",
+            )
+        ):
+            self._add(node, "caller_type_dominance_forbidden")
         if (
             key
             == (
@@ -4582,6 +4838,16 @@ class DependencyBoundaryTests(unittest.TestCase):
                         raise TypeError
                 """,
             ),
+            (
+                "ingress.py",
+                """
+                import math as EventRuntime
+                def close_external_halt(self, runtime):
+                    if type(runtime) is not EventRuntime:
+                        raise TypeError
+                    return runtime.close_halted('operator_halt')
+                """,
+            ),
         )
         for filename, source in cases:
             with self.subTest(filename=filename, source=source):
@@ -5361,6 +5627,143 @@ class DependencyBoundaryTests(unittest.TestCase):
         for filename, source in cases:
             with self.subTest(filename=filename, source=source):
                 self.assert_rejected(source, filename=filename)
+
+    def test_task6_retention_bridge_exceptions_remain_exact(self) -> None:
+        cases = (
+            """
+                def _consume_expert_state_root_account_lock_request(request):
+                    if type(request) is not object:
+                        raise TypeError
+                    return object.__getattribute__(request, '_dispatch')
+            """,
+            """
+                import os
+                def _validate_expert_root_binding(self, authority):
+                    original_values = (
+                        os.fstat(self._state_fd),
+                        os.fstat(self._sessions_fd),
+                        os.fstat(self._markers_fd),
+                    )
+                    return original_values
+            """,
+            """
+                def _consume_expert_state_root_account_lock_request(
+                    self,
+                    request_authority,
+                    request,
+                ):
+                    if type(request_authority) is not object:
+                        raise TypeError
+                    return request_authority.request
+            """,
+            """
+                def _validate_expert_root_binding(self, authority):
+                    if type(authority) is not object:
+                        raise TypeError
+                    return object.__getattribute__(
+                        authority.grant,
+                        '_state_fd',
+                    )
+            """,
+            """
+                def _revoke_expert_state_root_account_lock_grant(grant):
+                    if type(grant) is not object:
+                        raise TypeError
+                    return object.__getattribute__(grant, '_dispatch')
+            """,
+            """
+                def sample_expert_retention_wall_ns(capability):
+                    if type(capability) is not object:
+                        raise TypeError
+                    return object.__getattribute__(
+                        capability,
+                        '_dispatch',
+                    )
+            """,
+            """
+                def _validate_expert_root_authority_locked(
+                    self,
+                    authority,
+                    capability,
+                ):
+                    if type(authority) is not _ExpertRootGrantAuthority:
+                        raise TypeError
+                    return object.__getattribute__(
+                        capability,
+                        '_dispatch',
+                    )
+            """,
+            """
+                import os
+                def wrong_function(self, authority):
+                    original_values = (
+                        os.fstat(self._state_fd),
+                        os.fstat(self._sessions_fd),
+                        os.fstat(self._markers_fd),
+                        os.fstat(self._lock_fd),
+                    )
+                    return original_values
+            """,
+            """
+                import os
+                def _validate_expert_root_binding(self, authority):
+                    wrong_values = (
+                        os.fstat(self._state_fd),
+                        os.fstat(self._sessions_fd),
+                        os.fstat(self._markers_fd),
+                        os.fstat(self._lock_fd),
+                    )
+                    return wrong_values
+            """,
+            """
+                def wrong_function(request_authority):
+                    if type(request_authority) is not _ExpertRootRequestAuthority:
+                        raise TypeError
+                    return request_authority.request
+            """,
+            """
+                def _validate_expert_root_authority_locked(
+                    self,
+                    authority,
+                    capability,
+                    attacker,
+                ):
+                    self._expert_root_grants = attacker
+                    return self._expert_root_grants.get(authority.grant)
+            """,
+            """
+                def _sample_expert_retention_wall_ns(
+                    self,
+                    capability,
+                    attacker,
+                ):
+                    self._expert_clock_capabilities = attacker
+                    return self._expert_clock_capabilities.get(capability)
+            """,
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                self.assert_rejected(source, filename="retention.py")
+
+        ingress_cases = (
+            """
+                def close_external_halt(self, runtime):
+                    return runtime.close_halted('operator_halt')
+            """,
+            """
+                def close_external_halt(self, runtime):
+                    if type(runtime) is not EventRuntime:
+                        raise TypeError
+                    return runtime.close_halted('different_reason')
+            """,
+            """
+                def wrong_function(self):
+                    return self._queue.get_nowait()
+            """,
+        )
+        for source in ingress_cases:
+            with self.subTest(source=source):
+                self.assert_rejected(source, filename="ingress.py")
 
     def test_task7_documentation_owned_sections_are_present_and_explicit(self) -> None:
         path = REPO_ROOT / "docs" / "tennis_v1" / "README.md"

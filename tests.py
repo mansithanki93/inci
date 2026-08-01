@@ -5,6 +5,81 @@ acks without status; poll/list on /portfolio/orders; fp/dollar portfolio
 fields). HTTP wiring uses fake sessions; neither demo nor production order
 endpoints are called. Every reviewed issue has a regression. Run: python tests.py
 """
+# TASK9_ROUND19_FROZEN_V6_PATH_PROBE_BEGIN_V1
+import os as _task9_probe_os
+import sys as _task9_probe_sys
+
+if _task9_probe_os.environ.get("INCI_TASK9_BOOTSTRAP_PATH_PROBE") == "FROZEN_V6_SCRIPT":
+    import hashlib as _task9_probe_hashlib
+    import json as _task9_probe_json
+
+    _task9_probe_policy_sha = (
+        "4fc73c4632f1af17183e3d164bdefad21955eabd4b7c248e797d28242f466b79"
+    )
+    _task9_probe_expected = (
+        "/Users/mthanki/Downloads/inci-tennis-v1",
+        "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/"
+        "Python.framework/Versions/3.14/lib/python314.zip",
+        "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/"
+        "Python.framework/Versions/3.14/lib/python3.14",
+        "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/"
+        "Python.framework/Versions/3.14/lib/python3.14/lib-dynload",
+        "/Users/mthanki/.venvs/inci-expert-py314/lib/python3.14/site-packages",
+    )
+    _task9_probe_roles = (
+        "COMMAND_CWD", "ABSENT_STDLIB_ZIP", "RESOLVED_STDLIB",
+        "STDLIB_DYNLOAD", "VENV_PURELIB",
+    )
+    _task9_probe_states = ("PRESENT", "ABSENT", "PRESENT", "PRESENT", "PRESENT")
+    _task9_probe_actual = tuple(
+        _task9_probe_os.path.abspath(value or _task9_probe_os.getcwd())
+        for value in _task9_probe_sys.path
+    )
+    if _task9_probe_actual != _task9_probe_expected:
+        raise RuntimeError("task9_bootstrap_path_probe_invalid")
+
+    def _task9_probe_identity(path):
+        value = _task9_probe_os.stat(path, follow_symlinks=False)
+        return (
+            value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+            value.st_gid, value.st_nlink, value.st_size, value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    _task9_probe_rows = tuple(
+        {
+            "index": index,
+            "absolute_path": path,
+            "role": _task9_probe_roles[index],
+            "state": _task9_probe_states[index],
+            "path_stat_identity": (
+                None if _task9_probe_states[index] == "ABSENT"
+                else _task9_probe_identity(path)
+            ),
+        }
+        for index, path in enumerate(_task9_probe_expected)
+    )
+    if _task9_probe_os.path.lexists(_task9_probe_expected[1]):
+        raise RuntimeError("task9_bootstrap_path_probe_invalid")
+    _task9_probe_projection = {
+        "schema_version": 1,
+        "policy_sha256": _task9_probe_policy_sha,
+        "rows": _task9_probe_rows,
+    }
+    _task9_probe_payload = _task9_probe_json.dumps(
+        _task9_probe_projection,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+    _task9_probe_sha = _task9_probe_hashlib.sha256(
+        b"INCI-TASK-9-IMPORT-SEARCH-ROW-PROJECTION-V1\0" + _task9_probe_payload
+    ).hexdigest()
+    print(f"INCI_TASK9_CHILD_PATH_V1 FROZEN_V6_SCRIPT {_task9_probe_sha}")
+    raise SystemExit(0)
+# TASK9_ROUND19_FROZEN_V6_PATH_PROBE_END_V1
+
 import os
 import time
 import tempfile

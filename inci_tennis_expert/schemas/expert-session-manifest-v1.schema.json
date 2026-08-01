@@ -1,0 +1,519 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-expert:schema:expert-session-manifest-v1",
+  "title": "Inci Tennis Expert Session Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "evidence_session_manifest_sha256",
+    "evidence_session_start_record_sha256",
+    "provider_id",
+    "product_tier",
+    "source_lineage_id",
+    "provider_manifest_file_sha256",
+    "provider_manifest_canonical_sha256",
+    "entitlement_id_sha256",
+    "provider_request_binding_sha256",
+    "permission_artifact_sha256",
+    "qualification_artifact_sha256",
+    "qualification_trace_sha256",
+    "provider_domain",
+    "environment",
+    "retention",
+    "match_binding_universe_sha256",
+    "binding_raw_artifact_id",
+    "binding_raw_artifact_sha256",
+    "binding_review_artifact_id",
+    "binding_review_artifact_sha256",
+    "sync_policy_sha256",
+    "initial_synchronization_sha256",
+    "normalizers",
+    "structural_schemas",
+    "event_schemas",
+    "capacity",
+    "artifact_pins",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "session_id": {"$ref": "#/$defs/uuid"},
+    "evidence_session_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "evidence_session_start_record_sha256": {"$ref": "#/$defs/sha256"},
+    "provider_id": {"$ref": "#/$defs/safeId"},
+    "product_tier": {"$ref": "#/$defs/safeId"},
+    "source_lineage_id": {"$ref": "#/$defs/safeId"},
+    "provider_manifest_file_sha256": {"$ref": "#/$defs/sha256"},
+    "provider_manifest_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "entitlement_id_sha256": {"$ref": "#/$defs/sha256"},
+    "provider_request_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "permission_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "qualification_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "qualification_trace_sha256": {"$ref": "#/$defs/sha256"},
+    "provider_domain": {"$ref": "#/$defs/providerDomain"},
+    "environment": {"$ref": "#/$defs/currentEnvironment"},
+    "retention": {"$ref": "#/$defs/retentionBinding"},
+    "match_binding_universe_sha256": {"$ref": "#/$defs/sha256"},
+    "binding_raw_artifact_id": {"$ref": "#/$defs/safeId"},
+    "binding_raw_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "binding_review_artifact_id": {"$ref": "#/$defs/safeId"},
+    "binding_review_artifact_sha256": {"$ref": "#/$defs/sha256"},
+    "sync_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "initial_synchronization_sha256": {"$ref": "#/$defs/sha256"},
+    "normalizers": {"$ref": "#/$defs/normalizerRegistry"},
+    "structural_schemas": {"$ref": "#/$defs/structuralBundle"},
+    "event_schemas": {"$ref": "#/$defs/eventBundle"},
+    "capacity": {"$ref": "#/$defs/capacityProof"},
+    "artifact_pins": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/artifactPin"}
+    },
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safeId": {
+      "type": "string",
+      "pattern": "^(?![Hh][Tt][Tt][Pp][Ss]?:|[Ff][Ii][Ll][Ee]:)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "positive": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+    },
+    "artifactPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "artifact_sha256"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/safeId"},
+        "artifact_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "providerDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase1_session_manifest_sha256",
+        "match_binding_universe_sha256",
+        "provider_id",
+        "product_tier",
+        "source_lineage_id",
+        "provider_manifest_canonical_sha256",
+        "provider_source_lineage_sha256",
+        "revision_domain_id",
+        "provider_domain_binding_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "phase1_session_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "match_binding_universe_sha256": {"$ref": "#/$defs/sha256"},
+        "provider_id": {"$ref": "#/$defs/safeId"},
+        "product_tier": {"$ref": "#/$defs/safeId"},
+        "source_lineage_id": {"$ref": "#/$defs/safeId"},
+        "provider_manifest_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "provider_source_lineage_sha256": {"$ref": "#/$defs/sha256"},
+        "revision_domain_id": {"$ref": "#/$defs/safeId"},
+        "provider_domain_binding_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "currentEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase1_code_sha256",
+        "phase1_adapter_code_sha256",
+        "expert_code_sha256",
+        "io_code_sha256",
+        "expert_adapter_code_sha256",
+        "runtime_code_sha256",
+        "dependency_lock_sha256",
+        "python_runtime_sha256",
+        "normalizer_registry_sha256",
+        "structural_schema_bundle_sha256",
+        "event_schema_bundle_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "phase1_code_sha256": {"$ref": "#/$defs/sha256"},
+        "phase1_adapter_code_sha256": {"$ref": "#/$defs/sha256"},
+        "expert_code_sha256": {"$ref": "#/$defs/sha256"},
+        "io_code_sha256": {"$ref": "#/$defs/sha256"},
+        "expert_adapter_code_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_code_sha256": {"$ref": "#/$defs/sha256"},
+        "dependency_lock_sha256": {"$ref": "#/$defs/sha256"},
+        "python_runtime_sha256": {"$ref": "#/$defs/sha256"},
+        "normalizer_registry_sha256": {"$ref": "#/$defs/sha256"},
+        "structural_schema_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "event_schema_bundle_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "retentionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "session_id",
+        "evidence_session_manifest_sha256",
+        "provider_request_binding_sha256",
+        "permission_artifact_sha256",
+        "qualification_artifact_sha256",
+        "qualification_trace_sha256",
+        "retention_delete_by_ns",
+        "access_expires_at_ns",
+        "analysis_expires_at_ns",
+        "retention_binding_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "evidence_session_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "provider_request_binding_sha256": {"$ref": "#/$defs/sha256"},
+        "permission_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "qualification_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "qualification_trace_sha256": {"$ref": "#/$defs/sha256"},
+        "retention_delete_by_ns": {"$ref": "#/$defs/positive"},
+        "access_expires_at_ns": {"$ref": "#/$defs/positive"},
+        "analysis_expires_at_ns": {"$ref": "#/$defs/positive"},
+        "retention_binding_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "schemaPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_role",
+        "contract_name",
+        "resource_name",
+        "schema_resource_sha256"
+      ],
+      "properties": {
+        "schema_role": {
+          "enum": [
+            "session_manifest",
+            "journal_record",
+            "parent_group",
+            "session_terminal"
+          ]
+        },
+        "contract_name": {"$ref": "#/$defs/safeId"},
+        "resource_name": {"$ref": "#/$defs/safeId"},
+        "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "structuralBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "pins", "bundle_sha256"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "pins": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {
+              "allOf": [
+                {"$ref": "#/$defs/schemaPin"},
+                {
+                  "type": "object",
+                  "properties": {
+                    "schema_role": {"const": "session_manifest"},
+                    "contract_name": {"const": "ExpertSessionManifestV1"},
+                    "resource_name": {"const": "expert-session-manifest-v1.schema.json"},
+                    "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+                  },
+                  "required": ["schema_role", "contract_name", "resource_name", "schema_resource_sha256"],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {"$ref": "#/$defs/schemaPin"},
+                {
+                  "type": "object",
+                  "properties": {
+                    "schema_role": {"const": "journal_record"},
+                    "contract_name": {"const": "ExpertJournalRecordV1"},
+                    "resource_name": {"const": "expert-journal-record-v1.schema.json"},
+                    "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+                  },
+                  "required": ["schema_role", "contract_name", "resource_name", "schema_resource_sha256"],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {"$ref": "#/$defs/schemaPin"},
+                {
+                  "type": "object",
+                  "properties": {
+                    "schema_role": {"const": "parent_group"},
+                    "contract_name": {"const": "ExpertJournalGroupV1"},
+                    "resource_name": {"const": "expert-journal-group-v1.schema.json"},
+                    "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+                  },
+                  "required": ["schema_role", "contract_name", "resource_name", "schema_resource_sha256"],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {"$ref": "#/$defs/schemaPin"},
+                {
+                  "type": "object",
+                  "properties": {
+                    "schema_role": {"const": "session_terminal"},
+                    "contract_name": {"const": "ExpertSessionTerminalV1"},
+                    "resource_name": {"const": "expert-session-terminal-v1.schema.json"},
+                    "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+                  },
+                  "required": ["schema_role", "contract_name", "resource_name", "schema_resource_sha256"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          ],
+          "items": false
+        },
+        "bundle_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "eventPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_kind",
+        "event_version",
+        "payload_contract_name",
+        "resource_name",
+        "schema_resource_sha256"
+      ],
+      "properties": {
+        "event_kind": {
+          "enum": [
+            "synchronization_applied",
+            "observation_ignored",
+            "observation_rejected"
+          ]
+        },
+        "event_version": {"const": 1},
+        "payload_contract_name": {"$ref": "#/$defs/safeId"},
+        "resource_name": {"$ref": "#/$defs/safeId"},
+        "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "eventBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "pins", "bundle_sha256"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "pins": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "allOf": [
+                {"$ref": "#/$defs/eventPin"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "event_kind",
+                    "event_version",
+                    "payload_contract_name",
+                    "resource_name",
+                    "schema_resource_sha256"
+                  ],
+                  "properties": {
+                    "event_kind": {"const": "synchronization_applied"},
+                    "event_version": {"const": 1},
+                    "payload_contract_name": {
+                      "const": "ExpertSynchronizationAppliedPayloadV1"
+                    },
+                    "resource_name": {
+                      "const": "expert-synchronization-applied-v1.schema.json"
+                    },
+                    "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {"$ref": "#/$defs/eventPin"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "event_kind",
+                    "event_version",
+                    "payload_contract_name",
+                    "resource_name",
+                    "schema_resource_sha256"
+                  ],
+                  "properties": {
+                    "event_kind": {"const": "observation_ignored"},
+                    "event_version": {"const": 1},
+                    "payload_contract_name": {
+                      "const": "ExpertObservationIgnoredPayloadV1"
+                    },
+                    "resource_name": {
+                      "const": "expert-observation-ignored-v1.schema.json"
+                    },
+                    "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {"$ref": "#/$defs/eventPin"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "event_kind",
+                    "event_version",
+                    "payload_contract_name",
+                    "resource_name",
+                    "schema_resource_sha256"
+                  ],
+                  "properties": {
+                    "event_kind": {"const": "observation_rejected"},
+                    "event_version": {"const": 1},
+                    "payload_contract_name": {
+                      "const": "ExpertObservationRejectedPayloadV1"
+                    },
+                    "resource_name": {
+                      "const": "expert-observation-rejected-v1.schema.json"
+                    },
+                    "schema_resource_sha256": {"$ref": "#/$defs/sha256"}
+                  }
+                }
+              ]
+            }
+          ],
+          "items": false
+        },
+        "bundle_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "normalizerPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normalizer_id",
+        "source_kind",
+        "source_id",
+        "event_type",
+        "event_version",
+        "normalizer_code_sha256",
+        "normalizer_schema_sha256"
+      ],
+      "properties": {
+        "normalizer_id": {"$ref": "#/$defs/safeId"},
+        "source_kind": {
+          "enum": ["fallback", "provider", "kalshi", "timer", "system"]
+        },
+        "source_id": {"$ref": "#/$defs/safeId"},
+        "event_type": {"$ref": "#/$defs/safeId"},
+        "event_version": {"$ref": "#/$defs/positive"},
+        "normalizer_code_sha256": {"$ref": "#/$defs/sha256"},
+        "normalizer_schema_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "normalizerRegistry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "fallback", "entries", "registry_sha256"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "fallback": {
+          "allOf": [
+            {"$ref": "#/$defs/normalizerPin"},
+            {
+              "type": "object",
+              "properties": {
+                "normalizer_id": {"const": "task6-fallback-v1"},
+                "source_kind": {"const": "fallback"},
+                "source_id": {"const": "task6"},
+                "event_type": {"const": "unregistered"},
+                "event_version": {"const": 1},
+                "normalizer_code_sha256": {"$ref": "#/$defs/sha256"},
+                "normalizer_schema_sha256": {"$ref": "#/$defs/sha256"}
+              },
+              "required": [
+                "normalizer_id",
+                "source_kind",
+                "source_id",
+                "event_type",
+                "event_version",
+                "normalizer_code_sha256",
+                "normalizer_schema_sha256"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 0,
+          "items": false
+        },
+        "registry_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "capacityProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "match_binding_universe_sha256",
+        "sync_policy_sha256",
+        "maximum_output_count",
+        "maximum_synchronization_state_bytes",
+        "maximum_transition_payload_bytes",
+        "maximum_rejected_payload_bytes",
+        "maximum_event_payload_bytes",
+        "maximum_group_payload_area_bytes",
+        "maximum_group_metadata_bytes",
+        "maximum_group_frame_bytes",
+        "maximum_terminal_metadata_bytes",
+        "maximum_terminal_frame_bytes",
+        "emergency_reserve_bytes",
+        "proof_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "match_binding_universe_sha256": {"$ref": "#/$defs/sha256"},
+        "sync_policy_sha256": {"$ref": "#/$defs/sha256"},
+        "maximum_output_count": {"const": 64},
+        "maximum_synchronization_state_bytes": {"const": 131064},
+        "maximum_transition_payload_bytes": {"const": 131064},
+        "maximum_rejected_payload_bytes": {"const": 131064},
+        "maximum_event_payload_bytes": {"const": 131064},
+        "maximum_group_payload_area_bytes": {"const": 8388608},
+        "maximum_group_metadata_bytes": {"const": 8388532},
+        "maximum_group_frame_bytes": {"const": 16777216},
+        "maximum_terminal_metadata_bytes": {"const": 1048576},
+        "maximum_terminal_frame_bytes": {"const": 1048652},
+        "emergency_reserve_bytes": {"const": 17825868},
+        "proof_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

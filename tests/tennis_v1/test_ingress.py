@@ -4,6 +4,7 @@ import ast
 from contextlib import nullcontext
 from dataclasses import replace
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 import unittest
+import warnings
 from unittest import mock
 
 from tennis_v1.capture import CaptureValidationError
@@ -99,6 +101,16 @@ def _join(thread: threading.Thread, result: _ProducerResult) -> None:
     thread.join()
 
 
+def _capture_ingress_exception(
+    errors: list[BaseException],
+    operation,
+) -> None:
+    try:
+        operation()
+    except BaseException as error:
+        errors.append(error)
+
+
 def _wait_until_queue_size(
     ingress: BoundedIngress,
     expected_size: int,
@@ -120,6 +132,21 @@ def _wait_until_queued(ingress: BoundedIngress) -> None:
 
 
 class IngressValueContractTests(unittest.TestCase):
+    def test_external_halt_signature_accepts_only_exact_bound_runtime(self):
+        signature = inspect.signature(BoundedIngress.close_external_halt)
+        self.assertEqual(
+            tuple(signature.parameters),
+            ("self", "runtime"),
+        )
+        self.assertEqual(
+            signature.parameters["runtime"].annotation,
+            "EventRuntime",
+        )
+        self.assertEqual(
+            signature.return_annotation,
+            "PersistedEvent",
+        )
+
     def test_capacity_requires_exact_positive_builtin_integer(self):
         for value in (True, False, 0, -1, 1.0, _IntSubclass(1)):
             with self.subTest(value=value):
@@ -723,6 +750,11 @@ class IngressRuntimeTests(RuntimeFixture):
         )
         _join(first_thread, first)
         self.assertIsNotNone(first.receipt)
+        self.assertEqual(terminal.record_kind, RecordKind.RAW)
+        terminal = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
         self.assertEqual(
             self.terminal_payload(terminal)["reason"],
             "ingress_backpressure",
@@ -746,14 +778,15 @@ class IngressRuntimeTests(RuntimeFixture):
         self.assertIsInstance(result.error, IngressOwnerUnresponsive)
         self.assertIsNone(result.receipt)
         self.assertEqual(ingress.halt_reason, "owner_unresponsive")
-        terminal = ingress.drain_one(
-            self.runtime_instance,
-            timeout_seconds=0.1,
-        )
-        self.assertEqual(
-            self.terminal_payload(terminal)["reason"],
-            "ingress_owner_unresponsive",
-        )
+        with self.assertRaisesRegex(
+            IngressClosed,
+            "ingress_runtime_unavailable",
+        ):
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.1,
+            )
+        self.assertEqual(self._close_reasons, [])
 
     def test_receipt_timeout_after_normal_close_overrides_clean_finalization(self):
         ingress = self.make_ingress(receipt_timeout_seconds=0.03)
@@ -763,24 +796,22 @@ class IngressRuntimeTests(RuntimeFixture):
         _join(thread, result)
         self.assertIsInstance(result.error, IngressOwnerUnresponsive)
         self.assertEqual(ingress.halt_reason, "owner_unresponsive")
-        terminal = ingress.drain_one(
-            self.runtime_instance,
-            timeout_seconds=0.1,
-        )
-        self.assertEqual(
-            self.terminal_payload(terminal)["reason"],
-            "ingress_owner_unresponsive",
-        )
-        self.assertEqual(
-            self._close_reasons,
-            [(False, "ingress_owner_unresponsive")],
-        )
+        with self.assertRaisesRegex(
+            IngressClosed,
+            "ingress_runtime_unavailable",
+        ):
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.1,
+            )
+        self.assertEqual(self._close_reasons, [])
 
     def test_timeout_node_state_and_owner_fault_commit_atomically_before_close(
         self,
     ):
         ingress = self.make_ingress(receipt_timeout_seconds=0.03)
         timeout_node_released = threading.Event()
+        owner_waiting_for_node = threading.Event()
         allow_producer_continue = threading.Event()
         owner_thread = threading.current_thread()
         original_put = ingress._queue.put  # type: ignore[attr-defined]
@@ -790,6 +821,8 @@ class IngressRuntimeTests(RuntimeFixture):
                 self._lock = threading.Lock()
 
             def __enter__(self):
+                if threading.current_thread() is owner_thread:
+                    owner_waiting_for_node.set()
                 self._lock.acquire()
                 return self
 
@@ -825,22 +858,27 @@ class IngressRuntimeTests(RuntimeFixture):
             _wait_until_queued(ingress)
         ingress.close_inputs()
         self.assertTrue(timeout_node_released.wait(2.0))
-        terminal = ingress.drain_one(
-            self.runtime_instance,
-            timeout_seconds=0.1,
-        )
-        allow_producer_continue.set()
+
+        def release_timed_out_producer() -> None:
+            if not owner_waiting_for_node.wait(2.0):
+                raise AssertionError("owner did not contend on timed-out node")
+            allow_producer_continue.set()
+
+        releaser = threading.Thread(target=release_timed_out_producer)
+        releaser.start()
+        with self.assertRaisesRegex(
+            IngressClosed,
+            "ingress_runtime_unavailable",
+        ):
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.1,
+            )
+        releaser.join()
         _join(producer_thread, producer)
         self.assertIsInstance(producer.error, IngressOwnerUnresponsive)
         self.assertEqual(ingress.halt_reason, "owner_unresponsive")
-        self.assertEqual(
-            self.terminal_payload(terminal)["reason"],
-            "ingress_owner_unresponsive",
-        )
-        self.assertEqual(
-            self._close_reasons,
-            [(False, "ingress_owner_unresponsive")],
-        )
+        self.assertEqual(self._close_reasons, [])
 
     def test_blocked_idle_check_releases_admission_and_queue_wins_session_end(
         self,
@@ -922,6 +960,11 @@ class IngressRuntimeTests(RuntimeFixture):
         )
         _join(first_thread, first)
         self.assertIsNotNone(first.receipt)
+        self.assertEqual(terminal.record_kind, RecordKind.RAW)
+        terminal = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
         self.assertEqual(
             self.terminal_payload(terminal)["reason"],
             "ingress_backpressure",
@@ -1059,6 +1102,11 @@ class IngressRuntimeTests(RuntimeFixture):
             timeout_seconds=0.1,
         )
         _join(first_thread, first)
+        self.assertEqual(terminal.record_kind, RecordKind.RAW)
+        terminal = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
         self.assertEqual(
             self.terminal_payload(terminal)["reason"],
             "operator_stop",
@@ -1085,6 +1133,11 @@ class IngressRuntimeTests(RuntimeFixture):
             timeout_seconds=0.1,
         )
         _join(first_thread, first)
+        self.assertEqual(terminal.record_kind, RecordKind.RAW)
+        terminal = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
         self.assertEqual(
             self.terminal_payload(terminal)["reason"],
             "ingress_backpressure",
@@ -1116,6 +1169,11 @@ class IngressRuntimeTests(RuntimeFixture):
             timeout_seconds=0.1,
         )
         _join(admitted_thread, admitted)
+        self.assertEqual(terminal.record_kind, RecordKind.RAW)
+        terminal = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
         records, summary = self.diagnostic_records()
         self.assertIsNotNone(admitted.receipt)
         self.assertIsInstance(rejected.error, IngressBackpressureHalt)
@@ -1173,6 +1231,11 @@ class IngressRuntimeTests(RuntimeFixture):
         )
         _join(producer_thread, producer)
         self.assertIsNotNone(producer.receipt)
+        self.assertEqual(terminal.record_kind, RecordKind.RAW)
+        terminal = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
         self.assertEqual(
             self.terminal_payload(terminal)["reason"],
             "operator_stop",
@@ -1229,22 +1292,35 @@ class IngressRuntimeTests(RuntimeFixture):
                             IngressOwnerUnresponsive,
                         )
 
-                outcomes = tuple(
-                    ingress.drain_one(
-                        self.runtime_instance,
-                        timeout_seconds=0.1,
+                if mode == "owner_unresponsive":
+                    before = self.wal_path().read_bytes()
+                    with self.assertRaisesRegex(
+                        IngressClosed,
+                        "ingress_runtime_unavailable",
+                    ):
+                        ingress.drain_one(
+                            self.runtime_instance,
+                            timeout_seconds=0.1,
+                        )
+                    self.assertEqual(self._close_reasons, [])
+                    self.assertEqual(self.wal_path().read_bytes(), before)
+                else:
+                    outcomes = tuple(
+                        ingress.drain_one(
+                            self.runtime_instance,
+                            timeout_seconds=0.1,
+                        )
+                        for _ in range(4)
                     )
-                    for _ in range(3)
-                )
-                self.assertTrue(all(
-                    outcome.record_kind is RecordKind.RAW
-                    for outcome in outcomes[:2]
-                ))
-                terminal = outcomes[-1]
-                self.assertEqual(
-                    self.terminal_payload(terminal)["reason"],
-                    expected_terminal,
-                )
+                    self.assertTrue(all(
+                        outcome.record_kind is RecordKind.RAW
+                        for outcome in outcomes[:3]
+                    ))
+                    terminal = outcomes[-1]
+                    self.assertEqual(
+                        self.terminal_payload(terminal)["reason"],
+                        expected_terminal,
+                    )
 
                 if mode != "owner_unresponsive":
                     for thread, result in pairs:
@@ -1263,6 +1339,13 @@ class IngressRuntimeTests(RuntimeFixture):
                     ))
                 if rejected is not None:
                     self.assertIsNone(rejected.receipt)
+
+                if mode == "owner_unresponsive":
+                    self.assertEqual(
+                        ingress._queue.qsize(),  # type: ignore[attr-defined]
+                        0,
+                    )
+                    continue
 
                 records, summary = self.diagnostic_records()
                 raws = tuple(
@@ -1329,6 +1412,11 @@ class IngressRuntimeTests(RuntimeFixture):
             timeout_seconds=0.1,
         )
         _join(first_thread, first)
+        self.assertEqual(terminal.record_kind, RecordKind.RAW)
+        terminal = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
         expected = (
             "ingress_backpressure"
             if first_reason == "backpressure"
@@ -1339,6 +1427,7 @@ class IngressRuntimeTests(RuntimeFixture):
     def test_completion_wins_immediately_before_timeout_lock_reacquire(self):
         original_factory = threading.Event
         wait_entered = original_factory()
+        receipt_published = original_factory()
         release_timeout = original_factory()
 
         class ApparentTimeoutEvent:
@@ -1347,6 +1436,7 @@ class IngressRuntimeTests(RuntimeFixture):
 
             def set(self) -> None:
                 self._real.set()
+                receipt_published.set()
 
             def wait(self, timeout=None):
                 wait_entered.set()
@@ -1361,6 +1451,13 @@ class IngressRuntimeTests(RuntimeFixture):
             node.completion = ApparentTimeoutEvent()
             return original_put(node, *args, **kwargs)
 
+        def release_after_publication() -> None:
+            if not wait_entered.wait(2.0):
+                raise AssertionError("producer did not enter receipt wait")
+            if not receipt_published.wait(2.0):
+                raise AssertionError("owner did not publish receipt")
+            release_timeout.set()
+
         with mock.patch.object(
             raced._queue,  # type: ignore[attr-defined]
             "put",
@@ -1368,11 +1465,13 @@ class IngressRuntimeTests(RuntimeFixture):
         ):
             thread, result = _start_producer(raced, self.item(1))
             self.assertTrue(wait_entered.wait(2.0))
+            supervisor = threading.Thread(target=release_after_publication)
+            supervisor.start()
             raw = raced.drain_one(
                 self.runtime_instance,
                 timeout_seconds=0.1,
             )
-            release_timeout.set()
+            supervisor.join()
             _join(thread, result)
         self.assertIsNone(result.error)
         self.assertEqual(result.receipt.raw_ingest_seq, raw.ingest_seq)
@@ -1381,11 +1480,18 @@ class IngressRuntimeTests(RuntimeFixture):
     def test_timeout_wins_before_receipt_publication(self):
         ingress = self.make_ingress(receipt_timeout_seconds=0.03)
         nodes: list[object] = []
+        ingest_calls = 0
         original_put = ingress._queue.put  # type: ignore[attr-defined]
+        original_ingest = EventRuntime.ingest
 
         def capture_node(node, *args, **kwargs):
             nodes.append(node)
             return original_put(node, *args, **kwargs)
+
+        def observed_ingest(runtime, item):
+            nonlocal ingest_calls
+            ingest_calls += 1
+            return original_ingest(runtime, item)
 
         with mock.patch.object(
             ingress._queue,  # type: ignore[attr-defined]
@@ -1395,19 +1501,23 @@ class IngressRuntimeTests(RuntimeFixture):
             thread, result = _start_producer(ingress, self.item(1))
             _join(thread, result)
         self.assertIsInstance(result.error, IngressOwnerUnresponsive)
-        with mock.patch(
-            "tennis_v1.ingress.canonical_record_sha256",
-            wraps=canonical_record_sha256,
-        ) as digest:
-            ingress.drain_one(
-                self.runtime_instance,
-                timeout_seconds=0.1,
-            )
-        digest.assert_called_once()
+        before = self.wal_path().read_bytes()
+        with mock.patch.object(EventRuntime, "ingest", new=observed_ingest):
+            with self.assertRaisesRegex(
+                IngressClosed,
+                "ingress_runtime_unavailable",
+            ):
+                ingress.drain_one(
+                    self.runtime_instance,
+                    timeout_seconds=0.1,
+                )
+        self.assertEqual(ingest_calls, 0)
         self.assertIsNone(result.receipt)
         node = nodes[0]
-        self.assertEqual(node.state, "durable_unacknowledged")
+        self.assertEqual(node.state, "ABORTED")
         self.assertIsNone(node.receipt)
+        self.assertEqual(self._close_reasons, [])
+        self.assertEqual(self.wal_path().read_bytes(), before)
 
     def test_runtime_failure_before_raw_durability_fans_out_sanitized_errors(self):
         ingress = self.make_ingress(capacity=3)
@@ -1593,6 +1703,10 @@ class IngressRuntimeTests(RuntimeFixture):
                 self.runtime_instance,
                 timeout_seconds=0.1,
             )
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.1,
+            )
             with self.assertRaises(JournalDurabilityError):
                 ingress.drain_one(
                     self.runtime_instance,
@@ -1699,6 +1813,10 @@ class IngressRuntimeTests(RuntimeFixture):
                         self.runtime_instance,
                         timeout_seconds=0.1,
                     )
+                    ingress.drain_one(
+                        self.runtime_instance,
+                        timeout_seconds=0.1,
+                    )
                     with self.assertRaises(expected_error):
                         ingress.drain_one(
                             self.runtime_instance,
@@ -1768,19 +1886,20 @@ class IngressRuntimeTests(RuntimeFixture):
             "tennis_v1.sequencer.reduce_event",
             side_effect=blocked_reduce,
         ):
-            terminal = ingress.drain_one(
-                self.runtime_instance,
-                timeout_seconds=0.1,
-            )
+            with self.assertRaisesRegex(
+                IngressClosed,
+                "ingress_runtime_unavailable",
+            ):
+                ingress.drain_one(
+                    self.runtime_instance,
+                    timeout_seconds=0.1,
+                )
         helper.join()
         _join(producer_thread, producer)
         self.assertTrue(producer_timed_out.is_set())
         self.assertIsInstance(producer.error, IngressOwnerUnresponsive)
         self.assertIsNone(producer.receipt)
-        self.assertEqual(
-            self.terminal_payload(terminal)["reason"],
-            "ingress_owner_unresponsive",
-        )
+        self.assertEqual(self._close_reasons, [])
 
     def test_wrong_thread_drain_checks_before_dequeue(self):
         ingress = self.make_ingress()
@@ -1838,7 +1957,9 @@ class IngressRuntimeTests(RuntimeFixture):
         self.assertEqual(len(parent_order), 2)
         wal_before_fork = self.wal_path().read_bytes()
         read_fd, write_fd = os.pipe()
-        child = os.fork()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            child = os.fork()
         if child == 0:
             try:
                 os.close(read_fd)
@@ -1898,19 +2019,34 @@ class IngressRuntimeTests(RuntimeFixture):
             2,
         )
         self.assertEqual(self.wal_path().read_bytes(), wal_before_fork)
-        first = ingress.drain_one(
-            self.runtime_instance,
-            timeout_seconds=0.1,
-        )
-        self.assertEqual(first.record_kind, RecordKind.RAW)
-        terminal = ingress.drain_one(
-            self.runtime_instance,
-            timeout_seconds=0.1,
-        )
+        with self.assertRaisesRegex(
+            IngressClosed,
+            r"\Aingress_runtime_unavailable\Z",
+        ):
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.1,
+            )
         self.assertEqual(
-            self.terminal_payload(terminal)["reason"],
-            "ingress_owner_unresponsive",
+            ingress._queue.qsize(),  # type: ignore[attr-defined]
+            0,
         )
+        self.assertEqual(self.wal_path().read_bytes(), wal_before_fork)
+        self.assertEqual(self._close_reasons, [])
+        for operation in (
+            lambda: ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            ),
+            lambda: ingress.close_external_halt(
+                self.runtime_instance
+            ),
+        ):
+            with self.assertRaisesRegex(
+                IngressClosed,
+                r"\Aingress_closed\Z",
+            ):
+                operation()
 
     def test_empty_queue_at_exact_session_end_writes_one_clean_terminal(self):
         ingress = self.make_ingress()
@@ -2078,6 +2214,11 @@ class IngressRuntimeTests(RuntimeFixture):
                         timeout_seconds=0.1,
                     )
                     _join(admitted_thread, admitted)
+                    self.assertEqual(terminal.record_kind, RecordKind.RAW)
+                    terminal = ingress.drain_one(
+                        self.runtime_instance,
+                        timeout_seconds=0.1,
+                    )
                     expected_terminal = "ingress_backpressure"
                 else:
                     ingress = self.make_ingress(
@@ -2092,16 +2233,22 @@ class IngressRuntimeTests(RuntimeFixture):
                         admitted.error,
                         IngressOwnerUnresponsive,
                     )
-                    terminal = ingress.drain_one(
-                        self.runtime_instance,
-                        timeout_seconds=0.1,
-                    )
-                    expected_terminal = "ingress_owner_unresponsive"
+                    with self.assertRaisesRegex(
+                        IngressClosed,
+                        "ingress_runtime_unavailable",
+                    ):
+                        ingress.drain_one(
+                            self.runtime_instance,
+                            timeout_seconds=0.1,
+                        )
+                    terminal = None
+                    expected_terminal = None
 
-                self.assertEqual(
-                    self.terminal_payload(terminal)["reason"],
-                    expected_terminal,
-                )
+                if terminal is not None:
+                    self.assertEqual(
+                        self.terminal_payload(terminal)["reason"],
+                        expected_terminal,
+                    )
                 before = self.wal_path().read_bytes()
                 operations = (
                     lambda: ingress.enqueue(self.item(3)),
@@ -2341,17 +2488,511 @@ class IngressRuntimeTests(RuntimeFixture):
                     method_name,
                     new=checked_terminal,
                 ):
-                    terminal = ingress.drain_one(
+                    if mode in ("operator_stop", "backpressure"):
+                        raw = ingress.drain_one(
+                            self.runtime_instance,
+                            timeout_seconds=0.1,
+                        )
+                        self.assertEqual(raw.record_kind, RecordKind.RAW)
+                        terminal = ingress.drain_one(
+                            self.runtime_instance,
+                            timeout_seconds=0.1,
+                        )
+                    elif mode == "owner_unresponsive":
+                        with self.assertRaisesRegex(
+                            IngressClosed,
+                            "ingress_runtime_unavailable",
+                        ):
+                            ingress.drain_one(
+                                self.runtime_instance,
+                                timeout_seconds=0.1,
+                            )
+                        terminal = None
+                    else:
+                        terminal = ingress.drain_one(
+                            self.runtime_instance,
+                            timeout_seconds=0.1,
+                        )
+                for thread, result in pairs:
+                    _join(thread, result)
+                self.assertEqual(
+                    terminal_calls,
+                    0 if mode == "owner_unresponsive" else 1,
+                )
+                if terminal is not None:
+                    self.assertEqual(
+                        self.terminal_payload(terminal)["reason"],
+                        expected_reason,
+                    )
+
+    def test_external_halt_rejects_queued_work_until_raw_parents_are_drained(
+        self,
+    ):
+        ingress = self.make_ingress(
+            capacity=3,
+            receipt_timeout_seconds=30.0,
+        )
+        self.assertIsNone(
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            )
+        )
+        pairs, nodes = self.admit_many(ingress, 3)
+        wal_before = self.wal_path().read_bytes()
+
+        with self.assertRaisesRegex(
+            IngressClosed,
+            r"\Aingress_not_between_drains\Z",
+        ):
+            ingress.close_external_halt(self.runtime_instance)
+        self.assertEqual(
+            ingress._queue.qsize(),  # type: ignore[attr-defined]
+            3,
+        )
+        self.assertEqual(self.wal_path().read_bytes(), wal_before)
+        self.assertEqual(self._close_reasons, [])
+
+        raws = tuple(
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.1,
+            )
+            for _ in range(3)
+        )
+        for thread, result in pairs:
+            _join(thread, result)
+            self.assertIsNone(result.error)
+            self.assertIsNotNone(result.receipt)
+        self.assertTrue(
+            all(raw.record_kind is RecordKind.RAW for raw in raws)
+        )
+        self.assertEqual(
+            tuple(result.receipt.raw_ingest_seq for _, result in pairs),
+            tuple(raw.ingest_seq for raw in raws),
+        )
+        self.assertEqual(
+            ingress._queue.qsize(),  # type: ignore[attr-defined]
+            0,
+        )
+        self.assert_ingress_locks_available(ingress, nodes)
+
+        terminal = ingress.close_external_halt(self.runtime_instance)
+
+        self.assertEqual(
+            self.terminal_payload(terminal)["reason"],
+            "operator_halt",
+        )
+        self.assertEqual(
+            self._close_reasons,
+            [(False, "operator_halt")],
+        )
+        self.assertGreater(len(self.wal_path().read_bytes()), len(wal_before))
+        records, summary = self.diagnostic_records()
+        self.assertEqual(
+            sum(
+                record.record_kind is RecordKind.RAW
+                for record in records
+            ),
+            3,
+        )
+        self.assertEqual(summary.raw_count, 3)
+
+        after_terminal = self.wal_path().read_bytes()
+        operations = (
+            lambda: ingress.enqueue(self.item(9)),
+            lambda: ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            ),
+            lambda: ingress.close_external_halt(
+                self.runtime_instance
+            ),
+        )
+        for operation in operations:
+            with self.assertRaisesRegex(
+                IngressClosed,
+                r"\Aingress_closed\Z",
+            ):
+                operation()
+        ingress.close_inputs()
+        self.assertEqual(self.wal_path().read_bytes(), after_terminal)
+
+    def test_external_halt_honors_already_won_static_ingress_fault(self):
+        cases = (
+            (
+                "backpressure",
+                "ingress_backpressure",
+                IngressBackpressureHalt,
+            ),
+            (
+                "owner_unresponsive",
+                "ingress_owner_unresponsive",
+                IngressOwnerUnresponsive,
+            ),
+        )
+        for mode, expected_reason, expected_error in cases:
+            with self.subTest(mode=mode):
+                self.reset_stack()
+                self.runtime_instance = self.runtime()
+                if mode == "backpressure":
+                    ingress = self.make_ingress(
+                        capacity=1,
+                        producer_timeout_seconds=0.03,
+                        receipt_timeout_seconds=30.0,
+                    )
+                else:
+                    ingress = self.make_ingress(
+                        capacity=1,
+                        receipt_timeout_seconds=0.03,
+                    )
+                self.assertIsNone(
+                    ingress.drain_one(
+                        self.runtime_instance,
+                        timeout_seconds=0.01,
+                    )
+                )
+                admitted_thread, admitted = _start_producer(
+                    ingress,
+                    self.item(1),
+                )
+                _wait_until_queued(ingress)
+                if mode == "backpressure":
+                    rejected_thread, rejected = _start_producer(
+                        ingress,
+                        self.item(2),
+                    )
+                    _join(rejected_thread, rejected)
+                    self.assertIsInstance(
+                        rejected.error,
+                        expected_error,
+                    )
+                else:
+                    _join(admitted_thread, admitted)
+                    self.assertIsInstance(
+                        admitted.error,
+                        expected_error,
+                    )
+
+                wal_before = self.wal_path().read_bytes()
+                with self.assertRaisesRegex(
+                    IngressClosed,
+                    r"\Aingress_not_between_drains\Z",
+                ):
+                    ingress.close_external_halt(
+                        self.runtime_instance
+                    )
+                self.assertEqual(self.wal_path().read_bytes(), wal_before)
+
+                if mode == "backpressure":
+                    raw = ingress.drain_one(
                         self.runtime_instance,
                         timeout_seconds=0.1,
                     )
-                for thread, result in pairs:
-                    _join(thread, result)
-                self.assertEqual(terminal_calls, 1)
-                self.assertEqual(
-                    self.terminal_payload(terminal)["reason"],
-                    expected_reason,
-                )
+                    _join(admitted_thread, admitted)
+                    self.assertEqual(raw.record_kind, RecordKind.RAW)
+                    self.assertIsNone(admitted.error)
+                    self.assertIsNotNone(admitted.receipt)
+                    terminal = ingress.close_external_halt(
+                        self.runtime_instance
+                    )
+                    self.assertEqual(
+                        self.terminal_payload(terminal)["reason"],
+                        expected_reason,
+                    )
+                    self.assertEqual(
+                        self._close_reasons,
+                        [(False, expected_reason)],
+                    )
+                    records, summary = self.diagnostic_records()
+                    self.assertEqual(
+                        sum(
+                            record.record_kind is RecordKind.RAW
+                            for record in records
+                        ),
+                        1,
+                    )
+                    self.assertEqual(summary.raw_count, 1)
+                else:
+                    with self.assertRaisesRegex(
+                        IngressClosed,
+                        r"\Aingress_runtime_unavailable\Z",
+                    ):
+                        ingress.drain_one(
+                            self.runtime_instance,
+                            timeout_seconds=0.1,
+                        )
+                    with self.assertRaisesRegex(
+                        IngressClosed,
+                        r"\Aingress_closed\Z",
+                    ):
+                        ingress.close_external_halt(
+                            self.runtime_instance
+                        )
+                    self.assertEqual(self._close_reasons, [])
+                    self.assertEqual(
+                        self.wal_path().read_bytes(),
+                        wal_before,
+                    )
+
+    def test_external_halt_requires_bound_owner_and_exact_runtime(self):
+        ingress = self.make_ingress()
+        before = self.wal_path().read_bytes()
+        with self.assertRaisesRegex(
+            IngressClosed,
+            r"\Aingress_runtime_unbound\Z",
+        ):
+            ingress.close_external_halt(self.runtime_instance)
+        self.assertEqual(self.wal_path().read_bytes(), before)
+
+        self.assertIsNone(
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            )
+        )
+        errors: list[BaseException] = []
+        thread = threading.Thread(
+            target=lambda: _capture_ingress_exception(
+                errors,
+                lambda: ingress.close_external_halt(
+                    self.runtime_instance
+                ),
+            )
+        )
+        thread.start()
+        thread.join()
+        self.assertEqual(len(errors), 1)
+        self.assertIs(type(errors[0]), WrongOwnerThread)
+        self.assertEqual(self.wal_path().read_bytes(), before)
+
+        with concrete_environment() as (
+            _fixture,
+            coordinator,
+            gate,
+            manifest,
+        ):
+            authorizer = bind_provider_persistence_authorizer(
+                gate=gate,
+                coordinator=coordinator,
+                session_manifest=manifest,
+            )
+            capability = coordinator.arm_before_wal(
+                session_manifest=manifest,
+                decision=authorizer.bound_decision,
+                persistence_authorizer=authorizer,
+            )
+            writer = JournalWriter.create(
+                write_capability=capability,
+                session_manifest=manifest,
+            )
+            other_runtime = EventRuntime(
+                writer=writer,
+                state=initial_state(manifest.session_id),
+                persistence_authorizer=authorizer,
+                coordinator=coordinator,
+            )
+            with self.assertRaisesRegex(
+                IngressClosed,
+                r"\Aingress_runtime_mismatch\Z",
+            ):
+                ingress.close_external_halt(other_runtime)
+            other_runtime.close_clean("operator_stop")
+        self.assertEqual(self.wal_path().read_bytes(), before)
+        ingress.close_external_halt(self.runtime_instance)
+
+    def test_external_halt_rejects_active_or_polling_drain_state(self):
+        ingress = self.make_ingress()
+        self.assertIsNone(
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            )
+        )
+        before = self.wal_path().read_bytes()
+        for attribute, value in (
+            ("_poll_in_progress", True),
+            ("_active_node", object()),
+        ):
+            with self.subTest(attribute=attribute):
+                setattr(ingress, attribute, value)
+                try:
+                    with self.assertRaisesRegex(
+                        IngressClosed,
+                        r"\Aingress_not_between_drains\Z",
+                    ):
+                        ingress.close_external_halt(
+                            self.runtime_instance
+                        )
+                finally:
+                    setattr(
+                        ingress,
+                        attribute,
+                        False if attribute == "_poll_in_progress" else None,
+                    )
+                self.assertEqual(self.wal_path().read_bytes(), before)
+        ingress.close_external_halt(self.runtime_instance)
+
+    def test_external_halt_rejects_queue_without_waiting_on_node_lock(
+        self,
+    ):
+        ingress = self.make_ingress(
+            capacity=1,
+            receipt_timeout_seconds=30.0,
+        )
+        self.assertIsNone(
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            )
+        )
+        timeout_gate = threading.Event()
+        producer_has_node_lock = threading.Event()
+        release_producer = threading.Event()
+        node_holder: list[object] = []
+        original_put = ingress._queue.put  # type: ignore[attr-defined]
+
+        class BarrierCompletion:
+            def __init__(self) -> None:
+                self._event = threading.Event()
+
+            def set(self) -> None:
+                self._event.set()
+
+            def wait(self, _timeout=None) -> bool:
+                if not timeout_gate.wait(2.0):
+                    raise AssertionError("timeout barrier not released")
+                return False
+
+        class BarrierNodeLock:
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+
+            def __enter__(self):
+                self._lock.acquire()
+                if threading.current_thread() is not threading.main_thread():
+                    producer_has_node_lock.set()
+                    if not release_producer.wait(2.0):
+                        raise AssertionError(
+                            "producer node lock was not released"
+                        )
+                return self
+
+            def __exit__(self, *_):
+                self._lock.release()
+                return False
+
+            def acquire(self, *args, **kwargs):
+                return self._lock.acquire(*args, **kwargs)
+
+            def release(self):
+                return self._lock.release()
+
+        def install_barriers(node, *args, **kwargs):
+            node.completion = BarrierCompletion()
+            node.completion_lock = BarrierNodeLock()
+            node_holder.append(node)
+            return original_put(node, *args, **kwargs)
+
+        with mock.patch.object(
+            ingress._queue,  # type: ignore[attr-defined]
+            "put",
+            side_effect=install_barriers,
+        ):
+            producer_thread, producer = _start_producer(
+                ingress,
+                self.item(1),
+            )
+            _wait_until_queued(ingress)
+        timeout_gate.set()
+        self.assertTrue(producer_has_node_lock.wait(2.0))
+
+        before = self.wal_path().read_bytes()
+        with self.assertRaisesRegex(
+            IngressClosed,
+            r"\Aingress_not_between_drains\Z",
+        ):
+            ingress.close_external_halt(self.runtime_instance)
+        self.assertFalse(release_producer.is_set())
+        self.assertTrue(producer_has_node_lock.is_set())
+        self.assertEqual(
+            ingress._queue.qsize(),  # type: ignore[attr-defined]
+            1,
+        )
+        self.assertEqual(self.wal_path().read_bytes(), before)
+
+        release_producer.set()
+        _join(producer_thread, producer)
+        self.assertIs(
+            type(producer.error),
+            IngressOwnerUnresponsive,
+        )
+        with self.assertRaisesRegex(
+            IngressClosed,
+            r"\Aingress_runtime_unavailable\Z",
+        ):
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.1,
+            )
+        with self.assertRaisesRegex(
+            IngressClosed,
+            r"\Aingress_closed\Z",
+        ):
+            ingress.close_external_halt(self.runtime_instance)
+        self.assertEqual(self._close_reasons, [])
+        self.assertEqual(self.wal_path().read_bytes(), before)
+        self.assertEqual(len(node_holder), 1)
+
+    def test_external_halt_runtime_failure_is_terminally_closed(self):
+        ingress = self.make_ingress(
+            capacity=1,
+            receipt_timeout_seconds=30.0,
+        )
+        self.assertIsNone(
+            ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            )
+        )
+        producer_thread, producer = _start_producer(
+            ingress,
+            self.item(1),
+        )
+        _wait_until_queued(ingress)
+        raw = ingress.drain_one(
+            self.runtime_instance,
+            timeout_seconds=0.1,
+        )
+        _join(producer_thread, producer)
+        self.assertEqual(raw.record_kind, RecordKind.RAW)
+        self.assertIsNone(producer.error)
+        self.assertIsNotNone(producer.receipt)
+        before = self.wal_path().read_bytes()
+
+        with mock.patch.object(
+            EventRuntime,
+            "close_halted",
+            side_effect=JournalDurabilityError("uncertain"),
+        ):
+            with self.assertRaises(JournalDurabilityError):
+                ingress.close_external_halt(self.runtime_instance)
+        self.assertEqual(self.wal_path().read_bytes(), before)
+        for operation in (
+            lambda: ingress.enqueue(self.item(2)),
+            lambda: ingress.drain_one(
+                self.runtime_instance,
+                timeout_seconds=0.01,
+            ),
+            lambda: ingress.close_external_halt(
+                self.runtime_instance
+            ),
+        ):
+            with self.assertRaisesRegex(
+                IngressClosed,
+                r"\Aingress_closed\Z",
+            ):
+                operation()
 
 
 INGRESS_CRASH_SCRIPT = r"""
@@ -2668,11 +3309,35 @@ class IngressStaticBoundaryTests(unittest.TestCase):
             "fileno",
             "_latch_global_halt",
             "_halt",
-            "close_halted",
             "SimpleQueue",
             "_pending_faults",
         ):
             self.assertNotIn(forbidden, names | attrs)
+        ingress_class = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "BoundedIngress"
+        )
+        calls_by_method = {
+            method.name: tuple(
+                call
+                for call in ast.walk(method)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "close_halted"
+            )
+            for method in ingress_class.body
+            if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.assertEqual(
+            {
+                name: len(calls)
+                for name, calls in calls_by_method.items()
+                if calls
+            },
+            {"_finalize": 1},
+        )
 
     def test_only_ingress_calls_fixed_runtime_ingress_terminal_operations(self):
         package = Path(__file__).resolve().parents[2] / "tennis_v1"

@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import gc
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,9 @@ import pickle
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 import uuid
@@ -51,7 +54,7 @@ from tennis_v1.session import (
 )
 
 
-PYTHON = "/private/tmp/inci-tennis-v1.uDa8Ve/venv/bin/python"
+PYTHON = sys.executable
 FRAME_PREFIX = struct.Struct(">4sBBHQQII")
 FRAME_TRAILER = struct.Struct(">Q4s")
 FRAME_DOMAIN = b"INCI-FRAME-V1\0"
@@ -72,6 +75,16 @@ class MutableClock:
 
     def __call__(self) -> int:
         return self.now_ns
+
+
+class CountingMutableClock(MutableClock):
+    def __init__(self, now_ns: int):
+        super().__init__(now_ns)
+        self.calls = 0
+
+    def __call__(self) -> int:
+        self.calls += 1
+        return super().__call__()
 
 
 class StrictAuthorizer:
@@ -549,6 +562,135 @@ class RetentionTests(unittest.TestCase):
             )
         return coordinator
 
+    def acquire_expert_grant(
+        self,
+        suffix: str,
+        *,
+        clock: MutableClock | None = None,
+    ) -> tuple[RetentionCoordinator, object, object, object, tuple[int, ...]]:
+        coordinator = RetentionCoordinator.acquire(
+            make_config(self.root / f"expert-matrix-{suffix}"),
+            clock_ns=clock or self.clock,
+        )
+        self.coordinators.append(coordinator)
+        self.assertEqual(
+            coordinator.recover_and_purge(),
+            retention_report(),
+        )
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        grant = (
+            retention_module._consume_expert_state_root_account_lock_request(
+                request
+            )
+        )
+        sampler = object.__getattribute__(grant, "_clock_capability")
+        authority = coordinator._expert_clock_capabilities[sampler]
+        duplicate_fds = tuple(
+            object.__getattribute__(grant, name)
+            for name in (
+                "_state_fd",
+                "_sessions_fd",
+                "_markers_fd",
+                "_lock_fd",
+            )
+        )
+        return coordinator, grant, sampler, authority, duplicate_fds
+
+    def acquire_prearm_expert_grant(
+        self,
+        suffix: str,
+    ):
+        coordinator = RetentionCoordinator.acquire(
+            make_config(self.root / f"expert-prearm-{suffix}"),
+            clock_ns=self.clock,
+        )
+        self.coordinators.append(coordinator)
+        self.assertEqual(
+            coordinator.recover_and_purge(),
+            retention_report(),
+        )
+        authorizer = StrictAuthorizer(
+            coordinator,
+            self.manifest,
+            self.decision,
+        )
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        grant = (
+            retention_module._consume_expert_state_root_account_lock_request(
+                request
+            )
+        )
+        sampler = object.__getattribute__(grant, "_clock_capability")
+        authority = coordinator._expert_clock_capabilities[sampler]
+        duplicate_fds = tuple(
+            object.__getattribute__(grant, name)
+            for name in (
+                "_state_fd",
+                "_sessions_fd",
+                "_markers_fd",
+                "_lock_fd",
+            )
+        )
+        return (
+            coordinator,
+            authorizer,
+            sampler,
+            authority,
+            duplicate_fds,
+        )
+
+    def assert_expert_sample_rejects_and_revokes(
+        self,
+        coordinator: RetentionCoordinator,
+        sampler: object,
+        duplicate_fds: tuple[int, ...],
+        *,
+        clock: CountingMutableClock | None = None,
+    ) -> None:
+        prior_clock_calls = None if clock is None else clock.calls
+        with self.assertRaises(RetentionError):
+            retention_module.sample_expert_retention_wall_ns(sampler)
+        if prior_clock_calls is not None:
+            self.assertEqual(clock.calls, prior_clock_calls)
+        self.assertEqual(coordinator._expert_root_grants, {})
+        self.assertEqual(coordinator._expert_clock_capabilities, {})
+        with self.assertRaisesRegex(
+            RetentionError,
+            r"\Aexpert_retention_clock_capability_stale\Z",
+        ):
+            retention_module.sample_expert_retention_wall_ns(sampler)
+        for fd in duplicate_fds:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def assert_prearm_refresh_failed_closed(
+        self,
+        coordinator: RetentionCoordinator,
+        sampler: object,
+        authority: object,
+        duplicate_fds: tuple[int, ...],
+        *,
+        sessions_before: object,
+        markers_before: object,
+    ) -> None:
+        self.assertEqual(
+            authority.sessions_identity,
+            sessions_before,
+        )
+        self.assertEqual(
+            authority.markers_identity,
+            markers_before,
+        )
+        self.assert_expert_sample_rejects_and_revokes(
+            coordinator,
+            sampler,
+            duplicate_fds,
+        )
+
     def arm(
         self,
         coordinator: RetentionCoordinator,
@@ -568,6 +710,301 @@ class RetentionTests(unittest.TestCase):
     def close_current(self) -> None:
         coordinator = self.coordinators.pop()
         coordinator.close()
+
+    def _run_expert_global_halt_script(
+        self,
+        body: str,
+        *,
+        marker: str,
+    ) -> None:
+        code = f"""
+import os
+from pathlib import Path
+import tempfile
+from unittest import mock
+
+from tennis_v1.retention import (
+    RetentionCoordinator,
+    RetentionError,
+    RetentionGlobalHalt,
+    _consume_expert_state_root_account_lock_request,
+    _latch_global_halt,
+    _revoke_expert_state_root_account_lock_grant,
+    sample_expert_retention_wall_ns,
+)
+from tests.tennis_v1.test_retention import make_config
+
+temporary = tempfile.TemporaryDirectory()
+coordinator = RetentionCoordinator.acquire(
+    make_config(Path(temporary.name).resolve() / "state"),
+    clock_ns=lambda: 123,
+)
+try:
+    coordinator.recover_and_purge()
+{textwrap.indent(body.strip(), "    ")}
+finally:
+    coordinator.close()
+    temporary.cleanup()
+print({marker!r})
+"""
+        completed = subprocess.run(
+            [
+                "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                "-B",
+                "-c",
+                code,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(completed.stdout.strip(), marker)
+        self.assertNotIn("secret", completed.stdout + completed.stderr)
+
+    def _run_expert_close_race_script(self, mode: str) -> None:
+        code = r"""
+import os
+from pathlib import Path
+import sys
+import tempfile
+import threading
+from unittest import mock
+
+from tennis_v1.retention import (
+    RetentionCoordinator,
+    RetentionError,
+    _consume_expert_state_root_account_lock_request,
+    _revoke_expert_state_root_account_lock_grant,
+    sample_expert_retention_wall_ns,
+)
+from tests.tennis_v1.test_retention import make_config
+
+mode = sys.argv[1]
+assert mode in {"issue", "consume", "revoke", "sample"}
+
+with tempfile.TemporaryDirectory() as temporary:
+    operation_entered = threading.Event()
+    close_done = threading.Event()
+    close_errors = []
+    clock_blocks = False
+
+    def clock():
+        if clock_blocks:
+            operation_entered.set()
+            if not close_waiting.wait(5):
+                raise AssertionError("close did not reach sample seam")
+            if close_done.is_set():
+                raise AssertionError("close completed with sample in flight")
+        return 123
+
+    coordinator = RetentionCoordinator.acquire(
+        make_config(Path(temporary).resolve() / "state"),
+        clock_ns=clock,
+    )
+    coordinator.recover_and_purge()
+    original_condition_wait = coordinator._condition.wait
+    close_waiting = threading.Event()
+    close_wait_states = []
+
+    def tracked_condition_wait(timeout=None):
+        if threading.current_thread().name == "expert-close-race":
+            close_wait_states.append(coordinator._closing)
+            close_waiting.set()
+        return original_condition_wait(timeout)
+
+    coordinator._condition.wait = tracked_condition_wait
+    request = None
+    grant = None
+    sampler = None
+    duplicate_fds = ()
+    if mode in {"consume", "revoke", "sample"}:
+        request = coordinator.issue_expert_state_root_account_lock_request()
+    if mode in {"revoke", "sample"}:
+        grant = _consume_expert_state_root_account_lock_request(request)
+        sampler = object.__getattribute__(grant, "_clock_capability")
+        duplicate_fds = tuple(
+            object.__getattribute__(grant, name)
+            for name in (
+                "_state_fd",
+                "_sessions_fd",
+                "_markers_fd",
+                "_lock_fd",
+            )
+        )
+
+    def close_coordinator():
+        if not operation_entered.wait(5):
+            close_errors.append(
+                AssertionError("operation did not reach close seam")
+            )
+            close_done.set()
+            return
+        try:
+            coordinator.close()
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_done.set()
+
+    thread = threading.Thread(
+        target=close_coordinator,
+        name="expert-close-race",
+    )
+    thread.start()
+
+    operation_error = None
+    if mode == "issue":
+        original_validate = RetentionCoordinator._validate_roots_and_lock
+
+        def blocking_validate(instance):
+            assert instance is coordinator
+            operation_entered.set()
+            if not close_waiting.wait(5):
+                raise AssertionError("close did not reach issue seam")
+            if close_done.is_set():
+                raise AssertionError("close completed with issue in flight")
+            return original_validate(instance)
+
+        with mock.patch.object(
+            RetentionCoordinator,
+            "_validate_roots_and_lock",
+            autospec=True,
+            side_effect=blocking_validate,
+        ):
+            try:
+                request = (
+                    coordinator.issue_expert_state_root_account_lock_request()
+                )
+            except RetentionError as error:
+                operation_error = error
+    elif mode == "consume":
+        original_dup = os.dup
+        duplicates = []
+
+        def blocking_dup(fd):
+            duplicate = original_dup(fd)
+            duplicates.append(duplicate)
+            if len(duplicates) == 1:
+                operation_entered.set()
+                if not close_waiting.wait(5):
+                    raise AssertionError(
+                        "close did not reach consume seam"
+                    )
+                if close_done.is_set():
+                    raise AssertionError(
+                        "close completed with consume in flight"
+                    )
+            return duplicate
+
+        with mock.patch.object(os, "dup", side_effect=blocking_dup):
+            try:
+                grant = _consume_expert_state_root_account_lock_request(
+                    request
+                )
+            except RetentionError as error:
+                operation_error = error
+        duplicate_fds = tuple(duplicates)
+    elif mode == "revoke":
+        original_close_duplicates = (
+            RetentionCoordinator._close_expert_root_duplicate_fds
+        )
+
+        def blocking_close_duplicates(fds):
+            operation_entered.set()
+            if not close_waiting.wait(5):
+                raise AssertionError("close did not reach revoke seam")
+            if close_done.is_set():
+                raise AssertionError("close completed with revoke in flight")
+            return original_close_duplicates(fds)
+
+        with mock.patch.object(
+            RetentionCoordinator,
+            "_close_expert_root_duplicate_fds",
+            side_effect=blocking_close_duplicates,
+        ):
+            try:
+                _revoke_expert_state_root_account_lock_grant(grant)
+            except RetentionError as error:
+                operation_error = error
+    else:
+        clock_blocks = True
+        try:
+            sample_expert_retention_wall_ns(sampler)
+        except RetentionError as error:
+            operation_error = error
+
+    thread.join(timeout=5)
+    coordinator._condition.wait = original_condition_wait
+    assert close_done.is_set()
+    assert not thread.is_alive()
+    assert close_errors == []
+    assert close_wait_states != []
+    assert all(close_wait_states)
+    assert coordinator._closed is True
+    assert coordinator._expert_root_operations_inflight == 0
+    assert coordinator._expert_root_requests == {}
+    assert coordinator._expert_root_grants == {}
+    assert coordinator._expert_clock_capabilities == {}
+
+    if mode == "revoke":
+        assert operation_error is None
+    else:
+        assert type(operation_error) is RetentionError
+        expected_errors = {
+            "issue": "retention_coordinator_closed",
+            "consume": "expert_state_root_request_stale",
+            "sample": "expert_state_root_grant_stale",
+        }
+        assert str(operation_error) == expected_errors[mode]
+    if mode != "issue":
+        for fd in duplicate_fds:
+            try:
+                os.fstat(fd)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("close leaked expert descriptor")
+print(f"expert-close-{mode}-race-ok")
+"""
+        try:
+            completed = subprocess.run(
+                [
+                    "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                    "-B",
+                    "-c",
+                    code,
+                    mode,
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                text=True,
+                capture_output=True,
+                timeout=12,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout or b""
+            stderr = error.stderr or b""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            self.fail(stdout + stderr)
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(
+            completed.stdout.strip(),
+            f"expert-close-{mode}-race-ok",
+        )
 
     def test_private_fsynced_marker_is_durable_before_wal_creation(self):
         descriptor_names: dict[int, str] = {}
@@ -5341,6 +5778,2289 @@ print("replay-manifest-rejection-ok")
             completed.stdout + completed.stderr,
         )
         self.assertIn("replay-manifest-rejection-ok", completed.stdout)
+
+    def test_expert_root_request_preissue_global_halt_rejects_without_state(
+        self,
+    ):
+        self._run_expert_global_halt_script(
+            """
+_latch_global_halt(
+    coordinator,
+    session_id=None,
+    ambiguous=True,
+)
+try:
+    coordinator.issue_expert_state_root_account_lock_request()
+except RetentionGlobalHalt as error:
+    assert str(error) == "retention_global_halt"
+else:
+    raise AssertionError("preissue global halt was ignored")
+assert coordinator._expert_root_issued is False
+assert coordinator._expert_root_requests == {}
+assert coordinator._expert_root_grants == {}
+assert coordinator._expert_clock_capabilities == {}
+""",
+            marker="expert-root-preissue-halt-ok",
+        )
+
+    def test_expert_root_request_postissue_global_halt_consumes_request(
+        self,
+    ):
+        self._run_expert_global_halt_script(
+            """
+request = coordinator.issue_expert_state_root_account_lock_request()
+_latch_global_halt(
+    coordinator,
+    session_id=None,
+    ambiguous=True,
+)
+with mock.patch.object(
+    os,
+    "dup",
+    side_effect=AssertionError("secret-duplicate-after-halt"),
+):
+    try:
+        _consume_expert_state_root_account_lock_request(request)
+    except RetentionGlobalHalt as error:
+        assert str(error) == "retention_global_halt"
+    else:
+        raise AssertionError("postissue global halt was ignored")
+assert coordinator._expert_root_requests == {}
+assert coordinator._expert_root_grants == {}
+assert coordinator._expert_clock_capabilities == {}
+try:
+    _consume_expert_state_root_account_lock_request(request)
+except RetentionError as error:
+    assert str(error) == "expert_state_root_request_stale"
+else:
+    raise AssertionError("halted request remained reusable")
+""",
+            marker="expert-root-postissue-halt-ok",
+        )
+
+    def test_expert_root_request_halt_during_duplication_closes_partial_fds(
+        self,
+    ):
+        self._run_expert_global_halt_script(
+            """
+request = coordinator.issue_expert_state_root_account_lock_request()
+duplicates = []
+original_dup = os.dup
+
+def latch_after_first_dup(fd):
+    duplicate = original_dup(fd)
+    duplicates.append(duplicate)
+    if len(duplicates) == 1:
+        _latch_global_halt(
+            coordinator,
+            session_id=None,
+            ambiguous=True,
+        )
+    return duplicate
+
+with mock.patch.object(os, "dup", side_effect=latch_after_first_dup):
+    try:
+        _consume_expert_state_root_account_lock_request(request)
+    except RetentionGlobalHalt as error:
+        assert str(error) == "retention_global_halt"
+    else:
+        raise AssertionError("duplication race returned a grant")
+assert len(duplicates) == 1
+assert coordinator._expert_root_requests == {}
+assert coordinator._expert_root_grants == {}
+assert coordinator._expert_clock_capabilities == {}
+for fd in duplicates:
+    try:
+        os.fstat(fd)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("partial duplicate leaked")
+""",
+            marker="expert-root-partial-dup-halt-ok",
+        )
+
+    def test_expert_clock_postsample_global_halt_revokes_grant_and_fds(
+        self,
+    ):
+        self._run_expert_global_halt_script(
+            """
+request = coordinator.issue_expert_state_root_account_lock_request()
+grant = _consume_expert_state_root_account_lock_request(request)
+sampler = object.__getattribute__(grant, "_clock_capability")
+duplicate_fds = tuple(
+    object.__getattribute__(grant, name)
+    for name in (
+        "_state_fd",
+        "_sessions_fd",
+        "_markers_fd",
+        "_lock_fd",
+    )
+)
+assert sample_expert_retention_wall_ns(sampler) == 123
+_latch_global_halt(
+    coordinator,
+    session_id=None,
+    ambiguous=True,
+)
+try:
+    sample_expert_retention_wall_ns(sampler)
+except RetentionGlobalHalt as error:
+    assert str(error) == "retention_global_halt"
+else:
+    raise AssertionError("postsample global halt was ignored")
+assert coordinator._expert_root_grants == {}
+assert coordinator._expert_clock_capabilities == {}
+for fd in duplicate_fds:
+    try:
+        os.fstat(fd)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("halted grant descriptor leaked")
+assert _revoke_expert_state_root_account_lock_grant(grant) is None
+assert _revoke_expert_state_root_account_lock_grant(grant) is None
+try:
+    sample_expert_retention_wall_ns(sampler)
+except RetentionError as error:
+    assert str(error) == "expert_retention_clock_capability_stale"
+else:
+    raise AssertionError("halted sampler remained reusable")
+""",
+            marker="expert-clock-postsample-halt-ok",
+        )
+
+    def test_expert_clock_failure_has_no_global_halt_lock_inversion(self):
+        code = r"""
+from pathlib import Path
+import tempfile
+import threading
+
+import tennis_v1.retention as retention_module
+from tennis_v1.retention import (
+    RetentionCoordinator,
+    RetentionGlobalHalt,
+    _consume_expert_state_root_account_lock_request,
+    sample_expert_retention_wall_ns,
+)
+from tests.tennis_v1.test_retention import make_config
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary).resolve()
+    clock_entered = threading.Event()
+    contender_attempting = threading.Event()
+    contender_done = threading.Event()
+    broken = False
+
+    def clock():
+        if not broken:
+            return 123
+        clock_entered.set()
+        if not contender_attempting.wait(5):
+            raise AssertionError("contender did not reach lock seam")
+        raise RuntimeError("clock failure")
+
+    first = RetentionCoordinator.acquire(
+        make_config(root / "first"),
+        clock_ns=clock,
+    )
+    second = RetentionCoordinator.acquire(
+        make_config(root / "second"),
+        clock_ns=lambda: 123,
+    )
+    try:
+        first.recover_and_purge()
+        second.recover_and_purge()
+        request = first.issue_expert_state_root_account_lock_request()
+        grant = _consume_expert_state_root_account_lock_request(request)
+        sampler = object.__getattribute__(grant, "_clock_capability")
+
+        def contend():
+            with second._condition:
+                if not clock_entered.wait(5):
+                    raise AssertionError("clock did not reach failure seam")
+                contender_attempting.set()
+                with retention_module._PROVIDER_IO_LOCK:
+                    pass
+            contender_done.set()
+
+        thread = threading.Thread(target=contend)
+        thread.start()
+        broken = True
+        try:
+            sample_expert_retention_wall_ns(sampler)
+        except RetentionGlobalHalt as error:
+            assert str(error) == "retention_clock_failed"
+        else:
+            raise AssertionError("clock failure did not halt")
+        thread.join(timeout=5)
+        assert contender_done.is_set()
+        assert not thread.is_alive()
+    finally:
+        first.close()
+        second.close()
+print("expert-clock-lock-order-ok")
+"""
+        completed = subprocess.run(
+            [
+                "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                "-B",
+                "-c",
+                code,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(
+            completed.stdout.strip(),
+            "expert-clock-lock-order-ok",
+        )
+
+    def test_expert_close_waits_for_root_request_issue(self):
+        self._run_expert_close_race_script("issue")
+
+    def test_expert_close_waits_for_root_request_consumption(self):
+        self._run_expert_close_race_script("consume")
+
+    def test_expert_close_waits_for_root_grant_revocation(self):
+        self._run_expert_close_race_script("revoke")
+
+    def test_expert_close_waits_for_clock_sample(self):
+        self._run_expert_close_race_script("sample")
+
+    def test_expert_close_has_one_winner_and_rejects_new_root_operation(
+        self,
+    ):
+        code = r"""
+from pathlib import Path
+import tempfile
+import threading
+from unittest import mock
+
+from tennis_v1.retention import RetentionCoordinator, RetentionError
+from tests.tennis_v1.test_retention import make_config
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary).resolve()
+    coordinator = RetentionCoordinator.acquire(
+        make_config(root / "state"),
+        clock_ns=lambda: 123,
+    )
+    coordinator.recover_and_purge()
+    initial_generation = coordinator._generation
+    operation_entered = threading.Event()
+    both_closers_called = threading.Event()
+    close_waiting = threading.Event()
+    close_done = [threading.Event(), threading.Event()]
+    close_errors = []
+    close_calls = [0]
+    close_calls_lock = threading.Lock()
+    wait_states = []
+    original_validate = RetentionCoordinator._validate_roots_and_lock
+    original_wait = coordinator._condition.wait
+    nested = False
+
+    def tracked_wait(timeout=None):
+        if threading.current_thread().name.startswith("expert-closer-"):
+            wait_states.append(coordinator._closing)
+            close_waiting.set()
+        return original_wait(timeout)
+
+    coordinator._condition.wait = tracked_wait
+
+    def close_coordinator(index):
+        if not operation_entered.wait(5):
+            close_errors.append(
+                AssertionError("issue did not reach close seam")
+            )
+            close_done[index].set()
+            return
+        with close_calls_lock:
+            close_calls[0] += 1
+            is_second_close = close_calls[0] == 2
+        if is_second_close:
+            both_closers_called.set()
+        try:
+            coordinator.close()
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_done[index].set()
+
+    threads = [
+        threading.Thread(
+            target=close_coordinator,
+            args=(index,),
+            name=f"expert-closer-{index}",
+        )
+        for index in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+
+    def blocking_validate(instance):
+        global nested
+        assert instance is coordinator
+        if nested:
+            return original_validate(instance)
+        operation_entered.set()
+        if not both_closers_called.wait(5):
+            raise AssertionError("both closers did not start")
+        if not close_waiting.wait(5):
+            raise AssertionError("winning close did not enter inflight wait")
+        assert not any(event.is_set() for event in close_done)
+        nested = True
+        try:
+            try:
+                coordinator.issue_expert_state_root_account_lock_request()
+            except RetentionError as error:
+                assert str(error) == "retention_coordinator_closed"
+            else:
+                raise AssertionError(
+                    "new root operation started after close claim"
+                )
+        finally:
+            nested = False
+        return original_validate(instance)
+
+    with mock.patch.object(
+        RetentionCoordinator,
+        "_validate_roots_and_lock",
+        autospec=True,
+        side_effect=blocking_validate,
+    ):
+        try:
+            coordinator.issue_expert_state_root_account_lock_request()
+        except RetentionError as error:
+            assert str(error) == "retention_coordinator_closed"
+        else:
+            raise AssertionError("inflight issue committed after close claim")
+
+    for thread in threads:
+        thread.join(timeout=5)
+    coordinator._condition.wait = original_wait
+    assert all(event.is_set() for event in close_done)
+    assert all(not thread.is_alive() for thread in threads)
+    assert close_errors == []
+    assert wait_states != []
+    assert all(wait_states)
+    assert coordinator._generation == initial_generation + 1
+    assert coordinator._expert_root_operations_inflight == 0
+    assert coordinator._expert_root_requests == {}
+    assert coordinator._closed is True
+print("expert-close-one-winner-ok")
+"""
+        completed = subprocess.run(
+            [
+                "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                "-B",
+                "-c",
+                code,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            timeout=12,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(
+            completed.stdout.strip(),
+            "expert-close-one-winner-ok",
+        )
+
+    def test_expert_consume_cleanup_close_failure_has_no_global_halt_lock_inversion(
+        self,
+    ):
+        code = r"""
+import os
+from pathlib import Path
+import tempfile
+import threading
+from unittest import mock
+
+import tennis_v1.retention as retention_module
+from tennis_v1.retention import (
+    RetentionCoordinator,
+    RetentionGlobalHalt,
+    _consume_expert_state_root_account_lock_request,
+)
+from tests.tennis_v1.test_retention import make_config
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary).resolve()
+    close_entered = threading.Event()
+    contender_attempting = threading.Event()
+    contender_done = threading.Event()
+    duplicates = []
+    original_dup = os.dup
+    original_close = os.close
+    duplicate_calls = 0
+
+    first = RetentionCoordinator.acquire(
+        make_config(root / "first"),
+        clock_ns=lambda: 123,
+    )
+    second = RetentionCoordinator.acquire(
+        make_config(root / "second"),
+        clock_ns=lambda: 123,
+    )
+    try:
+        first.recover_and_purge()
+        second.recover_and_purge()
+        request = first.issue_expert_state_root_account_lock_request()
+
+        def partial_dup(fd):
+            global duplicate_calls
+            duplicate_calls += 1
+            if duplicate_calls == 1:
+                duplicate = original_dup(fd)
+                duplicates.append(duplicate)
+                return duplicate
+            raise OSError("forced duplicate failure")
+
+        def close_then_report_failure(fd):
+            assert fd == duplicates[0]
+            close_entered.set()
+            if not contender_attempting.wait(5):
+                raise AssertionError("contender did not reach lock seam")
+            original_close(fd)
+            raise OSError("forced close failure")
+
+        def contend():
+            with second._condition:
+                if not close_entered.wait(5):
+                    raise AssertionError("close did not reach failure seam")
+                contender_attempting.set()
+                with retention_module._PROVIDER_IO_LOCK:
+                    pass
+            contender_done.set()
+
+        thread = threading.Thread(target=contend)
+        thread.start()
+        with (
+            mock.patch.object(os, "dup", side_effect=partial_dup),
+            mock.patch.object(
+                os,
+                "close",
+                side_effect=close_then_report_failure,
+            ),
+        ):
+            try:
+                _consume_expert_state_root_account_lock_request(request)
+            except RetentionGlobalHalt as error:
+                assert str(error) == "expert_state_root_grant_close_failed"
+            else:
+                raise AssertionError("close failure did not halt")
+        thread.join(timeout=5)
+        assert contender_done.is_set()
+        assert not thread.is_alive()
+        assert first._expert_root_grants == {}
+        assert first._expert_clock_capabilities == {}
+        try:
+            os.fstat(duplicates[0])
+        except OSError:
+            pass
+        else:
+            raise AssertionError("failed-close duplicate leaked")
+    finally:
+        first.close()
+        second.close()
+print("expert-close-lock-order-ok")
+"""
+        completed = subprocess.run(
+            [
+                "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                "-B",
+                "-c",
+                code,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(
+            completed.stdout.strip(),
+            "expert-close-lock-order-ok",
+        )
+
+    def test_expert_coordinator_close_failure_has_no_global_halt_lock_inversion(
+        self,
+    ):
+        code = r"""
+import os
+from pathlib import Path
+import tempfile
+import threading
+from unittest import mock
+
+import tennis_v1.retention as retention_module
+from tennis_v1.retention import RetentionCoordinator, RetentionGlobalHalt
+from tests.tennis_v1.test_retention import make_config
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary).resolve()
+    latch_started = threading.Event()
+    contender_has_provider = threading.Event()
+    contender_done = threading.Event()
+    original_close = os.close
+    original_latch = retention_module._latch_global_halt
+
+    first = RetentionCoordinator.acquire(
+        make_config(root / "first"),
+        clock_ns=lambda: 123,
+    )
+    second = RetentionCoordinator.acquire(
+        make_config(root / "second"),
+        clock_ns=lambda: 123,
+    )
+    first.recover_and_purge()
+    second.recover_and_purge()
+    failing_fd = first._markers_fd
+
+    def fail_one_descriptor(fd):
+        if fd == failing_fd:
+            raise OSError("forced coordinator close failure")
+        return original_close(fd)
+
+    def announced_latch(*args, **kwargs):
+        latch_started.set()
+        return original_latch(*args, **kwargs)
+
+    def contend():
+        with second._condition:
+            with retention_module._PROVIDER_IO_LOCK:
+                contender_has_provider.set()
+                if not latch_started.wait(5):
+                    raise AssertionError("close did not reach latch seam")
+                with first._condition:
+                    pass
+        contender_done.set()
+
+    thread = threading.Thread(target=contend)
+    thread.start()
+    assert contender_has_provider.wait(5)
+    with (
+        mock.patch.object(os, "close", side_effect=fail_one_descriptor),
+        mock.patch.object(
+            retention_module,
+            "_latch_global_halt",
+            side_effect=announced_latch,
+        ),
+    ):
+        try:
+            first.close()
+        except RetentionGlobalHalt as error:
+            assert str(error) == "retention_descriptor_close_failed"
+        else:
+            raise AssertionError("coordinator close failure did not halt")
+    thread.join(timeout=5)
+    assert contender_done.is_set()
+    assert not thread.is_alive()
+    second.close()
+print("expert-coordinator-close-lock-order-ok")
+"""
+        completed = subprocess.run(
+            [
+                "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                "-B",
+                "-c",
+                code,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(
+            completed.stdout.strip(),
+            "expert-coordinator-close-lock-order-ok",
+        )
+
+    def test_expert_root_request_is_one_shot_and_transfers_same_clock(self):
+        from tennis_v1.retention import (
+            ExpertStateRootAccountLockRequestV1,
+            _consume_expert_state_root_account_lock_request,
+            _revoke_expert_state_root_account_lock_grant,
+            sample_expert_retention_wall_ns,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        self.assertIs(type(request), ExpertStateRootAccountLockRequestV1)
+        self.assertEqual(
+            repr(request),
+            "<ExpertStateRootAccountLockRequestV1 redacted>",
+        )
+        for forbidden in (
+            "path",
+            "state_root",
+            "fd",
+            "lock_fd",
+            "clock",
+            "callback",
+        ):
+            self.assertNotIn(forbidden, request.__slots__)
+
+        original_identities = tuple(
+            (value.st_dev, value.st_ino)
+            for value in (
+                os.fstat(coordinator._state_fd),
+                os.fstat(coordinator._sessions_fd),
+                os.fstat(coordinator._markers_fd),
+                os.fstat(coordinator._lock_fd),
+            )
+        )
+        with mock.patch.object(
+            os,
+            "open",
+            side_effect=AssertionError("request consumption reopened a path"),
+        ):
+            grant = _consume_expert_state_root_account_lock_request(
+                request
+            )
+        duplicate_identities = tuple(
+            (value.st_dev, value.st_ino)
+            for value in (
+                os.fstat(object.__getattribute__(grant, "_state_fd")),
+                os.fstat(object.__getattribute__(grant, "_sessions_fd")),
+                os.fstat(object.__getattribute__(grant, "_markers_fd")),
+                os.fstat(object.__getattribute__(grant, "_lock_fd")),
+            )
+        )
+        self.assertEqual(duplicate_identities, original_identities)
+
+        sampler = object.__getattribute__(grant, "_clock_capability")
+        for now_ns in (
+            self.manifest.required_retention_until_ns - 1,
+            self.manifest.required_retention_until_ns,
+            self.manifest.required_retention_until_ns + 1,
+        ):
+            self.clock.now_ns = now_ns
+            self.assertEqual(
+                sample_expert_retention_wall_ns(sampler),
+                now_ns,
+            )
+
+        with self.assertRaisesRegex(
+            RetentionError,
+            r"\Aexpert_state_root_request_stale\Z",
+        ):
+            _consume_expert_state_root_account_lock_request(request)
+        with self.assertRaisesRegex(
+            RetentionError,
+            r"\Aexpert_state_root_request_stale\Z",
+        ):
+            coordinator.issue_expert_state_root_account_lock_request()
+
+        duplicate_fds = tuple(
+            object.__getattribute__(grant, name)
+            for name in (
+                "_state_fd",
+                "_sessions_fd",
+                "_markers_fd",
+                "_lock_fd",
+            )
+        )
+        self.assertIsNone(
+            _revoke_expert_state_root_account_lock_grant(grant)
+        )
+        self.assertIsNone(
+            _revoke_expert_state_root_account_lock_grant(grant)
+        )
+        with self.assertRaisesRegex(
+            RetentionError,
+            r"\Aexpert_retention_clock_capability_stale\Z",
+        ):
+            sample_expert_retention_wall_ns(sampler)
+        for fd in duplicate_fds:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_expert_clock_allows_descriptor_relative_state_child_bootstrap(
+        self,
+    ):
+        from tennis_v1.retention import (
+            _consume_expert_state_root_account_lock_request,
+            _revoke_expert_state_root_account_lock_grant,
+            sample_expert_retention_wall_ns,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        grant = _consume_expert_state_root_account_lock_request(request)
+        state_fd = object.__getattribute__(grant, "_state_fd")
+        sampler = object.__getattribute__(grant, "_clock_capability")
+        before_links = os.fstat(state_fd).st_nlink
+        os.mkdir("authorized-companion-v1", 0o700, dir_fd=state_fd)
+        try:
+            after_links = os.fstat(state_fd).st_nlink
+            if after_links != before_links:
+                self.assertEqual(after_links, before_links + 1)
+            self.assertEqual(
+                sample_expert_retention_wall_ns(sampler),
+                self.clock.now_ns,
+            )
+            for offset in (1, 2):
+                self.clock.now_ns += offset
+                self.assertEqual(
+                    sample_expert_retention_wall_ns(sampler),
+                    self.clock.now_ns,
+                )
+        finally:
+            try:
+                os.rmdir("authorized-companion-v1", dir_fd=state_fd)
+            except OSError:
+                companion = self.state_root / "authorized-companion-v1"
+                if companion.exists():
+                    companion.rmdir()
+            try:
+                _revoke_expert_state_root_account_lock_grant(grant)
+            except RetentionError:
+                pass
+
+    def test_expert_state_root_historical_identity_relaxes_only_link_count(
+        self,
+    ):
+        for identity_name in (
+            "state_identity",
+            "sessions_identity",
+            "markers_identity",
+        ):
+            with self.subTest(identity=identity_name):
+                clock = CountingMutableClock(self.clock.now_ns)
+                (
+                    coordinator,
+                    grant,
+                    sampler,
+                    authority,
+                    duplicate_fds,
+                ) = self.acquire_expert_grant(
+                    f"historical-link-{identity_name}",
+                    clock=clock,
+                )
+                identity = getattr(authority, identity_name)
+                link_delta = (
+                    17 if identity_name == "state_identity" else 1
+                )
+                setattr(
+                    authority,
+                    identity_name,
+                    replace(identity, links=identity.links + link_delta),
+                )
+                prior_clock_calls = clock.calls
+                self.assertEqual(
+                    retention_module.sample_expert_retention_wall_ns(
+                        sampler
+                    ),
+                    clock.now_ns,
+                )
+                clock.now_ns += 1
+                self.assertEqual(
+                    retention_module.sample_expert_retention_wall_ns(
+                        sampler
+                    ),
+                    clock.now_ns,
+                )
+                self.assertEqual(clock.calls, prior_clock_calls + 2)
+                self.assertIsNone(
+                    retention_module._revoke_expert_state_root_account_lock_grant(
+                        grant
+                    )
+                )
+                self.assertEqual(coordinator._expert_root_grants, {})
+                self.assertEqual(
+                    coordinator._expert_clock_capabilities,
+                    {},
+                )
+                for fd in duplicate_fds:
+                    with self.assertRaises(OSError):
+                        os.fstat(fd)
+
+    def test_expert_state_root_historical_identity_field_matrix_revokes(
+        self,
+    ):
+        mutations = {
+            "device": lambda identity: identity.device + 1,
+            "inode": lambda identity: identity.inode + 1,
+            "mode": lambda identity: identity.mode ^ stat.S_IWGRP,
+            "owner": lambda identity: identity.owner + 1,
+        }
+        for identity_name in (
+            "state_identity",
+            "sessions_identity",
+            "markers_identity",
+        ):
+            for field_name, mutate in mutations.items():
+                with self.subTest(
+                    identity=identity_name,
+                    field=field_name,
+                ):
+                    clock = CountingMutableClock(self.clock.now_ns)
+                    (
+                        coordinator,
+                        _grant,
+                        sampler,
+                        authority,
+                        duplicate_fds,
+                    ) = self.acquire_expert_grant(
+                        f"historical-{identity_name}-{field_name}",
+                        clock=clock,
+                    )
+                    identity = getattr(authority, identity_name)
+                    setattr(
+                        authority,
+                        identity_name,
+                        replace(
+                            identity,
+                            **{field_name: mutate(identity)},
+                        ),
+                    )
+                    self.assert_expert_sample_rejects_and_revokes(
+                        coordinator,
+                        sampler,
+                        duplicate_fds,
+                        clock=clock,
+                    )
+        for identity_name in (
+            "sessions_identity",
+            "markers_identity",
+        ):
+            with self.subTest(
+                identity=identity_name,
+                field="links_two_lower",
+            ):
+                clock = CountingMutableClock(self.clock.now_ns)
+                (
+                    coordinator,
+                    _grant,
+                    sampler,
+                    authority,
+                    duplicate_fds,
+                ) = self.acquire_expert_grant(
+                    f"historical-{identity_name}-links-two-lower",
+                    clock=clock,
+                )
+                identity = getattr(authority, identity_name)
+                setattr(
+                    authority,
+                    identity_name,
+                    replace(identity, links=identity.links + 2),
+                )
+                self.assert_expert_sample_rejects_and_revokes(
+                    coordinator,
+                    sampler,
+                    duplicate_fds,
+                    clock=clock,
+                )
+
+    def test_expert_sessions_identity_refresh_accepts_only_zero_or_one_authorized_removal(
+        self,
+    ):
+        def acquire_case(
+            suffix: str,
+            children: tuple[str, ...] = (),
+        ):
+            coordinator = RetentionCoordinator.acquire(
+                make_config(self.root / f"sessions-refresh-{suffix}"),
+                clock_ns=self.clock,
+            )
+            self.coordinators.append(coordinator)
+            self.assertEqual(
+                coordinator.recover_and_purge(),
+                retention_report(),
+            )
+            for child in children:
+                os.mkdir(child, 0o700, dir_fd=coordinator._sessions_fd)
+            if children:
+                os.fsync(coordinator._sessions_fd)
+            request = (
+                coordinator.issue_expert_state_root_account_lock_request()
+            )
+            grant = (
+                retention_module._consume_expert_state_root_account_lock_request(
+                    request
+                )
+            )
+            sampler = object.__getattribute__(
+                grant,
+                "_clock_capability",
+            )
+            authority = coordinator._expert_clock_capabilities[sampler]
+            duplicate_fds = tuple(
+                object.__getattribute__(grant, name)
+                for name in (
+                    "_state_fd",
+                    "_sessions_fd",
+                    "_markers_fd",
+                    "_lock_fd",
+                )
+            )
+            return (
+                coordinator,
+                grant,
+                sampler,
+                authority,
+                duplicate_fds,
+            )
+
+        for suffix, removed in (
+            ("unchanged", ()),
+            ("one-removal", ("authorized-child",)),
+        ):
+            with self.subTest(accepted=suffix):
+                (
+                    coordinator,
+                    grant,
+                    sampler,
+                    authority,
+                    duplicate_fds,
+                ) = acquire_case(suffix, removed)
+                with coordinator._condition:
+                    transition = (
+                        coordinator._prepare_expert_sessions_identity_refresh()
+                    )
+                for child in removed:
+                    os.rmdir(child, dir_fd=coordinator._sessions_fd)
+                os.fsync(coordinator._sessions_fd)
+                with coordinator._condition:
+                    coordinator._commit_expert_sessions_identity_refresh(
+                        transition
+                    )
+                current = retention_module._file_identity(
+                    os.fstat(coordinator._sessions_fd)
+                )
+                self.assertEqual(authority.sessions_identity, current)
+                self.assertEqual(
+                    retention_module._file_identity(
+                        os.fstat(authority.sessions_fd)
+                    ),
+                    current,
+                )
+                self.assertEqual(
+                    retention_module._file_identity(
+                        os.stat(
+                            "sessions",
+                            dir_fd=coordinator._state_fd,
+                            follow_symlinks=False,
+                        )
+                    ),
+                    current,
+                )
+                self.assertEqual(
+                    retention_module.sample_expert_retention_wall_ns(
+                        sampler
+                    ),
+                    self.clock.now_ns,
+                )
+                self.assertIsNone(
+                    retention_module._revoke_expert_state_root_account_lock_grant(
+                        grant
+                    )
+                )
+                for fd in duplicate_fds:
+                    with self.assertRaises(OSError):
+                        os.fstat(fd)
+
+        for suffix, before_children, after_children in (
+            ("addition", (), ("unexpected-child",)),
+            (
+                "two-removals",
+                ("first-child", "second-child"),
+                (),
+            ),
+        ):
+            with self.subTest(rejected=suffix):
+                (
+                    coordinator,
+                    _grant,
+                    sampler,
+                    _authority,
+                    duplicate_fds,
+                ) = acquire_case(suffix, before_children)
+                with coordinator._condition:
+                    transition = (
+                        coordinator._prepare_expert_sessions_identity_refresh()
+                    )
+                for child in before_children:
+                    os.rmdir(child, dir_fd=coordinator._sessions_fd)
+                for child in after_children:
+                    os.mkdir(child, 0o700, dir_fd=coordinator._sessions_fd)
+                os.fsync(coordinator._sessions_fd)
+                with coordinator._condition:
+                    with self.assertRaises(RetentionError):
+                        coordinator._commit_expert_sessions_identity_refresh(
+                            transition
+                        )
+                self.assert_expert_sample_rejects_and_revokes(
+                    coordinator,
+                    sampler,
+                    duplicate_fds,
+                )
+                for child in after_children:
+                    os.rmdir(child, dir_fd=coordinator._sessions_fd)
+
+    def _run_expert_arm_identity_refresh_failure(
+        self,
+        mode: str,
+    ) -> None:
+        code = r"""
+import os
+from pathlib import Path
+import sys
+import tempfile
+from unittest import mock
+
+from tennis_v1.retention import (
+    RetentionCoordinator,
+    RetentionError,
+    RetentionGlobalHalt,
+    _consume_expert_state_root_account_lock_request,
+    sample_expert_retention_wall_ns,
+)
+from tests.tennis_v1.test_retention import (
+    MutableClock,
+    StrictAuthorizer,
+    make_config,
+    make_manifest_decision,
+)
+
+mode = sys.argv[1]
+assert mode in {
+    "wrong-link",
+    "extra-entry",
+    "replacement",
+    "partial",
+    "directory-time",
+    "post-validation",
+}
+temporary = tempfile.TemporaryDirectory()
+root = Path(temporary.name).resolve()
+manifest, decision = make_manifest_decision()
+clock = MutableClock(manifest.created_wall_ns)
+coordinator = RetentionCoordinator.acquire(
+    make_config(root / "state"),
+    clock_ns=clock,
+)
+coordinator.recover_and_purge()
+authorizer = StrictAuthorizer(coordinator, manifest, decision)
+request = coordinator.issue_expert_state_root_account_lock_request()
+grant = _consume_expert_state_root_account_lock_request(request)
+sampler = object.__getattribute__(grant, "_clock_capability")
+authority = coordinator._expert_clock_capabilities[sampler]
+duplicate_fds = tuple(
+    object.__getattribute__(grant, name)
+    for name in (
+        "_state_fd",
+        "_sessions_fd",
+        "_markers_fd",
+        "_lock_fd",
+    )
+)
+sessions_before = authority.sessions_identity
+markers_before = authority.markers_identity
+original_commit = (
+    RetentionCoordinator._commit_expert_arm_identity_refresh
+)
+
+def require_halt():
+    try:
+        coordinator.arm_before_wal(
+            session_manifest=manifest,
+            decision=decision,
+            persistence_authorizer=authorizer,
+        )
+    except RetentionGlobalHalt:
+        return
+    raise AssertionError("expert arm transition failure did not halt")
+
+if mode == "wrong-link":
+    original_fstat = os.fstat
+    original_stat = os.stat
+    sessions_fds = {
+        coordinator._sessions_fd,
+        authority.sessions_fd,
+    }
+
+    def changed_links(value):
+        fields = list(value)
+        fields[3] = sessions_before.links + 1
+        return os.stat_result(fields)
+
+    def wrong_fstat(fd):
+        value = original_fstat(fd)
+        return changed_links(value) if fd in sessions_fds else value
+
+    def wrong_stat(path, *args, **kwargs):
+        value = original_stat(path, *args, **kwargs)
+        if (
+            path == "sessions"
+            and kwargs.get("dir_fd") == coordinator._state_fd
+        ):
+            return changed_links(value)
+        return value
+
+    def commit_with_wrong_delta(instance, transitions, **kwargs):
+        with (
+            mock.patch.object(
+                os,
+                "fstat",
+                side_effect=wrong_fstat,
+            ),
+            mock.patch.object(
+                os,
+                "stat",
+                side_effect=wrong_stat,
+            ),
+        ):
+            return original_commit(instance, transitions, **kwargs)
+
+    with mock.patch.object(
+        RetentionCoordinator,
+        "_commit_expert_arm_identity_refresh",
+        new=commit_with_wrong_delta,
+    ):
+        require_halt()
+elif mode == "extra-entry":
+    def commit_with_extra_entry(instance, transitions, **kwargs):
+        descriptor = os.open(
+            "unexpected-entry",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=coordinator._sessions_fd,
+        )
+        os.close(descriptor)
+        os.fsync(coordinator._sessions_fd)
+        return original_commit(instance, transitions, **kwargs)
+
+    with mock.patch.object(
+        RetentionCoordinator,
+        "_commit_expert_arm_identity_refresh",
+        new=commit_with_extra_entry,
+    ):
+        require_halt()
+elif mode == "replacement":
+    foreign = root / "foreign-arm-sessions"
+    foreign.mkdir(mode=0o700)
+    foreign_fd = os.open(
+        foreign,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+
+    def commit_with_replacement(instance, transitions, **kwargs):
+        os.dup2(foreign_fd, authority.sessions_fd)
+        os.set_inheritable(authority.sessions_fd, False)
+        return original_commit(instance, transitions, **kwargs)
+
+    try:
+        with mock.patch.object(
+            RetentionCoordinator,
+            "_commit_expert_arm_identity_refresh",
+            new=commit_with_replacement,
+        ):
+            require_halt()
+    finally:
+        os.close(foreign_fd)
+elif mode == "partial":
+    original_create = RetentionCoordinator._create_file
+    create_calls = 0
+
+    def fail_reserve_creation(directory_fd, name, *, append=False):
+        global create_calls
+        create_calls += 1
+        if create_calls == 3:
+            raise OSError("forced-partial-arm")
+        return original_create(
+            directory_fd,
+            name,
+            append=append,
+        )
+
+    with mock.patch.object(
+        RetentionCoordinator,
+        "_create_file",
+        new=staticmethod(fail_reserve_creation),
+    ):
+        require_halt()
+    assert create_calls == 3
+elif mode == "directory-time":
+    def commit_with_time_regression(instance, transitions, **kwargs):
+        value = os.fstat(coordinator._markers_fd)
+        os.utime(
+            coordinator._markers_fd,
+            ns=(
+                value.st_atime_ns,
+                value.st_mtime_ns - 1_000_000_000,
+            ),
+        )
+        return original_commit(instance, transitions, **kwargs)
+
+    with mock.patch.object(
+        RetentionCoordinator,
+        "_commit_expert_arm_identity_refresh",
+        new=commit_with_time_regression,
+    ):
+        require_halt()
+else:
+    original_validate = (
+        RetentionCoordinator._validate_expert_root_binding
+    )
+
+    def fail_after_refresh(instance, candidate):
+        original_validate(instance, candidate)
+        if (
+            instance is coordinator
+            and candidate is authority
+            and (
+                candidate.sessions_identity != sessions_before
+                or candidate.markers_identity != markers_before
+            )
+        ):
+            raise RetentionError("forced-post-refresh-validation")
+
+    with mock.patch.object(
+        RetentionCoordinator,
+        "_validate_expert_root_binding",
+        new=fail_after_refresh,
+    ):
+        require_halt()
+
+assert authority.sessions_identity == sessions_before
+assert authority.markers_identity == markers_before
+try:
+    sample_expert_retention_wall_ns(sampler)
+except RetentionError:
+    pass
+else:
+    raise AssertionError("failed arm transition retained clock authority")
+assert coordinator._expert_root_grants == {}
+assert coordinator._expert_clock_capabilities == {}
+try:
+    sample_expert_retention_wall_ns(sampler)
+except RetentionError as error:
+    assert str(error) == "expert_retention_clock_capability_stale"
+else:
+    raise AssertionError("revoked expert clock capability was reusable")
+for descriptor in duplicate_fds:
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("failed arm transition retained root fd")
+coordinator.close()
+temporary.cleanup()
+print(mode)
+"""
+        completed = subprocess.run(
+            [
+                "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                "-B",
+                "-c",
+                code,
+                mode,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(completed.stdout.strip(), mode)
+
+    def test_expert_arm_identity_refresh_rejects_wrong_link_delta(
+        self,
+    ):
+        self._run_expert_arm_identity_refresh_failure("wrong-link")
+
+    def test_expert_arm_identity_refresh_rejects_extra_entry(
+        self,
+    ):
+        self._run_expert_arm_identity_refresh_failure("extra-entry")
+
+    def test_expert_arm_identity_refresh_rejects_descriptor_replacement(
+        self,
+    ):
+        self._run_expert_arm_identity_refresh_failure("replacement")
+
+    def test_expert_arm_identity_refresh_rejects_partial_creation(
+        self,
+    ):
+        self._run_expert_arm_identity_refresh_failure("partial")
+
+    def test_expert_arm_identity_refresh_rejects_unrelated_directory_time_mutation(
+        self,
+    ):
+        self._run_expert_arm_identity_refresh_failure("directory-time")
+
+    def test_expert_arm_identity_refresh_rolls_back_post_validation_failure(
+        self,
+    ):
+        self._run_expert_arm_identity_refresh_failure("post-validation")
+
+    def test_expert_current_state_descriptor_parity_is_full_identity(
+        self,
+    ):
+        clock = CountingMutableClock(self.clock.now_ns)
+        (
+            coordinator,
+            _grant,
+            sampler,
+            authority,
+            duplicate_fds,
+        ) = self.acquire_expert_grant(
+            "current-state-substitution",
+            clock=clock,
+        )
+        foreign = self.root / "foreign-state-substitution"
+        foreign.mkdir(mode=0o700)
+        foreign_fd = os.open(
+            foreign,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.dup2(foreign_fd, authority.state_fd)
+            os.set_inheritable(authority.state_fd, False)
+        finally:
+            os.close(foreign_fd)
+        self.assert_expert_sample_rejects_and_revokes(
+            coordinator,
+            sampler,
+            duplicate_fds,
+            clock=clock,
+        )
+
+        clock = CountingMutableClock(self.clock.now_ns)
+        (
+            coordinator,
+            _grant,
+            sampler,
+            authority,
+            duplicate_fds,
+        ) = self.acquire_expert_grant(
+            "current-state-link",
+            clock=clock,
+        )
+        original_fstat = os.fstat
+
+        def changed_duplicate_link(fd: int):
+            value = original_fstat(fd)
+            if fd != authority.state_fd:
+                return value
+            fields = list(value)
+            fields[3] = value.st_nlink + 1
+            return os.stat_result(fields)
+
+        with mock.patch.object(
+            os,
+            "fstat",
+            side_effect=changed_duplicate_link,
+        ):
+            self.assert_expert_sample_rejects_and_revokes(
+                coordinator,
+                sampler,
+                duplicate_fds,
+                clock=clock,
+            )
+
+    def test_expert_evidence_directories_retain_full_identity_and_name(
+        self,
+    ):
+        evidence = (
+            ("sessions", "sessions_fd", "_sessions_fd"),
+            ("retention-markers", "markers_fd", "_markers_fd"),
+        )
+        for entry_name, authority_fd_name, coordinator_fd_name in evidence:
+            with self.subTest(entry=entry_name, mutation="link"):
+                clock = CountingMutableClock(self.clock.now_ns)
+                (
+                    coordinator,
+                    _grant,
+                    sampler,
+                    authority,
+                    duplicate_fds,
+                ) = self.acquire_expert_grant(
+                    f"evidence-{entry_name}-link",
+                    clock=clock,
+                )
+                evidence_fd = getattr(authority, authority_fd_name)
+                os.mkdir("matrix-child", 0o700, dir_fd=evidence_fd)
+                try:
+                    self.assert_expert_sample_rejects_and_revokes(
+                        coordinator,
+                        sampler,
+                        duplicate_fds,
+                        clock=clock,
+                    )
+                finally:
+                    os.rmdir(
+                        "matrix-child",
+                        dir_fd=getattr(coordinator, coordinator_fd_name),
+                    )
+
+            with self.subTest(entry=entry_name, mutation="descriptor"):
+                clock = CountingMutableClock(self.clock.now_ns)
+                (
+                    coordinator,
+                    _grant,
+                    sampler,
+                    authority,
+                    duplicate_fds,
+                ) = self.acquire_expert_grant(
+                    f"evidence-{entry_name}-descriptor",
+                    clock=clock,
+                )
+                foreign = (
+                    self.root / f"foreign-{entry_name}-descriptor"
+                )
+                foreign.mkdir(mode=0o700)
+                foreign_fd = os.open(
+                    foreign,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    target_fd = getattr(authority, authority_fd_name)
+                    os.dup2(foreign_fd, target_fd)
+                    os.set_inheritable(target_fd, False)
+                finally:
+                    os.close(foreign_fd)
+                self.assert_expert_sample_rejects_and_revokes(
+                    coordinator,
+                    sampler,
+                    duplicate_fds,
+                    clock=clock,
+                )
+
+            with self.subTest(entry=entry_name, mutation="named-entry"):
+                clock = CountingMutableClock(self.clock.now_ns)
+                (
+                    coordinator,
+                    _grant,
+                    sampler,
+                    _authority,
+                    duplicate_fds,
+                ) = self.acquire_expert_grant(
+                    f"evidence-{entry_name}-named",
+                    clock=clock,
+                )
+                backup_name = entry_name + ".matrix-original"
+                os.rename(
+                    entry_name,
+                    backup_name,
+                    src_dir_fd=coordinator._state_fd,
+                    dst_dir_fd=coordinator._state_fd,
+                )
+                os.mkdir(entry_name, 0o700, dir_fd=coordinator._state_fd)
+                try:
+                    self.assert_expert_sample_rejects_and_revokes(
+                        coordinator,
+                        sampler,
+                        duplicate_fds,
+                        clock=clock,
+                    )
+                finally:
+                    os.rmdir(entry_name, dir_fd=coordinator._state_fd)
+                    os.rename(
+                        backup_name,
+                        entry_name,
+                        src_dir_fd=coordinator._state_fd,
+                        dst_dir_fd=coordinator._state_fd,
+                    )
+
+    def test_expert_account_lock_retains_full_identity_and_single_link(
+        self,
+    ):
+        with self.subTest(mutation="mode"):
+            clock = CountingMutableClock(self.clock.now_ns)
+            (
+                coordinator,
+                _grant,
+                sampler,
+                _authority,
+                duplicate_fds,
+            ) = self.acquire_expert_grant("lock-mode", clock=clock)
+            os.fchmod(coordinator._lock_fd, 0o640)
+            try:
+                self.assert_expert_sample_rejects_and_revokes(
+                    coordinator,
+                    sampler,
+                    duplicate_fds,
+                    clock=clock,
+                )
+            finally:
+                os.fchmod(coordinator._lock_fd, 0o600)
+
+        with self.subTest(mutation="owner"):
+            clock = CountingMutableClock(self.clock.now_ns)
+            (
+                coordinator,
+                _grant,
+                sampler,
+                authority,
+                duplicate_fds,
+            ) = self.acquire_expert_grant("lock-owner", clock=clock)
+            original_fstat = os.fstat
+            lock_fds = {coordinator._lock_fd, authority.lock_fd}
+
+            def changed_lock_owner(fd: int):
+                value = original_fstat(fd)
+                if fd not in lock_fds:
+                    return value
+                fields = list(value)
+                fields[4] = value.st_uid + 1
+                return os.stat_result(fields)
+
+            with mock.patch.object(
+                os,
+                "fstat",
+                side_effect=changed_lock_owner,
+            ):
+                self.assert_expert_sample_rejects_and_revokes(
+                    coordinator,
+                    sampler,
+                    duplicate_fds,
+                    clock=clock,
+                )
+
+        with self.subTest(mutation="hard-link"):
+            clock = CountingMutableClock(self.clock.now_ns)
+            (
+                coordinator,
+                _grant,
+                sampler,
+                _authority,
+                duplicate_fds,
+            ) = self.acquire_expert_grant("lock-link", clock=clock)
+            os.link(
+                "retention.lock",
+                "retention.lock.matrix-link",
+                src_dir_fd=coordinator._state_fd,
+                dst_dir_fd=coordinator._state_fd,
+                follow_symlinks=False,
+            )
+            try:
+                self.assert_expert_sample_rejects_and_revokes(
+                    coordinator,
+                    sampler,
+                    duplicate_fds,
+                    clock=clock,
+                )
+            finally:
+                os.unlink(
+                    "retention.lock.matrix-link",
+                    dir_fd=coordinator._state_fd,
+                )
+
+        with self.subTest(mutation="named-replacement"):
+            clock = CountingMutableClock(self.clock.now_ns)
+            (
+                coordinator,
+                _grant,
+                sampler,
+                _authority,
+                duplicate_fds,
+            ) = self.acquire_expert_grant(
+                "lock-named-replacement",
+                clock=clock,
+            )
+            state_fd = coordinator._state_fd
+            os.rename(
+                "retention.lock",
+                "retention.lock.matrix-original",
+                src_dir_fd=state_fd,
+                dst_dir_fd=state_fd,
+            )
+            replacement_fd = os.open(
+                "retention.lock",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=state_fd,
+            )
+            os.close(replacement_fd)
+            try:
+                self.assert_expert_sample_rejects_and_revokes(
+                    coordinator,
+                    sampler,
+                    duplicate_fds,
+                    clock=clock,
+                )
+            finally:
+                os.unlink("retention.lock", dir_fd=state_fd)
+                os.rename(
+                    "retention.lock.matrix-original",
+                    "retention.lock",
+                    src_dir_fd=state_fd,
+                    dst_dir_fd=state_fd,
+                )
+
+    def test_mutable_directory_binding_has_one_state_root_call_site(self):
+        source_path = Path(retention_module.__file__).resolve()
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_same_mutable_directory_binding"
+            )
+        ]
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(len(call.args), 2)
+        self.assertEqual(call.keywords, [])
+        self.assertEqual(
+            ast.unparse(call.args[0]),
+            "original_identities[0]",
+        )
+        self.assertEqual(
+            ast.unparse(call.args[1]),
+            "authority.state_identity",
+        )
+        validators = [
+            node
+            for node in tree.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "RetentionCoordinator"
+            )
+            for child in node.body
+            if (
+                isinstance(child, ast.FunctionDef)
+                and child.name == "_validate_expert_root_binding"
+            )
+        ]
+        self.assertEqual(len(validators), 1)
+        self.assertGreaterEqual(call.lineno, validators[0].lineno)
+        self.assertLessEqual(call.end_lineno, validators[0].end_lineno)
+        release = [
+            child
+            for node in tree.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "RetentionCoordinator"
+            )
+            for child in node.body
+            if (
+                isinstance(child, ast.FunctionDef)
+                and child.name == "_release_reserve"
+            )
+        ]
+        self.assertEqual(len(release), 1)
+        for helper_name in (
+            "_prepare_expert_sessions_identity_refresh",
+            "_commit_expert_sessions_identity_refresh",
+        ):
+            helper_calls = [
+                node
+                for node in ast.walk(tree)
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == helper_name
+                )
+            ]
+            self.assertEqual(len(helper_calls), 1)
+            self.assertGreaterEqual(
+                helper_calls[0].lineno,
+                release[0].lineno,
+            )
+            self.assertLessEqual(
+                helper_calls[0].end_lineno,
+                release[0].end_lineno,
+            )
+        arm = [
+            child
+            for node in tree.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "RetentionCoordinator"
+            )
+            for child in node.body
+            if (
+                isinstance(child, ast.FunctionDef)
+                and child.name == "arm_before_wal"
+            )
+        ]
+        self.assertEqual(len(arm), 1)
+        for helper_name in (
+            "_prepare_expert_arm_identity_refresh",
+            "_commit_expert_arm_identity_refresh",
+        ):
+            helper_calls = [
+                node
+                for node in ast.walk(tree)
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == helper_name
+                )
+            ]
+            self.assertEqual(len(helper_calls), 1)
+            self.assertGreaterEqual(
+                helper_calls[0].lineno,
+                arm[0].lineno,
+            )
+            self.assertLessEqual(
+                helper_calls[0].end_lineno,
+                arm[0].end_lineno,
+            )
+
+    def test_expert_root_failed_final_validation_closes_and_unpublishes_grant(
+        self,
+    ):
+        from tennis_v1.retention import (
+            _consume_expert_state_root_account_lock_request,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        duplicates: list[int] = []
+        original_dup = os.dup
+
+        def tracked_dup(fd: int) -> int:
+            duplicate = original_dup(fd)
+            duplicates.append(duplicate)
+            return duplicate
+
+        with (
+            mock.patch.object(os, "dup", side_effect=tracked_dup),
+            mock.patch.object(
+                RetentionCoordinator,
+                "_validate_expert_root_binding",
+                side_effect=RetentionError("forced-final-validation"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RetentionError,
+                r"\Aforced-final-validation\Z",
+            ):
+                _consume_expert_state_root_account_lock_request(
+                    request
+                )
+        self.assertEqual(len(duplicates), 4)
+        self.assertEqual(coordinator._expert_root_grants, {})
+        self.assertEqual(coordinator._expert_clock_capabilities, {})
+        for fd in duplicates:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_expert_root_partial_duplicate_failure_closes_prior_duplicates(
+        self,
+    ):
+        from tennis_v1.retention import (
+            _consume_expert_state_root_account_lock_request,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        duplicate = os.dup(coordinator._state_fd)
+        calls = 0
+
+        def fail_after_first(_fd: int) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return duplicate
+            raise OSError("secret-dup-failure")
+
+        with mock.patch.object(os, "dup", side_effect=fail_after_first):
+            with self.assertRaisesRegex(
+                RetentionError,
+                r"\Aexpert_state_root_request_stale\Z",
+            ) as caught:
+                _consume_expert_state_root_account_lock_request(
+                    request
+                )
+        self.assertNotIn("secret-dup-failure", str(caught.exception))
+        with self.assertRaises(OSError):
+            os.fstat(duplicate)
+        self.assertEqual(coordinator._expert_root_grants, {})
+        self.assertEqual(coordinator._expert_clock_capabilities, {})
+
+    def test_expert_clock_cross_thread_misuse_permanently_revokes_sampler(
+        self,
+    ):
+        from tennis_v1.retention import (
+            _consume_expert_state_root_account_lock_request,
+            sample_expert_retention_wall_ns,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        grant = _consume_expert_state_root_account_lock_request(request)
+        sampler = object.__getattribute__(grant, "_clock_capability")
+        errors: list[BaseException] = []
+        thread = threading.Thread(
+            target=lambda: _capture_exception(
+                errors,
+                lambda: sample_expert_retention_wall_ns(sampler),
+            )
+        )
+        thread.start()
+        thread.join()
+        self.assertEqual(len(errors), 1)
+        self.assertIs(type(errors[0]), RetentionError)
+        self.assertEqual(
+            str(errors[0]),
+            "expert_state_root_grant_stale",
+        )
+        with self.assertRaisesRegex(
+            RetentionError,
+            r"\Aexpert_retention_clock_capability_stale\Z",
+        ):
+            sample_expert_retention_wall_ns(sampler)
+
+    def test_expert_root_request_rejects_forgery_copy_and_pickle(self):
+        from tennis_v1.retention import (
+            ExpertStateRootAccountLockRequestV1,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            r"\Aexpert state-root requests are coordinator-issued\Z",
+        ):
+            ExpertStateRootAccountLockRequestV1()
+        for operation in (
+            lambda: copy.copy(request),
+            lambda: copy.deepcopy(request),
+            lambda: pickle.dumps(request),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(TypeError):
+                    operation()
+
+    def test_expert_root_request_cross_thread_misuse_revokes_request(self):
+        from tennis_v1.retention import (
+            _consume_expert_state_root_account_lock_request,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        errors: list[BaseException] = []
+        thread = threading.Thread(
+            target=lambda: _capture_exception(
+                errors,
+                lambda: _consume_expert_state_root_account_lock_request(
+                    request
+                ),
+            )
+        )
+        thread.start()
+        thread.join()
+        self.assertEqual(len(errors), 1)
+        self.assertIs(type(errors[0]), RetentionError)
+        self.assertEqual(
+            str(errors[0]),
+            "expert_state_root_request_stale",
+        )
+        with self.assertRaisesRegex(
+            RetentionError,
+            r"\Aexpert_state_root_request_stale\Z",
+        ):
+            _consume_expert_state_root_account_lock_request(request)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "requires fork")
+    def test_expert_root_request_cannot_be_consumed_after_fork(self):
+        from tennis_v1.retention import (
+            _consume_expert_state_root_account_lock_request,
+            _revoke_expert_state_root_account_lock_grant,
+        )
+        import warnings
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        read_fd, write_fd = os.pipe()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            child_pid = os.fork()
+        if child_pid == 0:
+            try:
+                os.close(read_fd)
+                try:
+                    _consume_expert_state_root_account_lock_request(
+                        request
+                    )
+                except RetentionError:
+                    os.write(write_fd, b"R")
+                else:
+                    os.write(write_fd, b"A")
+            finally:
+                os._exit(0)
+        os.close(write_fd)
+        try:
+            self.assertEqual(os.read(read_fd, 1), b"R")
+        finally:
+            os.close(read_fd)
+        waited, status = os.waitpid(child_pid, 0)
+        self.assertEqual(waited, child_pid)
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+
+        grant = _consume_expert_state_root_account_lock_request(request)
+        _revoke_expert_state_root_account_lock_grant(grant)
+
+    def test_expert_root_request_is_stale_after_coordinator_close(self):
+        from tennis_v1.retention import (
+            _consume_expert_state_root_account_lock_request,
+        )
+
+        coordinator = self.acquire()
+        request = (
+            coordinator.issue_expert_state_root_account_lock_request()
+        )
+        self.close_current()
+        with self.assertRaisesRegex(
+            RetentionError,
+            r"\Aexpert_state_root_request_stale\Z",
+        ):
+            _consume_expert_state_root_account_lock_request(request)
+
+    def test_expert_clock_sampling_failure_latches_global_halt(self):
+        code = r"""
+from pathlib import Path
+import tempfile
+
+from tennis_v1.retention import (
+    RetentionCoordinator,
+    RetentionGlobalHalt,
+    _consume_expert_state_root_account_lock_request,
+    sample_expert_retention_wall_ns,
+)
+from tests.tennis_v1.test_retention import make_config
+
+with tempfile.TemporaryDirectory() as temporary:
+    broken = False
+
+    def broken_clock():
+        if broken:
+            raise RuntimeError("secret-clock-error")
+        return 1
+
+    coordinator = RetentionCoordinator.acquire(
+        make_config(Path(temporary).resolve() / "state"),
+        clock_ns=broken_clock,
+    )
+    coordinator.recover_and_purge()
+    request = (
+        coordinator.issue_expert_state_root_account_lock_request()
+    )
+    grant = _consume_expert_state_root_account_lock_request(request)
+    sampler = object.__getattribute__(grant, "_clock_capability")
+    broken = True
+    try:
+        sample_expert_retention_wall_ns(sampler)
+    except RetentionGlobalHalt as error:
+        assert str(error) == "retention_clock_failed"
+    else:
+        raise AssertionError("clock failure did not halt")
+    coordinator.close()
+print("expert-clock-halt-ok")
+"""
+        completed = subprocess.run(
+            [
+                "/Users/mthanki/.venvs/inci-expert-py314/bin/python",
+                "-B",
+                "-c",
+                code,
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        self.assertEqual(
+            completed.stdout.strip(),
+            "expert-clock-halt-ok",
+        )
+        self.assertNotIn("secret-clock-error", completed.stderr)
+
+    def test_expert_companion_creation_guard_is_read_only_and_live_only(self):
+        from tennis_v1.sequencer import (
+            EventRuntime,
+            bind_provider_persistence_authorizer,
+        )
+        from tennis_v1.state import initial_state
+        from tennis_v1.wal import JournalWriter
+        from tests.tennis_v1.test_sequencer import concrete_environment
+
+        with concrete_environment() as (
+            fixture,
+            coordinator,
+            gate,
+            manifest,
+        ):
+            authorizer = bind_provider_persistence_authorizer(
+                gate=gate,
+                coordinator=coordinator,
+                session_manifest=manifest,
+            )
+            capability = coordinator.arm_before_wal(
+                session_manifest=manifest,
+                decision=authorizer.bound_decision,
+                persistence_authorizer=authorizer,
+            )
+            writer = JournalWriter.create(
+                write_capability=capability,
+                session_manifest=manifest,
+            )
+            runtime = EventRuntime(
+                writer=writer,
+                state=initial_state(manifest.session_id),
+                persistence_authorizer=authorizer,
+                coordinator=coordinator,
+            )
+            marker_path = (
+                fixture.config.state_root
+                / "retention-markers"
+                / f"{manifest.session_id}.marker.json"
+            )
+            wal_path = (
+                fixture.config.state_root
+                / "sessions"
+                / f"{manifest.session_id}.wal"
+            )
+            reserve_path = (
+                fixture.config.state_root
+                / "sessions"
+                / f"{manifest.session_id}.reserve"
+            )
+            before = (
+                marker_path.read_bytes(),
+                wal_path.read_bytes(),
+                reserve_path.stat().st_size,
+                tuple(coordinator._deadlines.items()),
+            )
+            self.assertIsNone(
+                coordinator.require_expert_companion_creation_live(
+                    persistence_authorizer=authorizer
+                )
+            )
+            after = (
+                marker_path.read_bytes(),
+                wal_path.read_bytes(),
+                reserve_path.stat().st_size,
+                tuple(coordinator._deadlines.items()),
+            )
+            self.assertEqual(after, before)
+            runtime.close_clean("operator_stop")
+            with self.assertRaisesRegex(
+                RetentionError,
+                r"\Aexpert_companion_creation_not_live\Z",
+            ):
+                coordinator.require_expert_companion_creation_live(
+                    persistence_authorizer=authorizer
+                )
+
+    def test_expert_companion_creation_guard_has_exact_authorizer_signature(
+        self,
+    ):
+        signature = inspect.signature(
+            RetentionCoordinator.require_expert_companion_creation_live
+        )
+        self.assertEqual(
+            tuple(signature.parameters),
+            ("self", "persistence_authorizer"),
+        )
+        parameter = signature.parameters["persistence_authorizer"]
+        self.assertIs(
+            parameter.kind,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+        self.assertEqual(
+            parameter.annotation,
+            "ProviderPersistenceAuthorizer",
+        )
+        self.assertEqual(signature.return_annotation, "None")
+
+    def test_expert_companion_creation_guard_rejects_halted_and_wrong_authority(
+        self,
+    ):
+        from tennis_v1.sequencer import (
+            EventRuntime,
+            bind_provider_persistence_authorizer,
+        )
+        from tennis_v1.state import initial_state
+        from tennis_v1.wal import JournalWriter
+        from tests.tennis_v1.test_sequencer import concrete_environment
+
+        with concrete_environment() as (
+            _fixture,
+            coordinator,
+            gate,
+            manifest,
+        ):
+            authorizer = bind_provider_persistence_authorizer(
+                gate=gate,
+                coordinator=coordinator,
+                session_manifest=manifest,
+            )
+            capability = coordinator.arm_before_wal(
+                session_manifest=manifest,
+                decision=authorizer.bound_decision,
+                persistence_authorizer=authorizer,
+            )
+            writer = JournalWriter.create(
+                write_capability=capability,
+                session_manifest=manifest,
+            )
+            runtime = EventRuntime(
+                writer=writer,
+                state=initial_state(manifest.session_id),
+                persistence_authorizer=authorizer,
+                coordinator=coordinator,
+            )
+            forged = StrictAuthorizer(
+                coordinator,
+                manifest,
+                authorizer.bound_decision,
+            )
+            with self.assertRaisesRegex(
+                RetentionError,
+                r"\Aexpert_companion_creation_not_live\Z",
+            ):
+                coordinator.require_expert_companion_creation_live(
+                    persistence_authorizer=forged  # type: ignore[arg-type]
+                )
+            runtime.close_halted("operator_halt")
+            with self.assertRaisesRegex(
+                RetentionError,
+                r"\Aexpert_companion_creation_not_live\Z",
+            ):
+                coordinator.require_expert_companion_creation_live(
+                    persistence_authorizer=authorizer
+                )
+
+    def test_expert_companion_creation_guard_rejects_cross_thread(self):
+        from tennis_v1.sequencer import (
+            EventRuntime,
+            bind_provider_persistence_authorizer,
+        )
+        from tennis_v1.state import initial_state
+        from tennis_v1.wal import JournalWriter
+        from tests.tennis_v1.test_sequencer import concrete_environment
+
+        with concrete_environment() as (
+            _fixture,
+            coordinator,
+            gate,
+            manifest,
+        ):
+            authorizer = bind_provider_persistence_authorizer(
+                gate=gate,
+                coordinator=coordinator,
+                session_manifest=manifest,
+            )
+            capability = coordinator.arm_before_wal(
+                session_manifest=manifest,
+                decision=authorizer.bound_decision,
+                persistence_authorizer=authorizer,
+            )
+            writer = JournalWriter.create(
+                write_capability=capability,
+                session_manifest=manifest,
+            )
+            runtime = EventRuntime(
+                writer=writer,
+                state=initial_state(manifest.session_id),
+                persistence_authorizer=authorizer,
+                coordinator=coordinator,
+            )
+            errors: list[BaseException] = []
+            thread = threading.Thread(
+                target=lambda: _capture_exception(
+                    errors,
+                    lambda: (
+                        coordinator.require_expert_companion_creation_live(
+                            persistence_authorizer=authorizer
+                        )
+                    ),
+                )
+            )
+            thread.start()
+            thread.join()
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), RetentionError)
+            self.assertEqual(
+                str(errors[0]),
+                "expert_companion_creation_not_live",
+            )
+            runtime.close_clean("operator_stop")
+
+    def test_only_retention_defines_phase1_expert_transfer_helpers(self):
+        self.assertFalse(
+            hasattr(
+                retention_module,
+                "_sample_expert_replay_prepare_wall_ns",
+            )
+        )
+        package = Path(retention_module.__file__).resolve().parent
+        names = (
+            "_consume_expert_state_root_account_lock_request",
+            "_revoke_expert_state_root_account_lock_grant",
+        )
+        offenders: list[str] = []
+        for path in sorted(package.glob("*.py")):
+            if path.name == "retention.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            if any(name in source for name in names):
+                offenders.append(path.name)
+        self.assertEqual(offenders, [])
 
 
 def retention_report(

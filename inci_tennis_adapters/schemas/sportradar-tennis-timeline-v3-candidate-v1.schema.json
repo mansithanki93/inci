@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-adapters:schema:sportradar-tennis-timeline-v3-candidate-v1",
+  "title": "Sportradar tennis v3 sanitized candidate timeline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generated_at", "sport_event", "timeline"],
+  "properties": {
+    "generated_at": {"$ref": "#/$defs/utc"},
+    "sport_event": {"$ref": "#/$defs/sportEvent"},
+    "timeline": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/snapshotEvent"},
+          {"$ref": "#/$defs/pointEvent"},
+          {"$ref": "#/$defs/lifecycleEvent"}
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
+    },
+    "nonnegativeInt64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "positiveInt64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "nullableSafeId": {
+      "oneOf": [
+        {"$ref": "#/$defs/safeId"},
+        {"type": "null"}
+      ]
+    },
+    "competitorHome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "qualifier"],
+      "properties": {
+        "id": {"$ref": "#/$defs/safeId"},
+        "qualifier": {"const": "HOME"}
+      }
+    },
+    "competitorAway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "qualifier"],
+      "properties": {
+        "id": {"$ref": "#/$defs/safeId"},
+        "qualifier": {"const": "AWAY"}
+      }
+    },
+    "sportEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scheduled",
+        "type",
+        "best_of",
+        "match_format",
+        "competitors"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/safeId"},
+        "scheduled": {"$ref": "#/$defs/utc"},
+        "type": {"const": "SINGLES"},
+        "best_of": {"enum": [3, 5]},
+        "match_format": {
+          "enum": [
+            "standard_advantage_bo3_tb7_all_sets",
+            "standard_advantage_bo5_tb7_all_sets"
+          ]
+        },
+        "competitors": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"$ref": "#/$defs/competitorHome"},
+            {"$ref": "#/$defs/competitorAway"}
+          ],
+          "items": false
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "best_of": {"const": 3},
+            "match_format": {
+              "const": "standard_advantage_bo3_tb7_all_sets"
+            }
+          },
+          "required": ["best_of", "match_format"]
+        },
+        {
+          "properties": {
+            "best_of": {"const": 5},
+            "match_format": {
+              "const": "standard_advantage_bo5_tb7_all_sets"
+            }
+          },
+          "required": ["best_of", "match_format"]
+        }
+      ]
+    },
+    "setScore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "games_home",
+        "games_away",
+        "tiebreak_points_home",
+        "tiebreak_points_away"
+      ],
+      "properties": {
+        "games_home": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "games_away": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "tiebreak_points_home": {
+          "oneOf": [
+            {"$ref": "#/$defs/nonnegativeInt64"},
+            {"type": "null"}
+          ]
+        },
+        "tiebreak_points_away": {
+          "oneOf": [
+            {"$ref": "#/$defs/nonnegativeInt64"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "snapshotEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "revision",
+        "correction_epoch",
+        "event_time",
+        "generated_at",
+        "snapshot_complete",
+        "status",
+        "termination",
+        "winner_id",
+        "retired_id",
+        "completed_sets",
+        "games_home",
+        "games_away",
+        "points_home",
+        "points_away",
+        "in_tiebreak",
+        "tiebreak_points_home",
+        "tiebreak_points_away",
+        "tiebreak_first_server_id",
+        "server_id"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/safeId"},
+        "type": {"const": "SNAPSHOT"},
+        "revision": {"$ref": "#/$defs/positiveInt64"},
+        "correction_epoch": {"$ref": "#/$defs/nonnegativeInt64"},
+        "event_time": {"$ref": "#/$defs/utc"},
+        "generated_at": {"$ref": "#/$defs/utc"},
+        "snapshot_complete": {"const": true},
+        "status": {
+          "enum": [
+            "SCHEDULED",
+            "LIVE",
+            "SUSPENDED",
+            "ENDED",
+            "CANCELLED"
+          ]
+        },
+        "termination": {
+          "enum": [
+            "NONE",
+            "NATURAL",
+            "WALKOVER",
+            "RETIREMENT",
+            "CANCELLATION"
+          ]
+        },
+        "winner_id": {"$ref": "#/$defs/nullableSafeId"},
+        "retired_id": {"$ref": "#/$defs/nullableSafeId"},
+        "completed_sets": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {"$ref": "#/$defs/setScore"}
+        },
+        "games_home": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "games_away": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "points_home": {
+          "enum": ["LOVE", "FIFTEEN", "THIRTY", "FORTY", "ADVANTAGE"]
+        },
+        "points_away": {
+          "enum": ["LOVE", "FIFTEEN", "THIRTY", "FORTY", "ADVANTAGE"]
+        },
+        "in_tiebreak": {"type": "boolean"},
+        "tiebreak_points_home": {"$ref": "#/$defs/nonnegativeInt64"},
+        "tiebreak_points_away": {"$ref": "#/$defs/nonnegativeInt64"},
+        "tiebreak_first_server_id": {
+          "$ref": "#/$defs/nullableSafeId"
+        },
+        "server_id": {"$ref": "#/$defs/nullableSafeId"}
+      }
+    },
+    "pointEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "revision",
+        "correction_epoch",
+        "event_time",
+        "generated_at",
+        "point_winner_id",
+        "server_id"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/safeId"},
+        "type": {"const": "POINT"},
+        "revision": {"$ref": "#/$defs/positiveInt64"},
+        "correction_epoch": {"$ref": "#/$defs/nonnegativeInt64"},
+        "event_time": {"$ref": "#/$defs/utc"},
+        "generated_at": {"$ref": "#/$defs/utc"},
+        "point_winner_id": {"$ref": "#/$defs/safeId"},
+        "server_id": {"$ref": "#/$defs/safeId"}
+      }
+    },
+    "lifecycleEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "revision",
+        "correction_epoch",
+        "event_time",
+        "generated_at",
+        "lifecycle",
+        "winner_id",
+        "retired_id",
+        "server_id"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/safeId"},
+        "type": {"const": "LIFECYCLE"},
+        "revision": {"$ref": "#/$defs/positiveInt64"},
+        "correction_epoch": {"$ref": "#/$defs/nonnegativeInt64"},
+        "event_time": {"$ref": "#/$defs/utc"},
+        "generated_at": {"$ref": "#/$defs/utc"},
+        "lifecycle": {
+          "enum": [
+            "START",
+            "SUSPEND",
+            "RESUME",
+            "WALKOVER",
+            "RETIREMENT",
+            "CANCEL",
+            "NATURAL_END_CONFIRMATION"
+          ]
+        },
+        "winner_id": {"$ref": "#/$defs/nullableSafeId"},
+        "retired_id": {"$ref": "#/$defs/nullableSafeId"},
+        "server_id": {"$ref": "#/$defs/nullableSafeId"}
+      }
+    }
+  }
+}

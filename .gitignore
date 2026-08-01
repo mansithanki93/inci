@@ -1,0 +1,18 @@
+# macOS and Python build artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local environments and credentials
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+*.pem
+*.key
+
+# Runtime data and local agent work products
+Logs/
+logs/
+.superpowers/

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-expert:schema:expert-session-terminal-v1",
+  "title": "Inci Tennis Expert Session Terminal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "expert_manifest_sha256",
+    "provider_request_binding_sha256",
+    "match_binding_universe_sha256",
+    "retention_binding_sha256",
+    "evidence_terminal_ingest_seq",
+    "evidence_terminal_record_sha256",
+    "evidence_terminal_clean",
+    "evidence_terminal_reason",
+    "evidence_raw_count",
+    "evidence_derived_count",
+    "expert_group_count",
+    "expert_record_count",
+    "last_parent_ingest_seq",
+    "last_parent_record_sha256",
+    "final_expert_seq",
+    "final_expert_record_sha256",
+    "final_expert_state_sha256",
+    "final_expert_trace_sha256",
+    "clean",
+    "reason",
+    "research_evaluable",
+    "terminal_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "session_id": {"$ref": "#/$defs/uuid"},
+    "expert_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "provider_request_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "match_binding_universe_sha256": {"$ref": "#/$defs/sha256"},
+    "retention_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "evidence_terminal_ingest_seq": {"$ref": "#/$defs/terminalSequence"},
+    "evidence_terminal_record_sha256": {"$ref": "#/$defs/sha256"},
+    "evidence_terminal_clean": {"type": "boolean"},
+    "evidence_terminal_reason": {"$ref": "#/$defs/safeId"},
+    "evidence_raw_count": {"$ref": "#/$defs/nonnegative"},
+    "evidence_derived_count": {"$ref": "#/$defs/nonnegative"},
+    "expert_group_count": {"$ref": "#/$defs/nonnegative"},
+    "expert_record_count": {"$ref": "#/$defs/nonnegative"},
+    "last_parent_ingest_seq": {"$ref": "#/$defs/nonnegative"},
+    "last_parent_record_sha256": {"$ref": "#/$defs/sha256"},
+    "final_expert_seq": {"$ref": "#/$defs/nonnegative"},
+    "final_expert_record_sha256": {"$ref": "#/$defs/sha256"},
+    "final_expert_state_sha256": {"$ref": "#/$defs/sha256"},
+    "final_expert_trace_sha256": {"$ref": "#/$defs/sha256"},
+    "clean": {"type": "boolean"},
+    "reason": {"enum": ["operator_stop", "session_end", "expert_halt"]},
+    "research_evaluable": {"const": false},
+    "terminal_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "clean": {"const": true},
+        "evidence_terminal_clean": {"const": true},
+        "reason": {"const": "operator_stop"},
+        "evidence_terminal_reason": {"const": "operator_stop"}
+      }
+    },
+    {
+      "properties": {
+        "clean": {"const": true},
+        "evidence_terminal_clean": {"const": true},
+        "reason": {"const": "session_end"},
+        "evidence_terminal_reason": {"const": "session_end"}
+      }
+    },
+    {
+      "properties": {
+        "clean": {"const": false},
+        "evidence_terminal_clean": {"const": false},
+        "evidence_terminal_reason": {
+          "enum": [
+            "operator_halt",
+            "initialization_failure",
+            "capture_contract_violation",
+            "provider_gate_denied",
+            "retention_global_halt",
+            "disk_low",
+            "reducer_exception",
+            "derived_validation_failure",
+            "trace_exception",
+            "ingress_backpressure",
+            "ingress_owner_unresponsive"
+          ]
+        },
+        "reason": {"const": "expert_halt"}
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safeId": {
+      "type": "string",
+      "pattern": "^(?![Hh][Tt][Tt][Pp][Ss]?:|[Ff][Ii][Ll][Ee]:)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "nonnegative": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+    },
+    "terminalSequence": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+    }
+  }
+}

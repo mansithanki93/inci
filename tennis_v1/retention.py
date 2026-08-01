@@ -217,6 +217,169 @@ class _CapabilityLifecycle:
     due: bool = False
 
 
+@dataclass(
+    frozen=True, slots=True, weakref_slot=True, init=False, eq=False
+)
+class ExpertStateRootAccountLockRequestV1:
+    """Opaque one-shot request for the already validated state-root lock."""
+
+    _dispatch: "RetentionCoordinator" = field(repr=False, compare=False)
+
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("expert state-root requests are coordinator-issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("expert state-root requests cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<ExpertStateRootAccountLockRequestV1 redacted>"
+
+    def __copy__(self):
+        raise TypeError("expert state-root requests cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        raise TypeError("expert state-root requests cannot be copied")
+
+    def __reduce__(self):
+        raise TypeError("expert state-root requests cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        raise TypeError("expert state-root requests cannot be pickled")
+
+    def __getstate__(self):
+        raise TypeError("expert state-root requests cannot be pickled")
+
+
+@dataclass(
+    frozen=True, slots=True, weakref_slot=True, init=False, eq=False
+)
+class ExpertRetentionClockSampleCapabilityV1:
+    """Opaque reusable sampler bound to one live expert root grant."""
+
+    _dispatch: "RetentionCoordinator" = field(repr=False, compare=False)
+
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError(
+            "expert retention-clock capabilities are coordinator-issued"
+        )
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError(
+            "expert retention-clock capabilities cannot be subclassed"
+        )
+
+    def __repr__(self) -> str:
+        return "<ExpertRetentionClockSampleCapabilityV1 redacted>"
+
+    def __copy__(self):
+        raise TypeError(
+            "expert retention-clock capabilities cannot be copied"
+        )
+
+    def __deepcopy__(self, _: object):
+        raise TypeError(
+            "expert retention-clock capabilities cannot be copied"
+        )
+
+    def __reduce__(self):
+        raise TypeError(
+            "expert retention-clock capabilities cannot be pickled"
+        )
+
+    def __reduce_ex__(self, _: int):
+        raise TypeError(
+            "expert retention-clock capabilities cannot be pickled"
+        )
+
+    def __getstate__(self):
+        raise TypeError(
+            "expert retention-clock capabilities cannot be pickled"
+        )
+
+
+@dataclass(
+    frozen=True, slots=True, weakref_slot=True, init=False, eq=False
+)
+class _ExpertStateRootAccountLockGrantV1:
+    _dispatch: "RetentionCoordinator" = field(repr=False, compare=False)
+    _state_fd: int = field(repr=False, compare=False)
+    _sessions_fd: int = field(repr=False, compare=False)
+    _markers_fd: int = field(repr=False, compare=False)
+    _lock_fd: int = field(repr=False, compare=False)
+    _clock_capability: ExpertRetentionClockSampleCapabilityV1 = field(
+        repr=False,
+        compare=False,
+    )
+
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("expert state-root grants are coordinator-issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("expert state-root grants cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<_ExpertStateRootAccountLockGrantV1 redacted>"
+
+    def __copy__(self):
+        raise TypeError("expert state-root grants cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        raise TypeError("expert state-root grants cannot be copied")
+
+    def __reduce__(self):
+        raise TypeError("expert state-root grants cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        raise TypeError("expert state-root grants cannot be pickled")
+
+    def __getstate__(self):
+        raise TypeError("expert state-root grants cannot be pickled")
+
+
+@dataclass(slots=True)
+class _ExpertRootRequestAuthority:
+    request: ExpertStateRootAccountLockRequestV1
+    coordinator: "RetentionCoordinator"
+    owner_pid: int
+    owner_thread: threading.Thread
+    generation: int
+
+
+@dataclass(slots=True)
+class _ExpertRootGrantAuthority:
+    grant: _ExpertStateRootAccountLockGrantV1
+    coordinator: "RetentionCoordinator"
+    owner_pid: int
+    owner_thread: threading.Thread
+    generation: int
+    state_fd: int
+    sessions_fd: int
+    markers_fd: int
+    lock_fd: int
+    state_identity: _FileIdentity
+    sessions_identity: _FileIdentity
+    markers_identity: _FileIdentity
+    lock_identity: _FileIdentity
+    clock_capability: ExpertRetentionClockSampleCapabilityV1
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectoryTransitionObservation:
+    identity: _FileIdentity
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpertArmRootIdentityTransition:
+    authority: _ExpertRootGrantAuthority
+    sessions: _DirectoryTransitionObservation
+    markers: _DirectoryTransitionObservation
+    session_entries: tuple[str, ...]
+    marker_entries: tuple[str, ...]
+
+
 @dataclass(slots=True)
 class _SessionState:
     marker: RetentionMarker
@@ -397,6 +560,10 @@ def _validate_directory(fd: int) -> None:
         value = os.fstat(fd)
     except OSError as error:
         raise RetentionError("retention_directory_stat_failed") from error
+    _validate_directory_stat(value)
+
+
+def _validate_directory_stat(value: os.stat_result) -> None:
     if (
         not stat.S_ISDIR(value.st_mode)
         or value.st_uid != os.geteuid()
@@ -412,6 +579,18 @@ def _file_identity(value: os.stat_result) -> _FileIdentity:
         value.st_mode,
         value.st_nlink,
         value.st_uid,
+    )
+
+
+def _same_mutable_directory_binding(
+    current: _FileIdentity,
+    expected: _FileIdentity,
+) -> bool:
+    return (
+        current.device == expected.device
+        and current.inode == expected.inode
+        and current.mode == expected.mode
+        and current.owner == expected.owner
     )
 
 
@@ -760,6 +939,87 @@ def _build_read_capability(
     return item
 
 
+def _build_expert_state_root_request(
+    coordinator: "RetentionCoordinator",
+) -> ExpertStateRootAccountLockRequestV1:
+    request = object.__new__(ExpertStateRootAccountLockRequestV1)
+    object.__setattr__(request, "_dispatch", coordinator)
+    return request
+
+
+def _build_expert_retention_clock_capability(
+    coordinator: "RetentionCoordinator",
+) -> ExpertRetentionClockSampleCapabilityV1:
+    capability = object.__new__(ExpertRetentionClockSampleCapabilityV1)
+    object.__setattr__(capability, "_dispatch", coordinator)
+    return capability
+
+
+def _build_expert_state_root_grant(
+    coordinator: "RetentionCoordinator",
+    *,
+    state_fd: int,
+    sessions_fd: int,
+    markers_fd: int,
+    lock_fd: int,
+    clock_capability: ExpertRetentionClockSampleCapabilityV1,
+) -> _ExpertStateRootAccountLockGrantV1:
+    grant = object.__new__(_ExpertStateRootAccountLockGrantV1)
+    object.__setattr__(grant, "_dispatch", coordinator)
+    object.__setattr__(grant, "_state_fd", state_fd)
+    object.__setattr__(grant, "_sessions_fd", sessions_fd)
+    object.__setattr__(grant, "_markers_fd", markers_fd)
+    object.__setattr__(grant, "_lock_fd", lock_fd)
+    object.__setattr__(grant, "_clock_capability", clock_capability)
+    return grant
+
+
+def _consume_expert_state_root_account_lock_request(
+    request: ExpertStateRootAccountLockRequestV1,
+) -> _ExpertStateRootAccountLockGrantV1:
+    if type(request) is not ExpertStateRootAccountLockRequestV1:
+        raise RetentionError("expert_state_root_request_stale")
+    try:
+        coordinator = object.__getattribute__(request, "_dispatch")
+    except AttributeError:
+        raise RetentionError("expert_state_root_request_stale") from None
+    if type(coordinator) is not RetentionCoordinator:
+        raise RetentionError("expert_state_root_request_stale")
+    return coordinator._consume_expert_state_root_account_lock_request(
+        request
+    )
+
+
+def _revoke_expert_state_root_account_lock_grant(
+    grant: _ExpertStateRootAccountLockGrantV1,
+) -> None:
+    if type(grant) is not _ExpertStateRootAccountLockGrantV1:
+        raise RetentionError("expert_state_root_grant_stale")
+    try:
+        coordinator = object.__getattribute__(grant, "_dispatch")
+    except AttributeError:
+        raise RetentionError("expert_state_root_grant_stale") from None
+    if type(coordinator) is not RetentionCoordinator:
+        raise RetentionError("expert_state_root_grant_stale")
+    coordinator._revoke_expert_state_root_account_lock_grant(grant)
+
+
+def sample_expert_retention_wall_ns(
+    capability: ExpertRetentionClockSampleCapabilityV1,
+) -> int:
+    if type(capability) is not ExpertRetentionClockSampleCapabilityV1:
+        raise RetentionError("expert_retention_clock_capability_stale")
+    try:
+        coordinator = object.__getattribute__(capability, "_dispatch")
+    except AttributeError:
+        raise RetentionError(
+            "expert_retention_clock_capability_stale"
+        ) from None
+    if type(coordinator) is not RetentionCoordinator:
+        raise RetentionError("expert_retention_clock_capability_stale")
+    return coordinator._sample_expert_retention_wall_ns(capability)
+
+
 def _claim_provider_wal_writer(
     *,
     write_capability: ProviderWalWriteCapability,
@@ -914,6 +1174,12 @@ class RetentionCoordinator:
         "_session_states",
         "_deadlines",
         "_ambiguous_halt",
+        "_expert_root_issued",
+        "_expert_root_requests",
+        "_expert_root_grants",
+        "_expert_revoked_root_grants",
+        "_expert_clock_capabilities",
+        "_expert_root_operations_inflight",
     )
 
     def __init__(self, *_: object, **__: object) -> None:
@@ -962,6 +1228,12 @@ class RetentionCoordinator:
             instance._session_states = {}
             instance._deadlines = {}
             instance._ambiguous_halt = False
+            instance._expert_root_issued = False
+            instance._expert_root_requests = {}
+            instance._expert_root_grants = {}
+            instance._expert_revoked_root_grants = weakref.WeakSet()
+            instance._expert_clock_capabilities = {}
+            instance._expert_root_operations_inflight = 0
             instance._worker = threading.Thread(
                 target=instance._expiry_worker,
                 name="tennis-v1-retention-expiry",
@@ -1393,6 +1665,265 @@ class RetentionCoordinator:
         except Exception as error:
             raise RetentionError("retention_authorizer_binding_failed") from error
 
+    @staticmethod
+    def _directory_transition_observation(
+        value: os.stat_result,
+    ) -> _DirectoryTransitionObservation:
+        _validate_directory_stat(value)
+        return _DirectoryTransitionObservation(
+            identity=_file_identity(value),
+            size=value.st_size,
+            mtime_ns=value.st_mtime_ns,
+            ctime_ns=value.st_ctime_ns,
+        )
+
+    def _observe_expert_arm_directory(
+        self,
+        *,
+        original_fd: int,
+        duplicate_fd: int,
+        basename: str,
+    ) -> _DirectoryTransitionObservation:
+        original = self._directory_transition_observation(
+            os.fstat(original_fd)
+        )
+        duplicate = self._directory_transition_observation(
+            os.fstat(duplicate_fd)
+        )
+        named = self._directory_transition_observation(
+            os.stat(
+                basename,
+                dir_fd=self._state_fd,
+                follow_symlinks=False,
+            )
+        )
+        if original != duplicate or original != named:
+            raise RetentionError(
+                "expert_arm_directory_transition_invalid"
+            )
+        return original
+
+    def _prepare_expert_arm_identity_refresh(
+        self,
+        marker: RetentionMarker,
+    ) -> tuple[_ExpertArmRootIdentityTransition, ...]:
+        transitions: list[_ExpertArmRootIdentityTransition] = []
+        for authority in tuple(self._expert_root_grants.values()):
+            try:
+                self._validate_expert_root_authority_locked(
+                    authority,
+                    authority.clock_capability,
+                )
+                with _PROVIDER_IO_LOCK:
+                    self._validate_expert_root_binding(authority)
+                    sessions = self._observe_expert_arm_directory(
+                        original_fd=self._sessions_fd,
+                        duplicate_fd=authority.sessions_fd,
+                        basename="sessions",
+                    )
+                    markers = self._observe_expert_arm_directory(
+                        original_fd=self._markers_fd,
+                        duplicate_fd=authority.markers_fd,
+                        basename="retention-markers",
+                    )
+                    session_entries = tuple(
+                        sorted(os.listdir(self._sessions_fd))
+                    )
+                    marker_entries = tuple(
+                        sorted(os.listdir(self._markers_fd))
+                    )
+                if (
+                    marker.wal_basename in session_entries
+                    or marker.reserve_basename in session_entries
+                    or _marker_basename(marker.session_id)
+                    in marker_entries
+                ):
+                    raise RetentionError(
+                        "expert_arm_directory_transition_invalid"
+                    )
+                transitions.append(
+                    _ExpertArmRootIdentityTransition(
+                        authority=authority,
+                        sessions=sessions,
+                        markers=markers,
+                        session_entries=session_entries,
+                        marker_entries=marker_entries,
+                    )
+                )
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+        return tuple(transitions)
+
+    @staticmethod
+    def _require_arm_directory_transition(
+        before: _DirectoryTransitionObservation,
+        after: _DirectoryTransitionObservation,
+        *,
+        created_entries: int,
+    ) -> None:
+        if (
+            (
+                after.identity.device,
+                after.identity.inode,
+                after.identity.mode,
+                after.identity.owner,
+            )
+            != (
+                before.identity.device,
+                before.identity.inode,
+                before.identity.mode,
+                before.identity.owner,
+            )
+            or after.identity.links
+            not in (
+                before.identity.links,
+                before.identity.links + created_entries,
+            )
+            or after.mtime_ns < before.mtime_ns
+            or after.ctime_ns < before.ctime_ns
+        ):
+            raise RetentionError(
+                "expert_arm_directory_transition_invalid"
+            )
+
+    def _commit_expert_arm_identity_refresh(
+        self,
+        transitions: tuple[_ExpertArmRootIdentityTransition, ...],
+        *,
+        marker: RetentionMarker,
+        wal_fd: int,
+        reserve_fd: int,
+        wal_identity: _FileIdentity,
+        reserve_identity: _FileIdentity,
+    ) -> None:
+        validated: list[
+            tuple[
+                _ExpertArmRootIdentityTransition,
+                _DirectoryTransitionObservation,
+                _DirectoryTransitionObservation,
+            ]
+        ] = []
+        failed_authority: _ExpertRootGrantAuthority | None = None
+        try:
+            for transition in transitions:
+                authority = transition.authority
+                failed_authority = authority
+                self._validate_expert_root_authority_locked(
+                    authority,
+                    authority.clock_capability,
+                )
+                if (
+                    authority.sessions_identity
+                    != transition.sessions.identity
+                    or authority.markers_identity
+                    != transition.markers.identity
+                ):
+                    raise RetentionError(
+                        "expert_arm_directory_transition_invalid"
+                    )
+            with _PROVIDER_IO_LOCK:
+                for transition in transitions:
+                    authority = transition.authority
+                    failed_authority = authority
+                    sessions = self._observe_expert_arm_directory(
+                        original_fd=self._sessions_fd,
+                        duplicate_fd=authority.sessions_fd,
+                        basename="sessions",
+                    )
+                    markers = self._observe_expert_arm_directory(
+                        original_fd=self._markers_fd,
+                        duplicate_fd=authority.markers_fd,
+                        basename="retention-markers",
+                    )
+                    session_entries = tuple(
+                        sorted(os.listdir(self._sessions_fd))
+                    )
+                    marker_entries = tuple(
+                        sorted(os.listdir(self._markers_fd))
+                    )
+                    if (
+                        session_entries
+                        != tuple(
+                            sorted(
+                                (
+                                    *transition.session_entries,
+                                    marker.wal_basename,
+                                    marker.reserve_basename,
+                                )
+                            )
+                        )
+                        or marker_entries
+                        != tuple(
+                            sorted(
+                                (
+                                    *transition.marker_entries,
+                                    _marker_basename(marker.session_id),
+                                )
+                            )
+                        )
+                        or _validate_named_fd(
+                            wal_fd,
+                            marker.wal_basename,
+                            self._sessions_fd,
+                        )
+                        != wal_identity
+                        or _validate_named_fd(
+                            reserve_fd,
+                            marker.reserve_basename,
+                            self._sessions_fd,
+                            exact_size=RESERVE_BYTES,
+                            physical=True,
+                        )
+                        != reserve_identity
+                        or self._load_named_marker(marker.session_id)
+                        != marker
+                    ):
+                        raise RetentionError(
+                            "expert_arm_directory_transition_invalid"
+                        )
+                    self._require_arm_directory_transition(
+                        transition.sessions,
+                        sessions,
+                        created_entries=2,
+                    )
+                    self._require_arm_directory_transition(
+                        transition.markers,
+                        markers,
+                        created_entries=1,
+                    )
+                    validated.append(
+                        (transition, sessions, markers)
+                    )
+                try:
+                    for transition, sessions, markers in validated:
+                        transition.authority.sessions_identity = (
+                            sessions.identity
+                        )
+                        transition.authority.markers_identity = (
+                            markers.identity
+                        )
+                    for transition, _sessions, _markers in validated:
+                        failed_authority = transition.authority
+                        self._validate_expert_root_binding(
+                            transition.authority
+                        )
+                except BaseException:
+                    for transition, _sessions, _markers in validated:
+                        transition.authority.sessions_identity = (
+                            transition.sessions.identity
+                        )
+                        transition.authority.markers_identity = (
+                            transition.markers.identity
+                        )
+                    raise
+        except BaseException as error:
+            if failed_authority is None:
+                raise
+            self._raise_after_expert_root_failure(
+                failed_authority,
+                error,
+            )
+
     def arm_before_wal(
         self,
         *,
@@ -1485,6 +2016,9 @@ class RetentionCoordinator:
                 )
             marker_fd = wal_fd = reserve_fd = -1
             try:
+                expert_arm_transitions = (
+                    self._prepare_expert_arm_identity_refresh(marker)
+                )
                 marker_fd = self._create_file(
                     self._markers_fd, _marker_basename(marker.session_id)
                 )
@@ -1514,6 +2048,14 @@ class RetentionCoordinator:
                 os.fsync(wal_fd)
                 os.fsync(reserve_fd)
                 _fsync_directory(self._sessions_fd)
+                self._commit_expert_arm_identity_refresh(
+                    expert_arm_transitions,
+                    marker=marker,
+                    wal_fd=wal_fd,
+                    reserve_fd=reserve_fd,
+                    wal_identity=wal_identity,
+                    reserve_identity=reserve_identity,
+                )
             except Exception as error:
                 for fd in (marker_fd, wal_fd, reserve_fd):
                     if fd >= 0:
@@ -1738,6 +2280,677 @@ class RetentionCoordinator:
         except OSError as error:
             raise RetentionError("retention_entry_stat_failed") from error
         return True
+
+    def _validate_expert_root_binding(
+        self,
+        authority: _ExpertRootGrantAuthority,
+        *,
+        mutable_evidence_links: bool = False,
+    ) -> None:
+        _raise_if_global_halt()
+        if (
+            type(authority) is not _ExpertRootGrantAuthority
+            or authority.coordinator is not self
+            or authority.owner_pid != os.getpid()
+            or authority.owner_thread is not threading.current_thread()
+        ):
+            raise RetentionError("expert_state_root_grant_stale")
+        self._validate_roots_and_lock()
+        try:
+            original_values = (
+                os.fstat(self._state_fd),
+                os.fstat(self._sessions_fd),
+                os.fstat(self._markers_fd),
+                os.fstat(self._lock_fd),
+            )
+            duplicate_values = (
+                os.fstat(authority.state_fd),
+                os.fstat(authority.sessions_fd),
+                os.fstat(authority.markers_fd),
+                os.fstat(authority.lock_fd),
+            )
+            named_sessions = os.stat(
+                "sessions",
+                dir_fd=self._state_fd,
+                follow_symlinks=False,
+            )
+            named_markers = os.stat(
+                "retention-markers",
+                dir_fd=self._state_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise RetentionError("expert_state_root_grant_stale") from error
+        for value in original_values[:3] + duplicate_values[:3]:
+            _validate_directory_stat(value)
+        original_identities = tuple(
+            _file_identity(value) for value in original_values
+        )
+        duplicate_identities = tuple(
+            _file_identity(value) for value in duplicate_values
+        )
+        evidence_history_valid = (
+            (
+                original_identities[1].device,
+                original_identities[1].inode,
+                original_identities[1].mode,
+                original_identities[1].owner,
+            )
+            == (
+                authority.sessions_identity.device,
+                authority.sessions_identity.inode,
+                authority.sessions_identity.mode,
+                authority.sessions_identity.owner,
+            )
+            and authority.sessions_identity.links
+            - original_identities[1].links
+            in (0, 1)
+            and (
+                original_identities[2].device,
+                original_identities[2].inode,
+                original_identities[2].mode,
+                original_identities[2].owner,
+            )
+            == (
+                authority.markers_identity.device,
+                authority.markers_identity.inode,
+                authority.markers_identity.mode,
+                authority.markers_identity.owner,
+            )
+            and authority.markers_identity.links
+            - original_identities[2].links
+            in (0, 1)
+            if mutable_evidence_links
+            else original_identities[1]
+            == authority.sessions_identity
+            and original_identities[2]
+            == authority.markers_identity
+        )
+        if (
+            not _same_mutable_directory_binding(
+                original_identities[0],
+                authority.state_identity,
+            )
+            or not evidence_history_valid
+            or original_identities[3] != authority.lock_identity
+            or duplicate_identities != original_identities
+            or _file_identity(named_sessions)
+            != original_identities[1]
+            or _file_identity(named_markers)
+            != original_identities[2]
+            or _validate_file_stat(original_values[3])
+            != self._lock_identity
+            or _validate_file_stat(duplicate_values[3])
+            != authority.lock_identity
+            or object.__getattribute__(authority.grant, "_dispatch")
+            is not self
+            or object.__getattribute__(authority.grant, "_state_fd")
+            != authority.state_fd
+            or object.__getattribute__(authority.grant, "_sessions_fd")
+            != authority.sessions_fd
+            or object.__getattribute__(authority.grant, "_markers_fd")
+            != authority.markers_fd
+            or object.__getattribute__(authority.grant, "_lock_fd")
+            != authority.lock_fd
+            or object.__getattribute__(
+                authority.grant,
+                "_clock_capability",
+            )
+            is not authority.clock_capability
+        ):
+            raise RetentionError("expert_state_root_grant_stale")
+
+    def _validate_expert_root_authority_locked(
+        self,
+        authority: _ExpertRootGrantAuthority,
+        capability: ExpertRetentionClockSampleCapabilityV1,
+    ) -> None:
+        _raise_if_global_halt()
+        if (
+            type(authority) is not _ExpertRootGrantAuthority
+            or authority.coordinator is not self
+            or authority.owner_pid != os.getpid()
+            or authority.owner_thread is not threading.current_thread()
+            or authority.generation != self._generation
+            or self._closed
+            or self._closing
+            or not self._ready
+            or authority.clock_capability is not capability
+            or self._expert_root_grants.get(authority.grant) is not authority
+            or self._expert_clock_capabilities.get(capability) is not authority
+            or object.__getattribute__(capability, "_dispatch") is not self
+        ):
+            raise RetentionError("expert_state_root_grant_stale")
+
+    @staticmethod
+    def _close_expert_root_duplicate_fds(
+        fds: tuple[int, ...],
+    ) -> bool:
+        failed = False
+        for fd in reversed(fds):
+            if fd < 0:
+                continue
+            try:
+                os.close(fd)
+            except OSError:
+                failed = True
+        return failed
+
+    def _begin_expert_root_operation_locked(self) -> int:
+        self._expert_root_operations_inflight += 1
+        return self._generation
+
+    def _end_expert_root_operation(self) -> None:
+        with self._condition:
+            if self._expert_root_operations_inflight <= 0:
+                raise RetentionError("expert_state_root_operation_stale")
+            self._expert_root_operations_inflight -= 1
+            if self._closing:
+                self._condition.notify_all()
+
+    def _invalidate_expert_root_grant_locked(
+        self,
+        authority: _ExpertRootGrantAuthority,
+    ) -> tuple[int, ...]:
+        if self._expert_root_grants.get(authority.grant) is not authority:
+            return ()
+        self._expert_root_grants.pop(authority.grant, None)
+        self._expert_clock_capabilities.pop(
+            authority.clock_capability,
+            None,
+        )
+        self._expert_revoked_root_grants.add(authority.grant)
+        return (
+            authority.state_fd,
+            authority.sessions_fd,
+            authority.markers_fd,
+            authority.lock_fd,
+        )
+
+    def _raise_after_expert_root_failure(
+        self,
+        authority: _ExpertRootGrantAuthority,
+        error: BaseException,
+    ) -> None:
+        with self._condition:
+            duplicate_fds = self._invalidate_expert_root_grant_locked(
+                authority
+            )
+        close_failed = False
+        if duplicate_fds:
+            with _PROVIDER_IO_LOCK:
+                close_failed = self._close_expert_root_duplicate_fds(
+                    duplicate_fds
+                )
+        if close_failed:
+            _latch_global_halt(
+                self,
+                session_id=None,
+                ambiguous=True,
+            )
+            raise RetentionGlobalHalt(
+                "expert_state_root_grant_close_failed"
+            ) from error
+        raise error
+
+    def issue_expert_state_root_account_lock_request(
+        self,
+    ) -> ExpertStateRootAccountLockRequestV1:
+        with self._condition:
+            self._require_open()
+            if (
+                os.getpid() != self._owner_pid
+                or threading.current_thread() is not self._owner_thread
+                or self._expert_root_issued
+            ):
+                raise RetentionError("expert_state_root_request_stale")
+            generation = self._begin_expert_root_operation_locked()
+        try:
+            try:
+                with _PROVIDER_IO_LOCK:
+                    _raise_if_global_halt()
+                    self._validate_roots_and_lock()
+                    _raise_if_global_halt()
+            except RetentionGlobalHalt:
+                raise
+            except Exception as error:
+                raise RetentionError(
+                    "expert_state_root_request_stale"
+                ) from error
+            with self._condition:
+                self._require_open()
+                if (
+                    os.getpid() != self._owner_pid
+                    or threading.current_thread() is not self._owner_thread
+                    or self._generation != generation
+                    or self._expert_root_issued
+                ):
+                    raise RetentionError("expert_state_root_request_stale")
+                _raise_if_global_halt()
+                request = _build_expert_state_root_request(self)
+                self._expert_root_issued = True
+                self._expert_root_requests[request] = (
+                    _ExpertRootRequestAuthority(
+                        request=request,
+                        coordinator=self,
+                        owner_pid=os.getpid(),
+                        owner_thread=threading.current_thread(),
+                        generation=self._generation,
+                    )
+                )
+                return request
+        finally:
+            self._end_expert_root_operation()
+
+    def _consume_expert_state_root_account_lock_request(
+        self,
+        request: ExpertStateRootAccountLockRequestV1,
+    ) -> _ExpertStateRootAccountLockGrantV1:
+        with self._condition:
+            request_authority = self._expert_root_requests.pop(request, None)
+            if (
+                request_authority is None
+                or type(request_authority) is not _ExpertRootRequestAuthority
+                or request_authority.request is not request
+                or request_authority.coordinator is not self
+                or request_authority.owner_pid != os.getpid()
+                or request_authority.owner_thread
+                is not threading.current_thread()
+                or request_authority.generation != self._generation
+                or self._closed
+                or self._closing
+                or not self._ready
+            ):
+                raise RetentionError("expert_state_root_request_stale")
+            _raise_if_global_halt()
+            source_fds = (
+                self._state_fd,
+                self._sessions_fd,
+                self._markers_fd,
+                self._lock_fd,
+            )
+            generation = self._begin_expert_root_operation_locked()
+        try:
+            return self._complete_expert_root_request_consumption(
+                request_authority,
+                source_fds=source_fds,
+                generation=generation,
+            )
+        finally:
+            self._end_expert_root_operation()
+
+    def _complete_expert_root_request_consumption(
+        self,
+        request_authority: _ExpertRootRequestAuthority,
+        *,
+        source_fds: tuple[int, int, int, int],
+        generation: int,
+    ) -> _ExpertStateRootAccountLockGrantV1:
+        duplicates: list[int] = []
+        grant_authority: _ExpertRootGrantAuthority | None = None
+        operation_error: Exception | None = None
+        close_failed = False
+        with _PROVIDER_IO_LOCK:
+            try:
+                _raise_if_global_halt()
+                self._validate_roots_and_lock()
+                source_values = tuple(os.fstat(fd) for fd in source_fds)
+                for value in source_values[:3]:
+                    _validate_directory_stat(value)
+                source_identities = tuple(
+                    _file_identity(value) for value in source_values
+                )
+                if (
+                    _validate_file_stat(source_values[3])
+                    != self._lock_identity
+                ):
+                    raise RetentionError(
+                        "expert_state_root_request_stale"
+                    )
+                for fd in source_fds:
+                    _raise_if_global_halt()
+                    duplicate = os.dup(fd)
+                    duplicates.append(duplicate)
+                    os.set_inheritable(duplicate, False)
+                    _raise_if_global_halt()
+                duplicate_values = tuple(
+                    os.fstat(fd) for fd in duplicates
+                )
+                for value in duplicate_values[:3]:
+                    _validate_directory_stat(value)
+                if (
+                    tuple(
+                        _file_identity(value)
+                        for value in duplicate_values
+                    )
+                    != source_identities
+                    or _validate_file_stat(duplicate_values[3])
+                    != self._lock_identity
+                ):
+                    raise RetentionError(
+                        "expert_state_root_request_stale"
+                    )
+                sampler = _build_expert_retention_clock_capability(self)
+                grant = _build_expert_state_root_grant(
+                    self,
+                    state_fd=duplicates[0],
+                    sessions_fd=duplicates[1],
+                    markers_fd=duplicates[2],
+                    lock_fd=duplicates[3],
+                    clock_capability=sampler,
+                )
+                grant_authority = _ExpertRootGrantAuthority(
+                    grant=grant,
+                    coordinator=self,
+                    owner_pid=os.getpid(),
+                    owner_thread=threading.current_thread(),
+                    generation=generation,
+                    state_fd=duplicates[0],
+                    sessions_fd=duplicates[1],
+                    markers_fd=duplicates[2],
+                    lock_fd=duplicates[3],
+                    state_identity=source_identities[0],
+                    sessions_identity=source_identities[1],
+                    markers_identity=source_identities[2],
+                    lock_identity=source_identities[3],
+                    clock_capability=sampler,
+                )
+                self._validate_expert_root_binding(grant_authority)
+            except Exception as error:
+                operation_error = error
+                close_failed = self._close_expert_root_duplicate_fds(
+                    tuple(duplicates)
+                )
+
+        if operation_error is not None:
+            if close_failed:
+                _latch_global_halt(
+                    self,
+                    session_id=None,
+                    ambiguous=True,
+                )
+                raise RetentionGlobalHalt(
+                    "expert_state_root_grant_close_failed"
+                ) from operation_error
+            if isinstance(operation_error, RetentionError):
+                raise operation_error
+            raise RetentionError(
+                "expert_state_root_request_stale"
+            ) from operation_error
+
+        assert grant_authority is not None
+        commit_error: RetentionError | None = None
+        with self._condition:
+            try:
+                if (
+                    request_authority.generation != generation
+                    or self._generation != generation
+                    or self._closed
+                    or self._closing
+                    or not self._ready
+                    or os.getpid() != request_authority.owner_pid
+                    or threading.current_thread()
+                    is not request_authority.owner_thread
+                ):
+                    raise RetentionError("expert_state_root_request_stale")
+                _raise_if_global_halt()
+            except RetentionError as error:
+                commit_error = error
+            else:
+                self._expert_root_grants[grant_authority.grant] = (
+                    grant_authority
+                )
+                self._expert_clock_capabilities[
+                    grant_authority.clock_capability
+                ] = grant_authority
+
+        if commit_error is not None:
+            with _PROVIDER_IO_LOCK:
+                close_failed = self._close_expert_root_duplicate_fds(
+                    (
+                        grant_authority.state_fd,
+                        grant_authority.sessions_fd,
+                        grant_authority.markers_fd,
+                        grant_authority.lock_fd,
+                    )
+                )
+            if close_failed:
+                _latch_global_halt(
+                    self,
+                    session_id=None,
+                    ambiguous=True,
+                )
+                raise RetentionGlobalHalt(
+                    "expert_state_root_grant_close_failed"
+                ) from commit_error
+            raise commit_error
+        return grant_authority.grant
+
+    def _revoke_expert_state_root_account_lock_grant(
+        self,
+        grant: _ExpertStateRootAccountLockGrantV1,
+    ) -> None:
+        with self._condition:
+            authority = self._expert_root_grants.get(grant)
+            if authority is None:
+                if grant in self._expert_revoked_root_grants:
+                    return
+                raise RetentionError("expert_state_root_grant_stale")
+            if (
+                authority.owner_pid != os.getpid()
+                or authority.owner_thread is not threading.current_thread()
+                or authority.generation != self._generation
+                or self._closed
+                or self._closing
+            ):
+                raise RetentionError("expert_state_root_grant_stale")
+            self._begin_expert_root_operation_locked()
+            duplicate_fds = self._invalidate_expert_root_grant_locked(
+                authority
+            )
+        try:
+            with _PROVIDER_IO_LOCK:
+                close_failed = self._close_expert_root_duplicate_fds(
+                    duplicate_fds
+                )
+        finally:
+            self._end_expert_root_operation()
+        if close_failed:
+            _latch_global_halt(
+                self,
+                session_id=None,
+                ambiguous=True,
+            )
+            raise RetentionGlobalHalt(
+                "expert_state_root_grant_close_failed"
+            )
+
+    def _sample_expert_retention_wall_ns(
+        self,
+        capability: ExpertRetentionClockSampleCapabilityV1,
+    ) -> int:
+        initial_error: BaseException | None = None
+        with self._condition:
+            authority = self._expert_clock_capabilities.get(capability)
+            if authority is None:
+                raise RetentionError(
+                    "expert_retention_clock_capability_stale"
+                )
+            try:
+                self._validate_expert_root_authority_locked(
+                    authority,
+                    capability,
+                )
+            except BaseException as error:
+                initial_error = error
+            self._begin_expert_root_operation_locked()
+        try:
+            if initial_error is not None:
+                self._raise_after_expert_root_failure(
+                    authority,
+                    initial_error,
+                )
+            try:
+                with _PROVIDER_IO_LOCK:
+                    self._validate_expert_root_binding(
+                        authority,
+                        mutable_evidence_links=True,
+                    )
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+            try:
+                with self._condition:
+                    self._validate_expert_root_authority_locked(
+                        authority,
+                        capability,
+                    )
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+
+            try:
+                sampled_wall_ns = self._sample_clock()
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+
+            try:
+                with self._condition:
+                    self._validate_expert_root_authority_locked(
+                        authority,
+                        capability,
+                    )
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+            try:
+                with _PROVIDER_IO_LOCK:
+                    self._validate_expert_root_binding(
+                        authority,
+                        mutable_evidence_links=True,
+                    )
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+            try:
+                with self._condition:
+                    self._validate_expert_root_authority_locked(
+                        authority,
+                        capability,
+                    )
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+            return sampled_wall_ns
+        finally:
+            self._end_expert_root_operation()
+
+    def require_expert_companion_creation_live(
+        self,
+        *,
+        persistence_authorizer: ProviderPersistenceAuthorizer,
+    ) -> None:
+        from .sequencer import ProviderPersistenceAuthorizer
+
+        with self._condition:
+            try:
+                if (
+                    type(persistence_authorizer)
+                    is not ProviderPersistenceAuthorizer
+                    or persistence_authorizer.coordinator is not self
+                    or os.getpid() != self._owner_pid
+                    or threading.current_thread() is not self._owner_thread
+                    or self._closed
+                    or self._closing
+                    or not self._ready
+                    or _global_halt() is not None
+                ):
+                    raise RetentionError(
+                        "expert_companion_creation_not_live"
+                    )
+                manifest = persistence_authorizer.session_manifest
+                decision = persistence_authorizer.bound_decision
+                if (
+                    type(manifest) is not SessionManifest
+                    or type(decision) is not QualificationDecision
+                ):
+                    raise RetentionError(
+                        "expert_companion_creation_not_live"
+                    )
+                state = self._session_states.get(manifest.session_id)
+                if state is None:
+                    raise RetentionError(
+                        "expert_companion_creation_not_live"
+                    )
+                authority = next(
+                    (
+                        item
+                        for item in self._write_capabilities.values()
+                        if item.session_id == manifest.session_id
+                        and item.token is state.write_token
+                    ),
+                    None,
+                )
+                if (
+                    authority is None
+                    or authority.authorizer is not persistence_authorizer
+                    or authority.manifest is not manifest
+                    or authority.decision is not decision
+                    or authority.owner_pid != os.getpid()
+                    or authority.owner_thread
+                    is not threading.current_thread()
+                    or authority.generation != self._generation
+                    or not authority.writer_claimed
+                    or not authority.runtime_claimed
+                    or authority.halt_consumed
+                    or authority.lifecycle.due
+                    or state.authorizer is not persistence_authorizer
+                    or state.manifest is not manifest
+                    or state.decision is not decision
+                    or state.write_token is not authority.token
+                    or not state.healthy
+                    or not state.wal_prefix_durable
+                    or not state.session_start_durable
+                    or state.terminal_written
+                    or state.terminal_clean_durable
+                    or state.clean_preclose_ack is not None
+                    or state.clean_terminal_marked
+                    or state.wal_fd < 0
+                    or state.reserve_fd < 0
+                    or state.reserve_identity is None
+                ):
+                    raise RetentionError(
+                        "expert_companion_creation_not_live"
+                    )
+                self._validate_roots_and_lock()
+                marker = self._load_named_marker(manifest.session_id)
+                self._require_authorizer_binding(
+                    persistence_authorizer,
+                    manifest,
+                    decision,
+                    marker=marker,
+                )
+                wal_identity = _validate_named_fd(
+                    state.wal_fd,
+                    marker.wal_basename,
+                    self._sessions_fd,
+                )
+                reserve_identity = _validate_named_fd(
+                    state.reserve_fd,
+                    marker.reserve_basename,
+                    self._sessions_fd,
+                    exact_size=RESERVE_BYTES,
+                    physical=True,
+                )
+                if (
+                    marker != state.marker
+                    or wal_identity != state.wal_identity
+                    or reserve_identity != state.reserve_identity
+                    or os.fstat(state.wal_fd).st_size
+                    <= len(WAL_FILE_PREFIX_BYTES)
+                ):
+                    raise RetentionError(
+                        "expert_companion_creation_not_live"
+                    )
+            except Exception:
+                raise RetentionError(
+                    "expert_companion_creation_not_live"
+                ) from None
 
     def require_provider_operation(self) -> None:
         with self._condition:
@@ -2586,6 +3799,85 @@ class RetentionCoordinator:
         authority.halt_consumed = True
         return state
 
+    def _prepare_expert_sessions_identity_refresh(
+        self,
+    ) -> tuple[tuple[_ExpertRootGrantAuthority, _FileIdentity], ...]:
+        transitions: list[
+            tuple[_ExpertRootGrantAuthority, _FileIdentity]
+        ] = []
+        for authority in tuple(self._expert_root_grants.values()):
+            try:
+                self._validate_expert_root_authority_locked(
+                    authority,
+                    authority.clock_capability,
+                )
+                with _PROVIDER_IO_LOCK:
+                    self._validate_expert_root_binding(authority)
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+            transitions.append(
+                (authority, authority.sessions_identity)
+            )
+        return tuple(transitions)
+
+    def _commit_expert_sessions_identity_refresh(
+        self,
+        transitions: tuple[
+            tuple[_ExpertRootGrantAuthority, _FileIdentity],
+            ...,
+        ],
+    ) -> None:
+        for authority, before in transitions:
+            try:
+                self._validate_expert_root_authority_locked(
+                    authority,
+                    authority.clock_capability,
+                )
+                if authority.sessions_identity != before:
+                    raise RetentionError(
+                        "expert_sessions_identity_transition_invalid"
+                    )
+                with _PROVIDER_IO_LOCK:
+                    original_value = os.fstat(self._sessions_fd)
+                    duplicate_value = os.fstat(authority.sessions_fd)
+                    named_value = os.stat(
+                        "sessions",
+                        dir_fd=self._state_fd,
+                        follow_symlinks=False,
+                    )
+                    for value in (
+                        original_value,
+                        duplicate_value,
+                        named_value,
+                    ):
+                        _validate_directory_stat(value)
+                    current = _file_identity(original_value)
+                    if (
+                        _file_identity(duplicate_value) != current
+                        or _file_identity(named_value) != current
+                        or (
+                            current.device,
+                            current.inode,
+                            current.mode,
+                            current.owner,
+                        )
+                        != (
+                            before.device,
+                            before.inode,
+                            before.mode,
+                            before.owner,
+                        )
+                        or current.links
+                        not in (before.links, before.links - 1)
+                    ):
+                        raise RetentionError(
+                            "expert_sessions_identity_transition_invalid"
+                        )
+                    authority.sessions_identity = current
+                    self._validate_expert_root_binding(authority)
+            except BaseException as error:
+                self._raise_after_expert_root_failure(authority, error)
+
     def _release_reserve(
         self, capability: ProviderWalWriteCapability, state: _SessionState
     ) -> None:
@@ -2598,6 +3890,9 @@ class RetentionCoordinator:
                 self._sessions_fd,
                 exact_size=RESERVE_BYTES,
                 physical=True,
+            )
+            expert_sessions_transitions = (
+                self._prepare_expert_sessions_identity_refresh()
             )
         except RetentionError:
             state.healthy = False
@@ -2619,6 +3914,9 @@ class RetentionCoordinator:
         try:
             self._unlink_validated_reserve(state.marker.reserve_basename)
             _fsync_directory(self._sessions_fd)
+            self._commit_expert_sessions_identity_refresh(
+                expert_sessions_transitions
+            )
         except Exception as error:
             state.healthy = False
             _latch_global_halt(
@@ -3041,41 +4339,82 @@ class RetentionCoordinator:
     def close(self) -> None:
         if not hasattr(self, "_lock"):
             return
+        expert_duplicate_fds: list[int] = []
+        deferred_close_halt = False
         with self._condition:
             if self._closed:
                 return
-            if not self._closing:
-                self._closing = True
-                self._ready = False
-                self._generation += 1
-                close_failed = False
-                for authority in tuple(self._read_capabilities.values()):
-                    try:
-                        self._close_read_locked(
-                            authority.capability, strict=True
-                        )
-                    except RetentionError:
-                        close_failed = True
-                for item in tuple(self._write_capabilities.values()):
-                    try:
-                        self._close_write_locked(
-                            item.capability,
-                            strict=True,
-                        )
-                    except RetentionError:
-                        close_failed = True
-                if close_failed:
-                    self._close_failed = True
-                    _latch_global_halt(
-                        self, session_id=None, ambiguous=True
+            if self._closing:
+                while not self._closed and not self._close_failed:
+                    self._condition.wait()
+                if self._closed:
+                    return
+                raise RetentionGlobalHalt(
+                    "retention_descriptor_close_failed"
+                )
+            self._closing = True
+            self._ready = False
+            self._generation += 1
+            self._condition.notify_all()
+            while self._expert_root_operations_inflight:
+                self._condition.wait()
+            close_failed = False
+            self._expert_root_requests.clear()
+            for expert_authority in tuple(
+                self._expert_root_grants.values()
+            ):
+                expert_duplicate_fds.extend(
+                    self._invalidate_expert_root_grant_locked(
+                        expert_authority
                     )
-                self._condition.notify_all()
+                )
+            self._expert_clock_capabilities.clear()
+            for authority in tuple(self._read_capabilities.values()):
+                try:
+                    self._close_read_locked(
+                        authority.capability, strict=True
+                    )
+                except RetentionError:
+                    close_failed = True
+            for item in tuple(self._write_capabilities.values()):
+                try:
+                    self._close_write_locked(
+                        item.capability,
+                        strict=True,
+                    )
+                except RetentionError:
+                    close_failed = True
+            if close_failed:
+                self._close_failed = True
+                deferred_close_halt = True
+            self._condition.notify_all()
             worker = self._worker
+        if expert_duplicate_fds:
+            with _PROVIDER_IO_LOCK:
+                expert_close_failed = self._close_expert_root_duplicate_fds(
+                    tuple(expert_duplicate_fds)
+                )
+            if expert_close_failed:
+                with self._condition:
+                    self._close_failed = True
+                    self._condition.notify_all()
+                deferred_close_halt = True
+        if deferred_close_halt:
+            _latch_global_halt(
+                self,
+                session_id=None,
+                ambiguous=True,
+            )
         if worker is not threading.current_thread():
             worker.join(timeout=5.0)
             if worker.is_alive():
+                with self._condition:
+                    self._close_failed = True
+                    self._condition.notify_all()
                 _latch_global_halt(self, session_id=None, ambiguous=True)
                 raise RetentionGlobalHalt("retention_worker_did_not_stop")
+        descriptor_error: OSError | None = None
+        descriptor_failure = "retention_descriptor_close_failed"
         with self._lock:
             if self._closed:
                 return
@@ -3092,23 +4431,29 @@ class RetentionCoordinator:
                         os.close(fd)
                     except OSError as error:
                         self._close_failed = True
-                        _latch_global_halt(
-                            self, session_id=None, ambiguous=True
-                        )
-                        raise RetentionGlobalHalt(
-                            "retention_descriptor_close_failed"
-                        ) from error
+                        descriptor_error = error
+                        break
                     setattr(self, fd_name, -1)
-            try:
-                os.close(self._lock_fd)
-            except OSError as error:
-                self._close_failed = True
-                _latch_global_halt(self, session_id=None, ambiguous=True)
-                raise RetentionGlobalHalt(
-                    "retention_lock_close_failed"
-                ) from error
-            self._lock_fd = -1
-            self._closed = True
+            if descriptor_error is None:
+                try:
+                    os.close(self._lock_fd)
+                except OSError as error:
+                    self._close_failed = True
+                    descriptor_error = error
+                    descriptor_failure = "retention_lock_close_failed"
+                else:
+                    self._lock_fd = -1
+                    self._closed = True
+            self._condition.notify_all()
+        if descriptor_error is not None:
+            _latch_global_halt(
+                self,
+                session_id=None,
+                ambiguous=True,
+            )
+            raise RetentionGlobalHalt(
+                descriptor_failure
+            ) from descriptor_error
         with _GLOBAL_HALT_LOCK:
             _ACTIVE_COORDINATORS.discard(self)
 

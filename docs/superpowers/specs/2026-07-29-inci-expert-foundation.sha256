@@ -1,0 +1,23 @@
+# Inci expert foundation snapshot — 2026-07-29
+#
+# This is a pre-expert content-addressed snapshot of every non-cache file
+# currently under tennis_v1/, sorted by repository-relative POSIX path. It is
+# not a replacement for the existing independently reviewed Phase-1 AST seal
+# or the protected v6 legacy manifest.
+
+python_runtime=CPython 3.14.5
+git_head=58063e4
+git_branch=feature/tennis-v1-foundation
+foundation_file_count=26
+foundation_tree_sha256=c723942c7c6c52f41a4cef95b7a650c4643661c9cf0271293273fec86a0c4ebb
+requirements_sha256=e43aac65de78bba78e9ca0e007f4ff1ba0598bfaba094dbf05005628464fb636
+pyproject_sha256=21f6280e3a0231f5119d4d53fae0aad3540dfcef88072aa8314c71d8f3791893
+legacy_manifest_sha256=f726efad0bcdde80a0f7736e06eeeb2b80cb4a51abac65d07c6f1ed2807d012e
+tennis_tests=504
+tennis_test_result=pass
+v6_tests=202
+v6_test_result=pass
+
+# Git note: the approved Phase-1 tree is untracked relative to HEAD. Git is
+# user-managed, and no staging or commit was authorized. The SDD ledger records
+# this deviation; all expert work must preserve the snapshot and existing seal.

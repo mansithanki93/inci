@@ -9,10 +9,14 @@ from enum import Enum
 import hmac
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import threading
+from types import MappingProxyType
 from typing import Callable
 from urllib.parse import urlsplit
+import weakref
 
 from .adapter_contract import (
     AdapterContract,
@@ -42,6 +46,7 @@ FULL_UTC_RE = re.compile(
 )
 SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+SHADOW_CREDENTIAL_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}\Z")
 SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 TOUR_COMPONENT = re.compile(r"[A-Z][A-Z0-9-]{0,31}\Z")
 FORMAT_COMPONENT = re.compile(r"[A-Z][A-Z0-9_]{0,31}\Z")
@@ -1708,6 +1713,18 @@ class ProviderGateError(RuntimeError):
 
 REQUEST_HASH_DOMAIN = b"INCI-RESEARCH-REQUEST-V1\0"
 PROVIDER_REQUEST_BINDING_DOMAIN = b"INCI-PROVIDER-REQUEST-BINDING-V1\0"
+PRECREDENTIAL_PROOF_HASH_DOMAIN = (
+    b"INCI-PRECREDENTIAL-PROVIDER-ENTITLEMENT-V1\0"
+)
+SEALED_CREDENTIAL_FIXTURE_HASH_DOMAIN = (
+    b"INCI-SEALED-CREDENTIAL-LIFECYCLE-FIXTURE-V1\0"
+)
+SEALED_CREDENTIAL_TRACE_HASH_DOMAIN = (
+    b"INCI-SEALED-CREDENTIAL-LIFECYCLE-TRACE-V1\0"
+)
+SEALED_CREDENTIAL_RESULT_HASH_DOMAIN = (
+    b"INCI-SEALED-CREDENTIAL-LIFECYCLE-RESULT-V1\0"
+)
 _EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -1853,19 +1870,60 @@ def _snapshot_environment(environ: object) -> dict[str, str]:
     return snapshot
 
 
+def _qualification_eligible_from_reasons(
+    reasons: set[QualificationReason],
+) -> bool:
+    if type(reasons) is not set or any(
+        type(reason) is not QualificationReason for reason in reasons
+    ):
+        raise TypeError("reasons: exact_QualificationReason_set_required")
+    return not reasons
+
+
+def _noncredential_decision_kernel(
+    reasons: set[QualificationReason],
+) -> tuple[bool, tuple[QualificationReason, ...]]:
+    if type(reasons) is not set or any(
+        type(reason) is not QualificationReason for reason in reasons
+    ):
+        raise TypeError("noncredential reasons are invalid")
+    if QualificationReason.CREDENTIAL_MISSING in reasons:
+        raise TypeError("credential reason entered noncredential kernel")
+    return _qualification_eligible_from_reasons(reasons), _sorted_reasons(reasons)
+
+
+def _credential_presence_reasons(
+    credential_names: tuple[str, ...],
+    frozen_values: dict[str, str] | MappingProxyType,
+) -> set[QualificationReason]:
+    if type(credential_names) is not tuple or type(frozen_values) not in (
+        dict,
+        MappingProxyType,
+    ):
+        raise TypeError("credential presence inputs are invalid")
+    reasons: set[QualificationReason] = set()
+    for name in credential_names:
+        value = frozen_values.get(name)
+        if type(value) is not str or not value.strip():
+            reasons.add(QualificationReason.CREDENTIAL_MISSING)
+    return reasons
+
+
 def _sorted_reasons(
     reasons: set[QualificationReason],
 ) -> tuple[QualificationReason, ...]:
     return tuple(sorted(reasons, key=lambda item: item.value))
 
 
-def _evaluate_provider_as_of(
+def _evaluate_provider_kernel(
     config: TennisV1Config,
     manifest: ProviderManifest,
     request: ResearchRequest,
     *,
-    environ: dict[str, str],
+    environ: dict[str, str] | None,
     as_of: datetime,
+    bound_adapter: AdapterContract | None,
+    include_credentials: bool,
 ) -> QualificationDecision:
     if type(config) is not TennisV1Config:
         raise TypeError("config must be TennisV1Config")
@@ -1873,8 +1931,14 @@ def _evaluate_provider_as_of(
         raise TypeError("manifest must be ProviderManifest")
     if type(request) is not ResearchRequest:
         raise TypeError("request must be ResearchRequest")
-    if type(environ) is not dict:
+    if type(include_credentials) is not bool:
+        raise TypeError("include_credentials: exact_bool_required")
+    if include_credentials and type(environ) is not dict:
         raise TypeError("environ: private_exact_dict_required")
+    if not include_credentials and environ is not None:
+        raise TypeError("environ: must_be_absent_for_precredential_evaluation")
+    if bound_adapter is not None and type(bound_adapter) is not AdapterContract:
+        raise TypeError("bound_adapter: exact_AdapterContract_required")
     _canonical_projection(manifest)
 
     reasons: set[QualificationReason] = set()
@@ -2036,14 +2100,17 @@ def _evaluate_provider_as_of(
         reasons.add(QualificationReason.MANDATORY_PERMISSION_MISSING)
 
     adapter: AdapterContract | None
-    try:
-        adapter = load_active_adapter_contract(
-            provider_id=manifest.provider_id,
-            product_tier=manifest.product_tier,
-        )
-    except AdapterContractError:
-        adapter = None
-        reasons.add(QualificationReason.ADAPTER_MISMATCH)
+    if bound_adapter is not None:
+        adapter = bound_adapter
+    else:
+        try:
+            adapter = load_active_adapter_contract(
+                provider_id=manifest.provider_id,
+                product_tier=manifest.product_tier,
+            )
+        except AdapterContractError:
+            adapter = None
+            reasons.add(QualificationReason.ADAPTER_MISMATCH)
 
     credential_names: tuple[str, ...] = ()
     if adapter is not None:
@@ -2083,10 +2150,13 @@ def _evaluate_provider_as_of(
         ):
             reasons.add(QualificationReason.QUALIFICATION_EVIDENCE_MISMATCH)
 
-    for name in credential_names:
-        value = environ.get(name)
-        if type(value) is not str or not value.strip():
-            reasons.add(QualificationReason.CREDENTIAL_MISSING)
+    credential_reasons: set[QualificationReason] = set()
+    if include_credentials:
+        assert environ is not None
+        credential_reasons = _credential_presence_reasons(
+            credential_names,
+            environ,
+        )
 
     matches_valid = (
         type(request.requested_matches) is int
@@ -2184,7 +2254,9 @@ def _evaluate_provider_as_of(
         ):
             reasons.add(QualificationReason.CAPABILITY_MISSING)
 
-    eligible = not reasons
+    noncredential_eligible, _ = _noncredential_decision_kernel(reasons)
+    reasons.update(credential_reasons)
+    eligible = noncredential_eligible and not credential_reasons
     binding: QualifiedProviderBinding | None = None
     if eligible:
         reasons.add(QualificationReason.ELIGIBLE)
@@ -2229,6 +2301,26 @@ def _evaluate_provider_as_of(
             ),
         )
     return decision
+
+
+def _evaluate_provider_as_of(
+    config: TennisV1Config,
+    manifest: ProviderManifest,
+    request: ResearchRequest,
+    *,
+    environ: dict[str, str],
+    as_of: datetime,
+) -> QualificationDecision:
+    """Compatibility evaluator: validate credentials from one caller snapshot."""
+    return _evaluate_provider_kernel(
+        config,
+        manifest,
+        request,
+        environ=environ,
+        as_of=as_of,
+        bound_adapter=None,
+        include_credentials=True,
+    )
 
 
 def evaluate_provider(
@@ -2281,6 +2373,826 @@ class ProviderSessionPoll:
             raise TypeError("session_ended: exact_bool_required")
 
 
+def _reject_capability_copy(message: str) -> None:
+    raise TypeError(message)
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False, eq=False)
+class ShadowCredentialContractAuthorityV1:
+    """Future bootstrap-only credential-contract authority.
+
+    Task 9 intentionally provides no issuer for this type.
+    """
+
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("shadow credential-contract authorities are bootstrap-issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("shadow credential-contract authorities cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<ShadowCredentialContractAuthorityV1 redacted>"
+
+    def __copy__(self):
+        _reject_capability_copy("shadow credential-contract authorities cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        _reject_capability_copy("shadow credential-contract authorities cannot be copied")
+
+    def __reduce__(self):
+        _reject_capability_copy("shadow credential-contract authorities cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        _reject_capability_copy("shadow credential-contract authorities cannot be pickled")
+
+    def __getstate__(self):
+        _reject_capability_copy("shadow credential-contract authorities cannot be pickled")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False, eq=False)
+class PrecredentialProviderEntitlementV1:
+    schema_version: int = field(repr=False)
+    provider_id: str = field(repr=False)
+    product_tier: str = field(repr=False)
+    request_sha256: str = field(repr=False)
+    manifest_file_sha256: str = field(repr=False)
+    manifest_canonical_sha256: str = field(repr=False)
+    auth_contract_sha256: str = field(repr=False)
+    required_provider_credential_env_names: tuple[str, ...] = field(repr=False)
+    evaluated_at_utc: datetime = field(repr=False)
+    proof_sha256: str = field(repr=False)
+
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("precredential provider entitlements are privately issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("precredential provider entitlements cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<PrecredentialProviderEntitlementV1 redacted>"
+
+    def __copy__(self):
+        _reject_capability_copy("precredential provider entitlements cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        _reject_capability_copy("precredential provider entitlements cannot be copied")
+
+    def __reduce__(self):
+        _reject_capability_copy("precredential provider entitlements cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        _reject_capability_copy("precredential provider entitlements cannot be pickled")
+
+    def __getstate__(self):
+        _reject_capability_copy("precredential provider entitlements cannot be pickled")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False, eq=False)
+class FrozenShadowCredentialsV1:
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("frozen shadow credentials are privately issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("frozen shadow credentials cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<FrozenShadowCredentialsV1 redacted>"
+
+    def __copy__(self):
+        _reject_capability_copy("frozen shadow credentials cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        _reject_capability_copy("frozen shadow credentials cannot be copied")
+
+    def __reduce__(self):
+        _reject_capability_copy("frozen shadow credentials cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        _reject_capability_copy("frozen shadow credentials cannot be pickled")
+
+    def __getstate__(self):
+        _reject_capability_copy("frozen shadow credentials cannot be pickled")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False, eq=False)
+class FrozenProviderGateEvaluationCredentialViewV1:
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("frozen provider-gate credential views are privately issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("frozen provider-gate credential views cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<FrozenProviderGateEvaluationCredentialViewV1 redacted>"
+
+    def __copy__(self):
+        _reject_capability_copy("frozen credential views cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        _reject_capability_copy("frozen credential views cannot be copied")
+
+    def __reduce__(self):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+    def __getstate__(self):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False, eq=False)
+class FrozenProviderTransportCredentialViewV1:
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("frozen provider-transport credential views are privately issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("frozen provider-transport credential views cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<FrozenProviderTransportCredentialViewV1 redacted>"
+
+    def __copy__(self):
+        _reject_capability_copy("frozen credential views cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        _reject_capability_copy("frozen credential views cannot be copied")
+
+    def __reduce__(self):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+    def __getstate__(self):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False, eq=False)
+class FrozenKalshiTransportCredentialViewV1:
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("frozen Kalshi-transport credential views are privately issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("frozen Kalshi-transport credential views cannot be subclassed")
+
+    def __repr__(self) -> str:
+        return "<FrozenKalshiTransportCredentialViewV1 redacted>"
+
+    def __copy__(self):
+        _reject_capability_copy("frozen credential views cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        _reject_capability_copy("frozen credential views cannot be copied")
+
+    def __reduce__(self):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+    def __getstate__(self):
+        _reject_capability_copy("frozen credential views cannot be pickled")
+
+
+@dataclass(slots=True)
+class _ShadowCredentialContractRecord:
+    adapter: AdapterContract
+    provider_credential_env_names: tuple[str, ...]
+    kalshi_credential_env_names: tuple[str, ...]
+    provider_auth_contract_sha256: str
+    kalshi_auth_contract_sha256: str
+    activation_entry: object
+    entry_digest: str
+    config_identity: object
+    universe_identity: object
+    coordinator_clock_identity: object
+    clock: Callable[[], datetime]
+    owner_pid: int
+    owner_thread: threading.Thread
+    state: str = "fresh"
+
+
+@dataclass(slots=True)
+class _PrecredentialRecord:
+    config: TennisV1Config
+    manifest: ProviderManifest
+    request: ResearchRequest
+    authority: ShadowCredentialContractAuthorityV1
+    authority_record: _ShadowCredentialContractRecord
+    noncredential_decision: QualificationDecision
+    provider_credential_env_names: tuple[str, ...]
+    kalshi_credential_env_names: tuple[str, ...]
+    owner_pid: int
+    owner_thread: threading.Thread
+    state: str = "fresh"
+    credentials_issued: bool = False
+    credential_lifecycle_identity: object | None = None
+
+
+@dataclass(slots=True)
+class _FrozenCredentialRecord:
+    precredential: PrecredentialProviderEntitlementV1
+    activation_entry: object
+    authority: ShadowCredentialContractAuthorityV1
+    provider_credential_env_names: tuple[str, ...]
+    kalshi_credential_env_names: tuple[str, ...]
+    values: MappingProxyType = field(repr=False)
+    views: dict[str, object]
+    lifecycle_identity: object
+    owner_pid: int
+    owner_thread: threading.Thread
+    revoked: bool = False
+
+
+@dataclass(slots=True)
+class _FrozenCredentialViewRecord:
+    view: weakref.ReferenceType[object] = field(repr=False)
+    role: str
+    precredential: PrecredentialProviderEntitlementV1
+    activation_entry: object
+    lifecycle_identity: object
+    names: tuple[str, ...]
+    values: MappingProxyType = field(repr=False)
+    owner_pid: int
+    owner_thread: threading.Thread
+    state: str = "fresh"
+
+
+_SHADOW_CREDENTIAL_LIFECYCLE_LOCK = threading.RLock()
+_SHADOW_CREDENTIAL_CONTRACT_RECORDS: weakref.WeakKeyDictionary[
+    ShadowCredentialContractAuthorityV1, _ShadowCredentialContractRecord
+] = weakref.WeakKeyDictionary()
+_PRECREDENTIAL_RECORDS: weakref.WeakKeyDictionary[
+    PrecredentialProviderEntitlementV1, _PrecredentialRecord
+] = weakref.WeakKeyDictionary()
+_FROZEN_CREDENTIAL_RECORDS: weakref.WeakKeyDictionary[
+    FrozenShadowCredentialsV1, _FrozenCredentialRecord
+] = weakref.WeakKeyDictionary()
+_FROZEN_CREDENTIAL_VIEW_RECORDS: weakref.WeakKeyDictionary[
+    object, _FrozenCredentialViewRecord
+] = weakref.WeakKeyDictionary()
+_FROZEN_PROVIDER_GATES: weakref.WeakSet[ProviderGate] = weakref.WeakSet()
+
+
+def _require_lifecycle_owner(
+    owner_pid: int,
+    owner_thread: threading.Thread,
+    *,
+    error: str,
+) -> None:
+    if os.getpid() != owner_pid or threading.current_thread() is not owner_thread:
+        raise RuntimeError(error)
+
+
+def _validate_shadow_credential_name_tuples(
+    provider_names: object,
+    kalshi_names: object,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    normalized: list[tuple[str, ...]] = []
+    for names in (provider_names, kalshi_names):
+        if type(names) is not tuple or len(names) > 8:
+            raise RuntimeError("shadow_credential_contract_invalid")
+        if any(
+            type(name) is not str
+            or SHADOW_CREDENTIAL_ENV_NAME.fullmatch(name) is None
+            for name in names
+        ):
+            raise RuntimeError("shadow_credential_contract_invalid")
+        if tuple(sorted(names)) != names or len(set(names)) != len(names):
+            raise RuntimeError("shadow_credential_contract_invalid")
+        normalized.append(names)
+    provider, kalshi = normalized
+    if not set(provider).isdisjoint(kalshi):
+        raise RuntimeError("shadow_credential_contract_invalid")
+    return provider, kalshi, tuple(sorted(provider + kalshi))
+
+
+def _read_and_freeze_shadow_credentials(
+    provider_names: tuple[str, ...],
+    kalshi_names: tuple[str, ...],
+    *,
+    reader: Callable[[str], object],
+) -> MappingProxyType:
+    provider, kalshi, names = _validate_shadow_credential_name_tuples(
+        provider_names,
+        kalshi_names,
+    )
+    if not callable(reader):
+        raise RuntimeError("shadow_credentials_invalid")
+    values: dict[str, str] = {}
+    invalid = False
+    for name in names:
+        try:
+            value = reader(name)
+        except KeyError:
+            invalid = True
+            continue
+        if type(value) is not str or not value.strip():
+            invalid = True
+            continue
+        values[name] = value
+    if invalid or len(values) != len(provider) + len(kalshi):
+        raise RuntimeError("shadow_credentials_invalid")
+    return MappingProxyType(dict(values))
+
+
+def _transition_lifecycle_state(
+    state: str,
+    *,
+    operation: str,
+    invalid_error: str,
+    consumed_error: str,
+    revoked_error: str,
+) -> str:
+    if operation == "consume":
+        if state == "fresh":
+            return "consumed"
+        if state == "revoked":
+            raise RuntimeError(revoked_error)
+        raise RuntimeError(consumed_error)
+    if operation == "revoke":
+        if state == "fresh":
+            return "revoked"
+        if state == "revoked":
+            return "revoked"
+        raise RuntimeError(consumed_error)
+    raise RuntimeError(invalid_error)
+
+
+def _transition_view_state(
+    state: str,
+    *,
+    operation: str,
+) -> str:
+    if operation == "transfer":
+        if state == "fresh":
+            return "transferred"
+        if state == "revoked":
+            raise RuntimeError("shadow_frozen_credential_view_revoked")
+        raise RuntimeError("shadow_frozen_credential_view_consumed")
+    if operation == "consume":
+        if state == "transferred":
+            return "consumed"
+        if state == "revoked":
+            raise RuntimeError("shadow_frozen_credential_view_revoked")
+        raise RuntimeError("shadow_frozen_credential_view_consumed")
+    if operation == "close":
+        if state == "transferred":
+            return "closed"
+        if state in ("closed", "revoked"):
+            return state
+        raise RuntimeError("shadow_frozen_credential_view_invalid")
+    if operation == "revoke":
+        if state == "fresh":
+            return "revoked"
+        if state == "revoked":
+            return "revoked"
+        raise RuntimeError("shadow_frozen_credential_view_consumed")
+    raise RuntimeError("shadow_frozen_credential_view_invalid")
+
+
+def _precredential_projection(
+    entitlement: PrecredentialProviderEntitlementV1,
+) -> dict[str, object]:
+    return {
+        "schema_version": entitlement.schema_version,
+        "provider_id": entitlement.provider_id,
+        "product_tier": entitlement.product_tier,
+        "request_sha256": entitlement.request_sha256,
+        "manifest_file_sha256": entitlement.manifest_file_sha256,
+        "manifest_canonical_sha256": entitlement.manifest_canonical_sha256,
+        "auth_contract_sha256": entitlement.auth_contract_sha256,
+        "required_provider_credential_env_names": list(
+            entitlement.required_provider_credential_env_names
+        ),
+        "evaluated_at_utc": format_utc(entitlement.evaluated_at_utc),
+    }
+
+
+def _build_precredential_entitlement(
+    *,
+    config: TennisV1Config,
+    manifest: ProviderManifest,
+    request: ResearchRequest,
+    authority: ShadowCredentialContractAuthorityV1,
+    authority_record: _ShadowCredentialContractRecord,
+    decision: QualificationDecision,
+    evaluated_at_utc: datetime,
+) -> PrecredentialProviderEntitlementV1:
+    entitlement = object.__new__(PrecredentialProviderEntitlementV1)
+    values = {
+        "schema_version": 1,
+        "provider_id": manifest.provider_id,
+        "product_tier": manifest.product_tier,
+        "request_sha256": decision.request_sha256,
+        "manifest_file_sha256": manifest.source_file_sha256,
+        "manifest_canonical_sha256": manifest.canonical_sha256,
+        "auth_contract_sha256": authority_record.provider_auth_contract_sha256,
+        "required_provider_credential_env_names": (
+            authority_record.provider_credential_env_names
+        ),
+        "evaluated_at_utc": evaluated_at_utc,
+        "proof_sha256": "",
+    }
+    for name, value in values.items():
+        object.__setattr__(entitlement, name, value)
+    object.__setattr__(
+        entitlement,
+        "proof_sha256",
+        hashlib.sha256(
+            PRECREDENTIAL_PROOF_HASH_DOMAIN
+            + canonical_json_bytes(_precredential_projection(entitlement))
+        ).hexdigest(),
+    )
+    _PRECREDENTIAL_RECORDS[entitlement] = _PrecredentialRecord(
+        config=config,
+        manifest=manifest,
+        request=request,
+        authority=authority,
+        authority_record=authority_record,
+        noncredential_decision=decision,
+        provider_credential_env_names=authority_record.provider_credential_env_names,
+        kalshi_credential_env_names=authority_record.kalshi_credential_env_names,
+        owner_pid=os.getpid(),
+        owner_thread=threading.current_thread(),
+    )
+    return entitlement
+
+
+def evaluate_provider_precredential(
+    config: TennisV1Config,
+    manifest: ProviderManifest,
+    request: ResearchRequest,
+    *,
+    credential_contract_authority: ShadowCredentialContractAuthorityV1,
+) -> PrecredentialProviderEntitlementV1:
+    if (
+        type(config) is not TennisV1Config
+        or type(manifest) is not ProviderManifest
+        or type(request) is not ResearchRequest
+    ):
+        raise RuntimeError("shadow_precredential_entitlement_invalid")
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        if type(credential_contract_authority) is not ShadowCredentialContractAuthorityV1:
+            raise RuntimeError("shadow_credential_contract_invalid")
+        authority_record = _SHADOW_CREDENTIAL_CONTRACT_RECORDS.get(
+            credential_contract_authority
+        )
+        if (
+            type(authority_record) is not _ShadowCredentialContractRecord
+            or authority_record.state != "fresh"
+            or type(authority_record.adapter) is not AdapterContract
+            or type(authority_record.provider_auth_contract_sha256) is not str
+            or SHA256_HEX.fullmatch(
+                authority_record.provider_auth_contract_sha256
+            )
+            is None
+            or type(authority_record.kalshi_auth_contract_sha256) is not str
+            or SHA256_HEX.fullmatch(
+                authority_record.kalshi_auth_contract_sha256
+            )
+            is None
+            or type(authority_record.entry_digest) is not str
+            or SHA256_HEX.fullmatch(authority_record.entry_digest) is None
+            or authority_record.activation_entry is None
+            or authority_record.coordinator_clock_identity is None
+            or not callable(authority_record.clock)
+            or type(authority_record.owner_pid) is not int
+            or not isinstance(authority_record.owner_thread, threading.Thread)
+        ):
+            raise RuntimeError("shadow_credential_contract_invalid")
+        _require_lifecycle_owner(
+            authority_record.owner_pid,
+            authority_record.owner_thread,
+            error="shadow_credential_contract_invalid",
+        )
+        _validate_shadow_credential_name_tuples(
+            authority_record.provider_credential_env_names,
+            authority_record.kalshi_credential_env_names,
+        )
+        if (
+            authority_record.config_identity is not config
+            or authority_record.adapter.auth.credential_env_names
+            != authority_record.provider_credential_env_names
+            or manifest.credential_env_names
+            != authority_record.provider_credential_env_names
+            or authority_record.adapter.provider_id != manifest.provider_id
+            or authority_record.adapter.product_tier != manifest.product_tier
+            or authority_record.adapter.auth_contract_sha256
+            != authority_record.provider_auth_contract_sha256
+        ):
+            raise RuntimeError("shadow_credential_contract_invalid")
+        authority_record.state = "consuming"
+        try:
+            evaluated_at = authority_record.clock()
+            if not _is_aware_utc(evaluated_at):
+                raise RuntimeError("shadow_precredential_entitlement_invalid")
+            decision = _evaluate_provider_kernel(
+                config,
+                manifest,
+                request,
+                environ=None,
+                as_of=evaluated_at,
+                bound_adapter=authority_record.adapter,
+                include_credentials=False,
+            )
+            if not decision.eligible:
+                raise RuntimeError("shadow_precredential_entitlement_denied")
+            entitlement = _build_precredential_entitlement(
+                config=config,
+                manifest=manifest,
+                request=request,
+                authority=credential_contract_authority,
+                authority_record=authority_record,
+                decision=decision,
+                evaluated_at_utc=evaluated_at,
+            )
+        except Exception as error:
+            authority_record.state = "consumed_failed"
+            if type(error) is RuntimeError and error.args in (
+                ("shadow_precredential_entitlement_invalid",),
+                ("shadow_precredential_entitlement_denied",),
+                ("shadow_credential_contract_invalid",),
+            ):
+                raise
+            raise RuntimeError("shadow_precredential_entitlement_invalid") from None
+        authority_record.state = "consumed"
+        return entitlement
+
+
+def _require_precredential_record(
+    value: object,
+) -> _PrecredentialRecord:
+    if type(value) is not PrecredentialProviderEntitlementV1:
+        raise RuntimeError("shadow_precredential_entitlement_invalid")
+    record = _PRECREDENTIAL_RECORDS.get(value)
+    if (
+        type(record) is not _PrecredentialRecord
+    ):
+        raise RuntimeError("shadow_precredential_entitlement_invalid")
+    try:
+        public_fields_valid = (
+            type(value.schema_version) is int
+            and value.schema_version == 1
+            and type(value.provider_id) is str
+            and value.provider_id == record.manifest.provider_id
+            and type(value.product_tier) is str
+            and value.product_tier == record.manifest.product_tier
+            and type(value.request_sha256) is str
+            and value.request_sha256 == record.noncredential_decision.request_sha256
+            and type(value.manifest_file_sha256) is str
+            and value.manifest_file_sha256 == record.manifest.source_file_sha256
+            and type(value.manifest_canonical_sha256) is str
+            and value.manifest_canonical_sha256 == record.manifest.canonical_sha256
+            and type(value.auth_contract_sha256) is str
+            and value.auth_contract_sha256
+            == record.authority_record.provider_auth_contract_sha256
+            and type(value.required_provider_credential_env_names) is tuple
+            and value.required_provider_credential_env_names
+            == record.provider_credential_env_names
+            and type(value.evaluated_at_utc) is datetime
+            and _is_aware_utc(value.evaluated_at_utc)
+            and type(value.proof_sha256) is str
+        )
+        if public_fields_valid:
+            expected_proof = hashlib.sha256(
+                PRECREDENTIAL_PROOF_HASH_DOMAIN
+                + canonical_json_bytes(_precredential_projection(value))
+            ).hexdigest()
+            public_fields_valid = _safe_sha256_equal(
+                value.proof_sha256,
+                expected_proof,
+            )
+    except Exception:
+        public_fields_valid = False
+    if not public_fields_valid:
+        raise RuntimeError("shadow_precredential_entitlement_invalid")
+    _require_lifecycle_owner(
+        record.owner_pid,
+        record.owner_thread,
+        error="shadow_precredential_entitlement_invalid",
+    )
+    return record
+
+
+def read_frozen_shadow_credentials_v1(
+    precredential: PrecredentialProviderEntitlementV1,
+) -> FrozenShadowCredentialsV1:
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        record = _require_precredential_record(precredential)
+        if record.state == "revoked":
+            raise RuntimeError("shadow_precredential_entitlement_revoked")
+        if record.state != "fresh" or record.credentials_issued:
+            raise RuntimeError("shadow_precredential_entitlement_consumed")
+        try:
+            values = _read_and_freeze_shadow_credentials(
+                record.provider_credential_env_names,
+                record.kalshi_credential_env_names,
+                reader=lambda name: os.environ[name],
+            )
+        except Exception as error:
+            record.state = "revoked"
+            if type(error) is RuntimeError and error.args in (
+                ("shadow_credential_contract_invalid",),
+                ("shadow_credentials_invalid",),
+            ):
+                raise
+            raise RuntimeError("shadow_credentials_invalid") from None
+        credentials = object.__new__(FrozenShadowCredentialsV1)
+        gate_view = object.__new__(FrozenProviderGateEvaluationCredentialViewV1)
+        provider_view = object.__new__(FrozenProviderTransportCredentialViewV1)
+        kalshi_view = object.__new__(FrozenKalshiTransportCredentialViewV1)
+        views = {
+            "gate": gate_view,
+            "provider": provider_view,
+            "kalshi": kalshi_view,
+        }
+        lifecycle_identity = object()
+        record.credential_lifecycle_identity = lifecycle_identity
+        frozen_record = _FrozenCredentialRecord(
+            precredential=precredential,
+            activation_entry=record.authority_record.activation_entry,
+            authority=record.authority,
+            provider_credential_env_names=record.provider_credential_env_names,
+            kalshi_credential_env_names=record.kalshi_credential_env_names,
+            values=values,
+            views=views,
+            lifecycle_identity=lifecycle_identity,
+            owner_pid=os.getpid(),
+            owner_thread=threading.current_thread(),
+        )
+        _FROZEN_CREDENTIAL_RECORDS[credentials] = frozen_record
+        for role, view in views.items():
+            names = (
+                record.kalshi_credential_env_names
+                if role == "kalshi"
+                else record.provider_credential_env_names
+            )
+            _FROZEN_CREDENTIAL_VIEW_RECORDS[view] = _FrozenCredentialViewRecord(
+                view=weakref.ref(view),
+                role=role,
+                precredential=precredential,
+                activation_entry=record.authority_record.activation_entry,
+                lifecycle_identity=lifecycle_identity,
+                names=names,
+                values=MappingProxyType({name: values[name] for name in names}),
+                owner_pid=os.getpid(),
+                owner_thread=threading.current_thread(),
+            )
+        record.credentials_issued = True
+        return credentials
+
+
+def _require_frozen_record(value: object) -> _FrozenCredentialRecord:
+    if type(value) is not FrozenShadowCredentialsV1:
+        raise RuntimeError("shadow_credentials_invalid")
+    record = _FROZEN_CREDENTIAL_RECORDS.get(value)
+    if type(record) is not _FrozenCredentialRecord:
+        raise RuntimeError("shadow_credentials_invalid")
+    _require_lifecycle_owner(
+        record.owner_pid,
+        record.owner_thread,
+        error="shadow_credentials_invalid",
+    )
+    return record
+
+
+def _claim_frozen_credential_view(
+    credentials: FrozenShadowCredentialsV1,
+    role: str,
+) -> object:
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        record = _require_frozen_record(credentials)
+        if record.revoked:
+            raise RuntimeError("shadow_credentials_revoked")
+        view = record.views[role]
+        view_record = _FROZEN_CREDENTIAL_VIEW_RECORDS.get(view)
+        if type(view_record) is not _FrozenCredentialViewRecord:
+            raise RuntimeError("shadow_frozen_credential_view_invalid")
+        view_record.state = _transition_view_state(
+            view_record.state,
+            operation="transfer",
+        )
+        return view
+
+
+def claim_frozen_provider_gate_evaluation_credential_view_v1(
+    credentials: FrozenShadowCredentialsV1,
+) -> FrozenProviderGateEvaluationCredentialViewV1:
+    view = _claim_frozen_credential_view(credentials, "gate")
+    assert type(view) is FrozenProviderGateEvaluationCredentialViewV1
+    return view
+
+
+def claim_frozen_provider_transport_credential_view_v1(
+    credentials: FrozenShadowCredentialsV1,
+) -> FrozenProviderTransportCredentialViewV1:
+    view = _claim_frozen_credential_view(credentials, "provider")
+    assert type(view) is FrozenProviderTransportCredentialViewV1
+    return view
+
+
+def claim_frozen_kalshi_transport_credential_view_v1(
+    credentials: FrozenShadowCredentialsV1,
+) -> FrozenKalshiTransportCredentialViewV1:
+    view = _claim_frozen_credential_view(credentials, "kalshi")
+    assert type(view) is FrozenKalshiTransportCredentialViewV1
+    return view
+
+
+def _require_frozen_view_record(
+    value: object,
+    *,
+    role: str,
+) -> _FrozenCredentialViewRecord:
+    expected_type = {
+        "gate": FrozenProviderGateEvaluationCredentialViewV1,
+        "provider": FrozenProviderTransportCredentialViewV1,
+        "kalshi": FrozenKalshiTransportCredentialViewV1,
+    }[role]
+    if type(value) is not expected_type:
+        if type(value) in (
+            FrozenProviderGateEvaluationCredentialViewV1,
+            FrozenProviderTransportCredentialViewV1,
+            FrozenKalshiTransportCredentialViewV1,
+        ):
+            raise RuntimeError("shadow_frozen_credential_view_role_mismatch")
+        raise RuntimeError("shadow_frozen_credential_view_invalid")
+    record = _FROZEN_CREDENTIAL_VIEW_RECORDS.get(value)
+    if (
+        type(record) is not _FrozenCredentialViewRecord
+        or type(record.view) is not weakref.ReferenceType
+        or record.view() is not value
+        or record.role != role
+    ):
+        raise RuntimeError("shadow_frozen_credential_view_invalid")
+    _require_lifecycle_owner(
+        record.owner_pid,
+        record.owner_thread,
+        error="shadow_frozen_credential_view_invalid",
+    )
+    return record
+
+
+def _consume_frozen_credential_view_v1(value: object, *, role: str) -> MappingProxyType:
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        record = _require_frozen_view_record(value, role=role)
+        record.state = _transition_view_state(record.state, operation="consume")
+        return record.values
+
+
+def _close_transferred_frozen_credential_view_v1(value: object, *, role: str) -> None:
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        record = _require_frozen_view_record(value, role=role)
+        record.state = _transition_view_state(record.state, operation="close")
+
+
+def revoke_provider_precredential_v1(
+    precredential: PrecredentialProviderEntitlementV1,
+) -> None:
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        record = _require_precredential_record(precredential)
+        record.state = _transition_lifecycle_state(
+            record.state,
+            operation="revoke",
+            invalid_error="shadow_precredential_entitlement_invalid",
+            consumed_error="shadow_precredential_entitlement_consumed",
+            revoked_error="shadow_precredential_entitlement_revoked",
+        )
+
+
+def revoke_frozen_shadow_credentials_v1(
+    credentials: FrozenShadowCredentialsV1,
+) -> None:
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        record = _require_frozen_record(credentials)
+        if record.revoked:
+            return
+        states = tuple(
+            _FROZEN_CREDENTIAL_VIEW_RECORDS[view].state
+            for view in record.views.values()
+        )
+        if states and all(state in ("consumed", "closed") for state in states):
+            raise RuntimeError("shadow_credentials_consumed")
+        terminal_count = 0
+        for view in record.views.values():
+            view_record = _FROZEN_CREDENTIAL_VIEW_RECORDS.get(view)
+            if type(view_record) is not _FrozenCredentialViewRecord:
+                raise RuntimeError("shadow_credentials_invalid")
+            if view_record.state == "fresh":
+                view_record.state = _transition_view_state(
+                    view_record.state,
+                    operation="revoke",
+                )
+            if view_record.state in ("consumed", "closed", "revoked"):
+                terminal_count += 1
+        if terminal_count == len(record.views):
+            record.revoked = True
+            return
+        record.revoked = True
+
+
 class ProviderGate:
     def __init__(
         self,
@@ -2305,6 +3217,8 @@ class ProviderGate:
         self._request = request
         self._environ = environ
         self._clock = clock
+        self._frozen_shadow_credentials = False
+        self._bound_shadow_adapter = None
         self._initial_decision = _evaluate_provider_as_of(
             config,
             manifest,
@@ -2365,13 +3279,29 @@ class ProviderGate:
                 QualificationReason.QUALIFICATION_EVIDENCE_MISMATCH,
                 "provider operation denied: qualification_evidence_mismatch",
             )
-        snapshot = _snapshot_environment(self._environ)
-        current = _evaluate_provider_as_of(
-            self._config,
-            self._manifest,
-            self._request,
-            environ=snapshot,
-            as_of=now,
+        snapshot = (
+            dict(self._environ)
+            if self._frozen_shadow_credentials
+            else _snapshot_environment(self._environ)
+        )
+        current = (
+            _evaluate_provider_kernel(
+                self._config,
+                self._manifest,
+                self._request,
+                environ=snapshot,
+                as_of=now,
+                bound_adapter=self._bound_shadow_adapter,
+                include_credentials=True,
+            )
+            if self._frozen_shadow_credentials
+            else _evaluate_provider_as_of(
+                self._config,
+                self._manifest,
+                self._request,
+                environ=snapshot,
+                as_of=now,
+            )
         )
         if current.eligible and not _safe_sha256_equal(
             current.provider_request_binding_sha256,
@@ -2504,3 +3434,774 @@ class ProviderGate:
                 "provider operation denied: access_expired",
             )
         return microseconds / 1_000_000
+
+
+def _build_frozen_provider_gate_v1(
+    record: _PrecredentialRecord,
+    *,
+    decision: QualificationDecision,
+    frozen_provider_values: MappingProxyType,
+    sampled_at: datetime,
+) -> ProviderGate:
+    gate = object.__new__(ProviderGate)
+    gate._config = record.config
+    gate._manifest = record.manifest
+    gate._request = record.request
+    gate._environ = MappingProxyType(dict(frozen_provider_values))
+    gate._clock = record.authority_record.clock
+    gate._frozen_shadow_credentials = True
+    gate._bound_shadow_adapter = record.authority_record.adapter
+    gate._initial_decision = decision
+    gate._latest_now = sampled_at
+    _FROZEN_PROVIDER_GATES.add(gate)
+    return gate
+
+
+def finalize_provider_entitlement_v1(
+    precredential: PrecredentialProviderEntitlementV1,
+    gate_credentials: FrozenProviderGateEvaluationCredentialViewV1,
+) -> ProviderGate:
+    with _SHADOW_CREDENTIAL_LIFECYCLE_LOCK:
+        record = _require_precredential_record(precredential)
+        if record.state == "revoked":
+            raise RuntimeError("shadow_precredential_entitlement_revoked")
+        if record.state != "fresh":
+            raise RuntimeError("shadow_precredential_entitlement_consumed")
+        view_record = _require_frozen_view_record(gate_credentials, role="gate")
+        if (
+            view_record.precredential is not precredential
+            or view_record.activation_entry
+            is not record.authority_record.activation_entry
+            or view_record.lifecycle_identity
+            is not record.credential_lifecycle_identity
+        ):
+            raise RuntimeError("shadow_credentials_invalid")
+        if view_record.state == "revoked":
+            raise RuntimeError("shadow_frozen_credential_view_revoked")
+        if view_record.state != "transferred":
+            raise RuntimeError("shadow_frozen_credential_view_consumed")
+        provider_values = MappingProxyType(
+            {name: view_record.values[name] for name in view_record.names}
+        )
+        record.state = "consuming"
+        view_record.state = _transition_view_state(
+            view_record.state,
+            operation="consume",
+        )
+        try:
+            sampled_at = record.authority_record.clock()
+            if (
+                not _is_aware_utc(sampled_at)
+                or sampled_at < precredential.evaluated_at_utc
+            ):
+                raise RuntimeError("shadow_precredential_entitlement_invalid")
+            decision = _evaluate_provider_kernel(
+                record.config,
+                record.manifest,
+                record.request,
+                environ=dict(provider_values),
+                as_of=sampled_at,
+                bound_adapter=record.authority_record.adapter,
+                include_credentials=True,
+            )
+            if not decision.eligible:
+                raise RuntimeError("shadow_precredential_entitlement_denied")
+            gate = _build_frozen_provider_gate_v1(
+                record,
+                decision=decision,
+                frozen_provider_values=provider_values,
+                sampled_at=sampled_at,
+            )
+        except Exception as error:
+            record.state = "consumed"
+            if type(error) is RuntimeError and error.args in (
+                ("shadow_precredential_entitlement_invalid",),
+                ("shadow_precredential_entitlement_denied",),
+            ):
+                raise
+            raise RuntimeError("shadow_precredential_entitlement_invalid") from None
+        record.state = "consumed"
+        return gate
+
+
+class SealedCredentialOracleCaseV1(str, Enum):
+    NONCREDENTIAL_ALLOW = "noncredential_allow"
+    NONCREDENTIAL_DENY = "noncredential_deny"
+    EXACT_SENTINEL_UNION_SUCCESS = "exact_sentinel_union_success"
+    PROVIDER_MISSING = "provider_missing"
+    PROVIDER_EMPTY = "provider_empty"
+    PROVIDER_WHITESPACE = "provider_whitespace"
+    KALSHI_MISSING = "kalshi_missing"
+    KALSHI_EMPTY = "kalshi_empty"
+    KALSHI_WHITESPACE = "kalshi_whitespace"
+    POST_FREEZE_AMBIENT_DRIFT = "post_freeze_ambient_drift"
+    PRECREDENTIAL_CONSUME = "precredential_consume"
+    PRECREDENTIAL_REVOKE_REPEAT = "precredential_revoke_repeat"
+    GATE_POLL_WITHOUT_REREAD = "gate_poll_without_reread"
+    VIEWS_GATE_PROVIDER_KALSHI = "views_gate_provider_kalshi"
+    VIEWS_GATE_KALSHI_PROVIDER = "views_gate_kalshi_provider"
+    VIEWS_PROVIDER_GATE_KALSHI = "views_provider_gate_kalshi"
+    VIEWS_PROVIDER_KALSHI_GATE = "views_provider_kalshi_gate"
+    VIEWS_KALSHI_GATE_PROVIDER = "views_kalshi_gate_provider"
+    VIEWS_KALSHI_PROVIDER_GATE = "views_kalshi_provider_gate"
+    GATE_ONLY_THEN_TRANSPORTS = "gate_only_then_transports"
+    PARTIAL_TRANSFER_THEN_REVOKE = "partial_transfer_then_revoke"
+    VIEW_REPEAT_REJECTED = "view_repeat_rejected"
+    VIEW_CROSS_ROLE_REJECTED = "view_cross_role_rejected"
+    VIEW_REBUILT_REJECTED = "view_rebuilt_rejected"
+    VIEW_FOREIGN_REJECTED = "view_foreign_rejected"
+    WRONG_OWNER_REJECTED = "wrong_owner_rejected"
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False, eq=False)
+class SealedCredentialLifecycleOracleAuthorityV1:
+    def __init__(self, *_: object, **__: object) -> None:
+        raise TypeError("sealed credential lifecycle authorities are privately issued")
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError(
+            "sealed credential lifecycle authorities cannot be subclassed"
+        )
+
+    def __repr__(self) -> str:
+        return "<SealedCredentialLifecycleOracleAuthorityV1 redacted>"
+
+    def __copy__(self):
+        _reject_capability_copy("sealed credential authorities cannot be copied")
+
+    def __deepcopy__(self, _: object):
+        _reject_capability_copy("sealed credential authorities cannot be copied")
+
+    def __reduce__(self):
+        _reject_capability_copy("sealed credential authorities cannot be pickled")
+
+    def __reduce_ex__(self, _: int):
+        _reject_capability_copy("sealed credential authorities cannot be pickled")
+
+    def __getstate__(self):
+        _reject_capability_copy("sealed credential authorities cannot be pickled")
+
+
+@dataclass(frozen=True, slots=True)
+class SealedCredentialLifecycleOracleResultV1:
+    schema_version: int
+    case: SealedCredentialOracleCaseV1
+    fixture_sha256: str
+    read_count_by_name: tuple[tuple[str, int], ...]
+    unexpected_read_count: int
+    post_freeze_reread_count: int
+    noncredential_decision: str
+    credential_decision: str
+    gate_decision: str
+    drift_ignored: bool
+    lifecycle_trace_sha256: str
+    all_oracle_capabilities_terminal: bool
+    production_authority_issuer_absent: bool
+    result_sha256: str
+
+
+@dataclass(slots=True)
+class _SealedCredentialOracleAuthorityRecord:
+    case: SealedCredentialOracleCaseV1
+    fixture_sha256: str
+    owner_pid: int
+    owner_thread: threading.Thread
+    state: str = "fresh"
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _SealedCredentialOracleViewV1:
+    role: str
+
+
+@dataclass(slots=True)
+class _SealedCredentialOracleViewRecord:
+    view: _SealedCredentialOracleViewV1
+    role: str
+    owner_pid: int
+    owner_thread: threading.Thread
+    state: str = "fresh"
+
+
+_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME = (
+    "INCI_TEST_PROVIDER_CREDENTIAL_SENTINEL"
+)
+_SEALED_KALSHI_CREDENTIAL_SENTINEL_NAME = (
+    "INCI_TEST_KALSHI_CREDENTIAL_SENTINEL"
+)
+_SEALED_PROVIDER_CREDENTIAL_SENTINEL_VALUE = (
+    "VISIBLE_NONSECRET_PROVIDER_TEST_VALUE"
+)
+_SEALED_KALSHI_CREDENTIAL_SENTINEL_VALUE = (
+    "VISIBLE_NONSECRET_KALSHI_TEST_VALUE"
+)
+_SEALED_CREDENTIAL_ORACLE_AUTHORITIES: weakref.WeakKeyDictionary[
+    SealedCredentialLifecycleOracleAuthorityV1,
+    _SealedCredentialOracleAuthorityRecord,
+] = weakref.WeakKeyDictionary()
+_SEALED_CREDENTIAL_ORACLE_LOCK = threading.RLock()
+
+
+def _sealed_credential_fixture_sha256() -> str:
+    return hashlib.sha256(
+        SEALED_CREDENTIAL_FIXTURE_HASH_DOMAIN
+        + canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "provider_credential_env_names": [
+                    _SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME
+                ],
+                "kalshi_credential_env_names": [
+                    _SEALED_KALSHI_CREDENTIAL_SENTINEL_NAME
+                ],
+                "cases": [case.value for case in SealedCredentialOracleCaseV1],
+            }
+        )
+    ).hexdigest()
+
+
+def _issue_sealed_credential_lifecycle_oracle_authority_v1(
+    case: SealedCredentialOracleCaseV1,
+) -> SealedCredentialLifecycleOracleAuthorityV1:
+    if type(case) is not SealedCredentialOracleCaseV1:
+        raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+    with _SEALED_CREDENTIAL_ORACLE_LOCK:
+        authority = object.__new__(SealedCredentialLifecycleOracleAuthorityV1)
+        _SEALED_CREDENTIAL_ORACLE_AUTHORITIES[authority] = (
+            _SealedCredentialOracleAuthorityRecord(
+                case=case,
+                fixture_sha256=_sealed_credential_fixture_sha256(),
+                owner_pid=os.getpid(),
+                owner_thread=threading.current_thread(),
+            )
+        )
+        return authority
+
+
+def _oracle_require_view(
+    view: object,
+    *,
+    role: str,
+    records: dict[_SealedCredentialOracleViewV1, _SealedCredentialOracleViewRecord],
+) -> _SealedCredentialOracleViewRecord:
+    if type(view) is not _SealedCredentialOracleViewV1:
+        raise RuntimeError("shadow_frozen_credential_view_invalid")
+    record = records.get(view)
+    if type(record) is not _SealedCredentialOracleViewRecord or record.view is not view:
+        raise RuntimeError("shadow_frozen_credential_view_invalid")
+    if record.role != role:
+        raise RuntimeError("shadow_frozen_credential_view_role_mismatch")
+    _require_lifecycle_owner(
+        record.owner_pid,
+        record.owner_thread,
+        error="shadow_credential_lifecycle_oracle_invalid",
+    )
+    return record
+
+
+def _oracle_transfer_and_consume_view(
+    role: str,
+    *,
+    views: dict[str, _SealedCredentialOracleViewV1],
+    records: dict[_SealedCredentialOracleViewV1, _SealedCredentialOracleViewRecord],
+    trace: list[str],
+) -> None:
+    record = _oracle_require_view(views[role], role=role, records=records)
+    record.state = _transition_view_state(record.state, operation="transfer")
+    trace.append(f"{role}:transferred")
+    record.state = _transition_view_state(record.state, operation="consume")
+    trace.append(f"{role}:consumed")
+
+
+def _oracle_revoke_fresh_views(
+    records: dict[_SealedCredentialOracleViewV1, _SealedCredentialOracleViewRecord],
+    trace: list[str],
+) -> None:
+    for record in records.values():
+        if record.state == "fresh":
+            record.state = _transition_view_state(record.state, operation="revoke")
+            trace.append(f"{record.role}:revoked")
+
+
+def _oracle_result_projection(
+    *,
+    case: SealedCredentialOracleCaseV1,
+    fixture_sha256: str,
+    read_count_by_name: tuple[tuple[str, int], ...],
+    unexpected_read_count: int,
+    post_freeze_reread_count: int,
+    noncredential_decision: str,
+    credential_decision: str,
+    gate_decision: str,
+    drift_ignored: bool,
+    lifecycle_trace_sha256: str,
+    all_oracle_capabilities_terminal: bool,
+    production_authority_issuer_absent: bool,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "case": case.value,
+        "fixture_sha256": fixture_sha256,
+        "read_count_by_name": [list(item) for item in read_count_by_name],
+        "unexpected_read_count": unexpected_read_count,
+        "post_freeze_reread_count": post_freeze_reread_count,
+        "noncredential_decision": noncredential_decision,
+        "credential_decision": credential_decision,
+        "gate_decision": gate_decision,
+        "drift_ignored": drift_ignored,
+        "lifecycle_trace_sha256": lifecycle_trace_sha256,
+        "all_oracle_capabilities_terminal": all_oracle_capabilities_terminal,
+        "production_authority_issuer_absent": production_authority_issuer_absent,
+    }
+
+
+def _run_sealed_credential_lifecycle_oracle_v1(
+    authority: SealedCredentialLifecycleOracleAuthorityV1,
+) -> SealedCredentialLifecycleOracleResultV1:
+    with _SEALED_CREDENTIAL_ORACLE_LOCK:
+        if type(authority) is not SealedCredentialLifecycleOracleAuthorityV1:
+            raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+        authority_record = _SEALED_CREDENTIAL_ORACLE_AUTHORITIES.get(authority)
+        if (
+            type(authority_record) is not _SealedCredentialOracleAuthorityRecord
+        ):
+            raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+        if authority_record.state != "fresh":
+            raise RuntimeError("shadow_credential_lifecycle_oracle_consumed")
+        if (
+            os.getpid() != authority_record.owner_pid
+            or threading.current_thread() is not authority_record.owner_thread
+        ):
+            raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+        authority_record.state = "consumed"
+
+    case = authority_record.case
+    trace: list[str] = [f"case:{case.value}", "authority:consumed"]
+    counts = {
+        _SEALED_KALSHI_CREDENTIAL_SENTINEL_NAME: 0,
+        _SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME: 0,
+    }
+    unexpected_read_count = 0
+    freeze_read_counts: dict[str, int] | None = None
+    noncredential_reasons: set[QualificationReason] = set()
+    if case is SealedCredentialOracleCaseV1.NONCREDENTIAL_DENY:
+        noncredential_reasons.add(QualificationReason.QUOTA_INADEQUATE)
+    noncredential_eligible, _ = _noncredential_decision_kernel(
+        noncredential_reasons
+    )
+    noncredential_decision = "eligible" if noncredential_eligible else "denied"
+    credential_decision = "not_exercised"
+    gate_decision = "not_issued"
+    drift_ignored = False
+    precredential_state = "fresh" if noncredential_decision == "eligible" else "denied"
+    views: dict[str, _SealedCredentialOracleViewV1] = {}
+    view_records: dict[
+        _SealedCredentialOracleViewV1, _SealedCredentialOracleViewRecord
+    ] = {}
+
+    def guarded_reader(name: str) -> object:
+        nonlocal unexpected_read_count
+        if name not in counts:
+            unexpected_read_count += 1
+            raise RuntimeError("shadow_credential_oracle_escape")
+        counts[name] += 1
+        return os.environ[name]
+
+    no_credential_cases = {
+        SealedCredentialOracleCaseV1.NONCREDENTIAL_ALLOW,
+        SealedCredentialOracleCaseV1.NONCREDENTIAL_DENY,
+        SealedCredentialOracleCaseV1.PRECREDENTIAL_REVOKE_REPEAT,
+    }
+    invalid_credential_cases = {
+        SealedCredentialOracleCaseV1.PROVIDER_MISSING,
+        SealedCredentialOracleCaseV1.PROVIDER_EMPTY,
+        SealedCredentialOracleCaseV1.PROVIDER_WHITESPACE,
+        SealedCredentialOracleCaseV1.KALSHI_MISSING,
+        SealedCredentialOracleCaseV1.KALSHI_EMPTY,
+        SealedCredentialOracleCaseV1.KALSHI_WHITESPACE,
+    }
+    frozen_values: MappingProxyType | None = None
+    if case is SealedCredentialOracleCaseV1.PRECREDENTIAL_REVOKE_REPEAT:
+        precredential_state = _transition_lifecycle_state(
+            precredential_state,
+            operation="revoke",
+            invalid_error="shadow_precredential_entitlement_invalid",
+            consumed_error="shadow_precredential_entitlement_consumed",
+            revoked_error="shadow_precredential_entitlement_revoked",
+        )
+        trace.append("precredential:revoked")
+        precredential_state = _transition_lifecycle_state(
+            precredential_state,
+            operation="revoke",
+            invalid_error="shadow_precredential_entitlement_invalid",
+            consumed_error="shadow_precredential_entitlement_consumed",
+            revoked_error="shadow_precredential_entitlement_revoked",
+        )
+        trace.append("precredential:repeat-revoke-idempotent")
+    elif case not in no_credential_cases:
+        try:
+            frozen_values = _read_and_freeze_shadow_credentials(
+                (_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME,),
+                (_SEALED_KALSHI_CREDENTIAL_SENTINEL_NAME,),
+                reader=guarded_reader,
+            )
+        except RuntimeError as error:
+            if case not in invalid_credential_cases or error.args != (
+                "shadow_credentials_invalid",
+            ):
+                raise RuntimeError("shadow_credential_lifecycle_oracle_invalid") from None
+            credential_decision = "credential_missing"
+            precredential_state = "revoked"
+            trace.extend(("credentials:invalid", "precredential:revoked"))
+        else:
+            if case in invalid_credential_cases:
+                raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+            if (
+                frozen_values[_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME]
+                != _SEALED_PROVIDER_CREDENTIAL_SENTINEL_VALUE
+                or frozen_values[_SEALED_KALSHI_CREDENTIAL_SENTINEL_NAME]
+                != _SEALED_KALSHI_CREDENTIAL_SENTINEL_VALUE
+            ):
+                raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+            credential_reasons = _credential_presence_reasons(
+                (_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME,),
+                frozen_values,
+            )
+            credential_decision = (
+                "eligible"
+                if _qualification_eligible_from_reasons(credential_reasons)
+                else "credential_missing"
+            )
+            freeze_read_counts = dict(counts)
+            trace.append("credentials:frozen")
+            for role in ("gate", "provider", "kalshi"):
+                view = _SealedCredentialOracleViewV1(role=role)
+                views[role] = view
+                view_records[view] = _SealedCredentialOracleViewRecord(
+                    view=view,
+                    role=role,
+                    owner_pid=os.getpid(),
+                    owner_thread=threading.current_thread(),
+                )
+
+    if frozen_values is not None:
+        view_orders = {
+            SealedCredentialOracleCaseV1.VIEWS_GATE_PROVIDER_KALSHI: (
+                "gate",
+                "provider",
+                "kalshi",
+            ),
+            SealedCredentialOracleCaseV1.VIEWS_GATE_KALSHI_PROVIDER: (
+                "gate",
+                "kalshi",
+                "provider",
+            ),
+            SealedCredentialOracleCaseV1.VIEWS_PROVIDER_GATE_KALSHI: (
+                "provider",
+                "gate",
+                "kalshi",
+            ),
+            SealedCredentialOracleCaseV1.VIEWS_PROVIDER_KALSHI_GATE: (
+                "provider",
+                "kalshi",
+                "gate",
+            ),
+            SealedCredentialOracleCaseV1.VIEWS_KALSHI_GATE_PROVIDER: (
+                "kalshi",
+                "gate",
+                "provider",
+            ),
+            SealedCredentialOracleCaseV1.VIEWS_KALSHI_PROVIDER_GATE: (
+                "kalshi",
+                "provider",
+                "gate",
+            ),
+            SealedCredentialOracleCaseV1.EXACT_SENTINEL_UNION_SUCCESS: (
+                "gate",
+                "provider",
+                "kalshi",
+            ),
+        }
+        if case in view_orders:
+            for role in view_orders[case]:
+                _oracle_transfer_and_consume_view(
+                    role,
+                    views=views,
+                    records=view_records,
+                    trace=trace,
+                )
+            precredential_state = "consumed"
+            gate_decision = "eligible"
+        elif case is SealedCredentialOracleCaseV1.PRECREDENTIAL_CONSUME:
+            _oracle_transfer_and_consume_view(
+                "gate", views=views, records=view_records, trace=trace
+            )
+            precredential_state = "consumed"
+            gate_decision = "eligible"
+            _oracle_revoke_fresh_views(view_records, trace)
+        elif case in (
+            SealedCredentialOracleCaseV1.POST_FREEZE_AMBIENT_DRIFT,
+            SealedCredentialOracleCaseV1.GATE_POLL_WITHOUT_REREAD,
+        ):
+            original_provider_value = frozen_values[
+                _SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME
+            ]
+            try:
+                os.environ[_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME] = (
+                    "DRIFTED_TEST_VALUE"
+                )
+                gate_reasons = _credential_presence_reasons(
+                    (_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME,),
+                    frozen_values,
+                )
+                gate_decision = (
+                    "eligible"
+                    if _qualification_eligible_from_reasons(gate_reasons)
+                    else "credential_missing"
+                )
+                if case is SealedCredentialOracleCaseV1.GATE_POLL_WITHOUT_REREAD:
+                    second_poll = _credential_presence_reasons(
+                        (_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME,),
+                        frozen_values,
+                    )
+                    if second_poll != gate_reasons:
+                        raise RuntimeError(
+                            "shadow_credential_lifecycle_oracle_invalid"
+                        )
+                    trace.append("gate:polled-twice-from-frozen-copy")
+            finally:
+                os.environ[_SEALED_PROVIDER_CREDENTIAL_SENTINEL_NAME] = (
+                    original_provider_value
+                )
+            drift_ignored = gate_decision == "eligible"
+            _oracle_transfer_and_consume_view(
+                "gate", views=views, records=view_records, trace=trace
+            )
+            precredential_state = "consumed"
+            _oracle_revoke_fresh_views(view_records, trace)
+        elif case is SealedCredentialOracleCaseV1.GATE_ONLY_THEN_TRANSPORTS:
+            _oracle_transfer_and_consume_view(
+                "gate", views=views, records=view_records, trace=trace
+            )
+            precredential_state = "consumed"
+            gate_decision = "eligible"
+            if any(view_records[views[role]].state != "fresh" for role in ("provider", "kalshi")):
+                raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+            trace.append("transports:retained-after-gate")
+            for role in ("provider", "kalshi"):
+                _oracle_transfer_and_consume_view(
+                    role, views=views, records=view_records, trace=trace
+                )
+        elif case is SealedCredentialOracleCaseV1.PARTIAL_TRANSFER_THEN_REVOKE:
+            partial_orders = (
+                ("gate",),
+                ("provider",),
+                ("kalshi",),
+                ("gate", "provider"),
+                ("gate", "kalshi"),
+                ("provider", "gate"),
+                ("provider", "kalshi"),
+                ("kalshi", "gate"),
+                ("kalshi", "provider"),
+            )
+            for index, order in enumerate(partial_orders):
+                local_views: dict[str, _SealedCredentialOracleViewV1] = {}
+                local_records: dict[
+                    _SealedCredentialOracleViewV1,
+                    _SealedCredentialOracleViewRecord,
+                ] = {}
+                for role in ("gate", "provider", "kalshi"):
+                    local_view = _SealedCredentialOracleViewV1(role=role)
+                    local_views[role] = local_view
+                    local_records[local_view] = _SealedCredentialOracleViewRecord(
+                        view=local_view,
+                        role=role,
+                        owner_pid=os.getpid(),
+                        owner_thread=threading.current_thread(),
+                    )
+                for role in order:
+                    local_record = _oracle_require_view(
+                        local_views[role],
+                        role=role,
+                        records=local_records,
+                    )
+                    local_record.state = _transition_view_state(
+                        local_record.state,
+                        operation="transfer",
+                    )
+                    trace.append(f"partial-{index}:{role}:transferred")
+                _oracle_revoke_fresh_views(local_records, trace)
+                for local_record in local_records.values():
+                    if local_record.state == "revoked":
+                        local_record.state = _transition_view_state(
+                            local_record.state,
+                            operation="revoke",
+                        )
+                        trace.append(
+                            f"partial-{index}:{local_record.role}:repeat-revoke-idempotent"
+                        )
+                for role in reversed(order):
+                    local_record = local_records[local_views[role]]
+                    local_record.state = _transition_view_state(
+                        local_record.state,
+                        operation="close",
+                    )
+                    trace.append(f"partial-{index}:{role}:closed-reverse")
+                if any(
+                    item.state not in ("closed", "revoked")
+                    for item in local_records.values()
+                ):
+                    raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+            _oracle_revoke_fresh_views(view_records, trace)
+            precredential_state = "revoked"
+        elif case is SealedCredentialOracleCaseV1.VIEW_REPEAT_REJECTED:
+            for role in ("gate", "provider", "kalshi"):
+                role_record = _oracle_require_view(
+                    views[role], role=role, records=view_records
+                )
+                role_record.state = _transition_view_state(
+                    role_record.state,
+                    operation="transfer",
+                )
+                try:
+                    _transition_view_state(role_record.state, operation="transfer")
+                except RuntimeError as error:
+                    if error.args != ("shadow_frozen_credential_view_consumed",):
+                        raise
+                    trace.append(f"{role}:repeat-rejected")
+                role_record.state = _transition_view_state(
+                    role_record.state,
+                    operation="consume",
+                )
+            precredential_state = "consumed"
+            gate_decision = "eligible"
+        elif case is SealedCredentialOracleCaseV1.VIEW_CROSS_ROLE_REJECTED:
+            for actual_role in ("gate", "provider", "kalshi"):
+                for attempted_role in ("gate", "provider", "kalshi"):
+                    if attempted_role == actual_role:
+                        continue
+                    try:
+                        _oracle_require_view(
+                            views[actual_role],
+                            role=attempted_role,
+                            records=view_records,
+                        )
+                    except RuntimeError as error:
+                        if error.args != (
+                            "shadow_frozen_credential_view_role_mismatch",
+                        ):
+                            raise
+                        trace.append(
+                            f"{actual_role}:as-{attempted_role}:cross-role-rejected"
+                        )
+            _oracle_revoke_fresh_views(view_records, trace)
+            precredential_state = "revoked"
+        elif case is SealedCredentialOracleCaseV1.VIEW_REBUILT_REJECTED:
+            rebuilt = _SealedCredentialOracleViewV1(role="gate")
+            try:
+                _oracle_require_view(rebuilt, role="gate", records=view_records)
+            except RuntimeError as error:
+                if error.args != ("shadow_frozen_credential_view_invalid",):
+                    raise
+                trace.append("gate:rebuilt-rejected")
+            precredential_state = "revoked"
+            _oracle_revoke_fresh_views(view_records, trace)
+        elif case is SealedCredentialOracleCaseV1.VIEW_FOREIGN_REJECTED:
+            foreign = _SealedCredentialOracleViewV1(role="gate")
+            foreign_records = {
+                foreign: _SealedCredentialOracleViewRecord(
+                    view=foreign,
+                    role="gate",
+                    owner_pid=os.getpid(),
+                    owner_thread=threading.current_thread(),
+                )
+            }
+            if _oracle_require_view(
+                foreign,
+                role="gate",
+                records=foreign_records,
+            ).view is not foreign:
+                raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+            try:
+                _oracle_require_view(foreign, role="gate", records=view_records)
+            except RuntimeError as error:
+                if error.args != ("shadow_frozen_credential_view_invalid",):
+                    raise
+                trace.append("gate:foreign-rejected")
+            precredential_state = "revoked"
+            _oracle_revoke_fresh_views(view_records, trace)
+        elif case is SealedCredentialOracleCaseV1.WRONG_OWNER_REJECTED:
+            foreign = _SealedCredentialOracleViewV1(role="gate")
+            foreign_records = {
+                foreign: _SealedCredentialOracleViewRecord(
+                    view=foreign,
+                    role="gate",
+                    owner_pid=os.getpid() + 1,
+                    owner_thread=threading.current_thread(),
+                )
+            }
+            try:
+                _oracle_require_view(foreign, role="gate", records=foreign_records)
+            except RuntimeError as error:
+                if error.args != ("shadow_credential_lifecycle_oracle_invalid",):
+                    raise
+                trace.append("gate:wrong-owner-rejected")
+            precredential_state = "revoked"
+            _oracle_revoke_fresh_views(view_records, trace)
+        else:
+            raise RuntimeError("shadow_credential_lifecycle_oracle_invalid")
+
+    if case is SealedCredentialOracleCaseV1.NONCREDENTIAL_ALLOW:
+        precredential_state = "revoked"
+        trace.append("precredential:revoked-without-credential-read")
+    terminal_precredential = precredential_state in ("consumed", "revoked", "denied")
+    terminal_views = all(
+        record.state in ("consumed", "closed", "revoked")
+        for record in view_records.values()
+    )
+    all_terminal = terminal_precredential and terminal_views
+    post_freeze_reread_count = (
+        0
+        if freeze_read_counts is None
+        else sum(
+            counts[name] - freeze_read_counts[name]
+            for name in counts
+        )
+    )
+    trace_sha256 = hashlib.sha256(
+        SEALED_CREDENTIAL_TRACE_HASH_DOMAIN + canonical_json_bytes(trace)
+    ).hexdigest()
+    read_counts = tuple(sorted(counts.items()))
+    projection = _oracle_result_projection(
+        case=case,
+        fixture_sha256=authority_record.fixture_sha256,
+        read_count_by_name=read_counts,
+        unexpected_read_count=unexpected_read_count,
+        post_freeze_reread_count=post_freeze_reread_count,
+        noncredential_decision=noncredential_decision,
+        credential_decision=credential_decision,
+        gate_decision=gate_decision,
+        drift_ignored=drift_ignored,
+        lifecycle_trace_sha256=trace_sha256,
+        all_oracle_capabilities_terminal=all_terminal,
+        production_authority_issuer_absent=True,
+    )
+    result_sha256 = hashlib.sha256(
+        SEALED_CREDENTIAL_RESULT_HASH_DOMAIN + canonical_json_bytes(projection)
+    ).hexdigest()
+    return SealedCredentialLifecycleOracleResultV1(
+        schema_version=1,
+        case=case,
+        fixture_sha256=authority_record.fixture_sha256,
+        read_count_by_name=read_counts,
+        unexpected_read_count=unexpected_read_count,
+        post_freeze_reread_count=post_freeze_reread_count,
+        noncredential_decision=noncredential_decision,
+        credential_decision=credential_decision,
+        gate_decision=gate_decision,
+        drift_ignored=drift_ignored,
+        lifecycle_trace_sha256=trace_sha256,
+        all_oracle_capabilities_terminal=all_terminal,
+        production_authority_issuer_absent=True,
+        result_sha256=result_sha256,
+    )
