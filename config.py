@@ -37,10 +37,8 @@ class Config:
 
     # --- Markets ---
     tickers: list = field(default_factory=list)
-    market_keywords: list = field(default_factory=lambda: [
-        "tennis", "ATP", "WTA", "US Open", "Wimbledon",
-        "Roland Garros", "Australian Open",
-    ])
+    sports: list = field(default_factory=list)
+    max_monitored_markets: int = 10
 
     # --- Strategy (cents). Defaults sized so TP clears fees near 50c (fix #4):
     # net_take_profit(50, 5) ~= +1.2c; a 2c TP would be net-negative there.
@@ -164,9 +162,11 @@ class Config:
             number(name, positive=True)
         for name in ("sim_latency_s", "sim_slippage_cents", "max_spread"):
             number(name, nonnegative=True)
-        for name in ("max_open_positions", "flatten_retries",
-                     "max_consec_errors"):
+        for name in ("max_open_positions", "max_monitored_markets",
+                     "flatten_retries", "max_consec_errors"):
             positive_int(name)
+        if self.max_monitored_markets > 10:
+            raise ValueError("max_monitored_markets cannot exceed 10")
         minimum = number("min_price", nonnegative=True)
         maximum = number("max_price", positive=True)
         if not (Decimal(0) < minimum < maximum < Decimal(100)):
@@ -197,14 +197,17 @@ class Config:
             raise ValueError("paper/live parity requires immediate_or_cancel")
         if self.self_trade_prevention_type not in ("taker_at_cross", "maker"):
             raise ValueError("invalid self_trade_prevention_type")
-        if (not isinstance(self.tickers, list)
-                or any(not isinstance(t, str) or not t for t in self.tickers)):
-            raise ValueError("tickers must be a list of nonempty strings")
-        if (not isinstance(self.market_keywords, list)
-                or any(not isinstance(k, str) or not k
-                       for k in self.market_keywords)):
-            raise ValueError(
-                "market_keywords must be a list of nonempty strings")
+        def selection_list(name):
+            values = getattr(self, name)
+            if (not isinstance(values, list)
+                    or any(not isinstance(value, str) or not value.strip()
+                           for value in values)
+                    or len(set(values)) != len(values)):
+                raise ValueError(
+                    f"{name} must be a list of unique nonempty strings")
+
+        selection_list("tickers")
+        selection_list("sports")
         if self._state_identity:
             current = self._expected_state_identity()
             actual = (current[0], current[1], current[2],

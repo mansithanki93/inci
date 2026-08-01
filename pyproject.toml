@@ -1,0 +1,8 @@
+[project]
+name = "inci-tennis-research"
+version = "0.0.0"
+requires-python = "==3.14.5"
+dependencies = [
+  "requests==2.34.2",
+  "cryptography==49.0.0",
+]

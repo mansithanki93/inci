@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inci.invalid/schemas/provider-qualification-trace-v1.schema.json",
+  "title": "INCI Tennis v1 provider qualification evidence trace",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provider_id",
+    "product_tier",
+    "source_lineage_id",
+    "adapter_code_sha256",
+    "auth_contract_sha256",
+    "quota_contract_sha256",
+    "qualification_protocol_sha256",
+    "started_at",
+    "completed_at",
+    "matches",
+    "clean_terminal"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provider_id": {"$ref": "#/$defs/safe_id"},
+    "product_tier": {"$ref": "#/$defs/safe_id"},
+    "source_lineage_id": {"$ref": "#/$defs/safe_id"},
+    "adapter_code_sha256": {"$ref": "#/$defs/sha256"},
+    "auth_contract_sha256": {"$ref": "#/$defs/sha256"},
+    "quota_contract_sha256": {"$ref": "#/$defs/sha256"},
+    "qualification_protocol_sha256": {"$ref": "#/$defs/sha256"},
+    "started_at": {"$ref": "#/$defs/utc"},
+    "completed_at": {"$ref": "#/$defs/utc"},
+    "matches": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/match"}
+    },
+    "clean_terminal": {"type": "boolean"}
+  },
+  "$defs": {
+    "safe_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "utc": {
+      "type": "string",
+      "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z)$"
+    },
+    "stratum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sport", "tour", "competition_tier", "match_format", "round_code"],
+      "properties": {
+        "sport": {"const": "tennis"},
+        "tour": {"type": "string", "pattern": "^[A-Z][A-Z0-9-]{0,31}$"},
+        "competition_tier": {"type": "string", "pattern": "^[A-Z][A-Z0-9-]{0,31}$"},
+        "match_format": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,31}$"},
+        "round_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,31}$"}
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "match_id_sha256",
+        "stratum",
+        "tested_format",
+        "started_at",
+        "ended_at",
+        "tested_capabilities"
+      ],
+      "properties": {
+        "match_id_sha256": {"$ref": "#/$defs/sha256"},
+        "stratum": {"$ref": "#/$defs/stratum"},
+        "tested_format": {"enum": ["rest_json", "websocket_json", "ndjson"]},
+        "started_at": {"$ref": "#/$defs/utc"},
+        "ended_at": {"$ref": "#/$defs/utc"},
+        "tested_capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "stable_match_ids",
+              "stable_player_ids",
+              "point_state",
+              "current_server",
+              "match_format",
+              "source_event_time",
+              "provider_generated_time",
+              "monotonic_sequence_or_revision",
+              "correction_semantics",
+              "resync_snapshot"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

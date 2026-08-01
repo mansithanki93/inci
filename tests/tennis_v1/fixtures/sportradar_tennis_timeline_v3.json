@@ -1,0 +1,305 @@
+{
+  "fixture_kind": "synthetic_sanitized_candidate_cases_v1",
+  "cases": [
+    {
+      "case_id": "synthetic-sequence-snapshot-point-correction",
+      "prior_case": "synthetic-prior-none",
+      "payload": {
+        "generated_at": "2030-01-15T18:00:02.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-timeline-snapshot-1",
+            "type": "SNAPSHOT",
+            "revision": 1,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T18:00:00Z",
+            "generated_at": "2030-01-15T18:00:00.100000000Z",
+            "snapshot_complete": true,
+            "status": "LIVE",
+            "termination": "NONE",
+            "winner_id": null,
+            "retired_id": null,
+            "completed_sets": [],
+            "games_home": 0,
+            "games_away": 0,
+            "points_home": "LOVE",
+            "points_away": "LOVE",
+            "in_tiebreak": false,
+            "tiebreak_points_home": 0,
+            "tiebreak_points_away": 0,
+            "tiebreak_first_server_id": null,
+            "server_id": "synthetic-player-home"
+          },
+          {
+            "id": "synthetic-timeline-point-1",
+            "type": "POINT",
+            "revision": 2,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T18:00:01Z",
+            "generated_at": "2030-01-15T18:00:01.100000000Z",
+            "point_winner_id": "synthetic-player-home",
+            "server_id": "synthetic-player-home"
+          },
+          {
+            "id": "synthetic-timeline-correction-1",
+            "type": "SNAPSHOT",
+            "revision": 1,
+            "correction_epoch": 1,
+            "event_time": "2030-01-15T18:00:02Z",
+            "generated_at": "2030-01-15T18:00:02.100000000Z",
+            "snapshot_complete": true,
+            "status": "LIVE",
+            "termination": "NONE",
+            "winner_id": null,
+            "retired_id": null,
+            "completed_sets": [],
+            "games_home": 0,
+            "games_away": 0,
+            "points_home": "FIFTEEN",
+            "points_away": "LOVE",
+            "in_tiebreak": false,
+            "tiebreak_points_home": 0,
+            "tiebreak_points_away": 0,
+            "tiebreak_first_server_id": null,
+            "server_id": "synthetic-player-home"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "synthetic-lifecycle-start",
+      "prior_case": "synthetic-prior-scheduled",
+      "payload": {
+        "generated_at": "2030-01-15T18:00:00.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-lifecycle-start-event",
+            "type": "LIFECYCLE",
+            "revision": 1,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T18:00:00Z",
+            "generated_at": "2030-01-15T18:00:00.100000000Z",
+            "lifecycle": "START",
+            "winner_id": null,
+            "retired_id": null,
+            "server_id": "synthetic-player-home"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "synthetic-lifecycle-suspend",
+      "prior_case": "synthetic-prior-live",
+      "payload": {
+        "generated_at": "2030-01-15T18:01:00.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-lifecycle-suspend-event",
+            "type": "LIFECYCLE",
+            "revision": 2,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T18:01:00Z",
+            "generated_at": "2030-01-15T18:01:00.100000000Z",
+            "lifecycle": "SUSPEND",
+            "winner_id": null,
+            "retired_id": null,
+            "server_id": "synthetic-player-home"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "synthetic-lifecycle-resume",
+      "prior_case": "synthetic-prior-suspended",
+      "payload": {
+        "generated_at": "2030-01-15T18:02:00.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-lifecycle-resume-event",
+            "type": "LIFECYCLE",
+            "revision": 3,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T18:02:00Z",
+            "generated_at": "2030-01-15T18:02:00.100000000Z",
+            "lifecycle": "RESUME",
+            "winner_id": null,
+            "retired_id": null,
+            "server_id": "synthetic-player-home"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "synthetic-lifecycle-walkover",
+      "prior_case": "synthetic-prior-scheduled",
+      "payload": {
+        "generated_at": "2030-01-15T17:30:00.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-lifecycle-walkover-event",
+            "type": "LIFECYCLE",
+            "revision": 1,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T17:30:00Z",
+            "generated_at": "2030-01-15T17:30:00.100000000Z",
+            "lifecycle": "WALKOVER",
+            "winner_id": "synthetic-player-home",
+            "retired_id": null,
+            "server_id": null
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "synthetic-lifecycle-retirement",
+      "prior_case": "synthetic-prior-live",
+      "payload": {
+        "generated_at": "2030-01-15T18:03:00.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-lifecycle-retirement-event",
+            "type": "LIFECYCLE",
+            "revision": 2,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T18:03:00Z",
+            "generated_at": "2030-01-15T18:03:00.100000000Z",
+            "lifecycle": "RETIREMENT",
+            "winner_id": "synthetic-player-home",
+            "retired_id": "synthetic-player-away",
+            "server_id": null
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "synthetic-lifecycle-cancel",
+      "prior_case": "synthetic-prior-scheduled",
+      "payload": {
+        "generated_at": "2030-01-15T17:45:00.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-lifecycle-cancel-event",
+            "type": "LIFECYCLE",
+            "revision": 1,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T17:45:00Z",
+            "generated_at": "2030-01-15T17:45:00.100000000Z",
+            "lifecycle": "CANCEL",
+            "winner_id": null,
+            "retired_id": null,
+            "server_id": null
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "synthetic-lifecycle-natural-end-confirmation",
+      "prior_case": "synthetic-prior-natural-ended",
+      "payload": {
+        "generated_at": "2030-01-15T19:30:00.100000000Z",
+        "sport_event": {
+          "id": "synthetic-match-1",
+          "scheduled": "2030-01-15T18:00:00Z",
+          "type": "SINGLES",
+          "best_of": 3,
+          "match_format": "standard_advantage_bo3_tb7_all_sets",
+          "competitors": [
+            {"id": "synthetic-player-home", "qualifier": "HOME"},
+            {"id": "synthetic-player-away", "qualifier": "AWAY"}
+          ]
+        },
+        "timeline": [
+          {
+            "id": "synthetic-lifecycle-natural-end-event",
+            "type": "LIFECYCLE",
+            "revision": 4,
+            "correction_epoch": 0,
+            "event_time": "2030-01-15T19:30:00Z",
+            "generated_at": "2030-01-15T19:30:00.100000000Z",
+            "lifecycle": "NATURAL_END_CONFIRMATION",
+            "winner_id": "synthetic-player-home",
+            "retired_id": null,
+            "server_id": null
+          }
+        ]
+      }
+    }
+  ]
+}

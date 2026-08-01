@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inci.invalid/schemas/provider-permission-v1.schema.json",
+  "title": "INCI Tennis v1 provider permission artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provider_id",
+    "product_tier",
+    "entitlement_id_sha256",
+    "terms_version",
+    "basis",
+    "intended_use",
+    "permitted_operations",
+    "access_starts_at",
+    "access_expires_at",
+    "analysis_expires_at",
+    "raw_retention_until",
+    "reviewed_at",
+    "reviewer_id",
+    "approval_id",
+    "evidence_document_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provider_id": {"$ref": "#/$defs/safe_id"},
+    "product_tier": {"$ref": "#/$defs/safe_id"},
+    "entitlement_id_sha256": {"$ref": "#/$defs/sha256"},
+    "terms_version": {"$ref": "#/$defs/safe_id"},
+    "basis": {"enum": ["trial_terms", "written_permission"]},
+    "intended_use": {"enum": ["private_paper_evaluation"]},
+    "permitted_operations": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "provider_ingest",
+          "raw_retention",
+          "derived_signals",
+          "post_expiry_analysis",
+          "publication"
+        ]
+      }
+    },
+    "access_starts_at": {"$ref": "#/$defs/utc"},
+    "access_expires_at": {"$ref": "#/$defs/utc"},
+    "analysis_expires_at": {"$ref": "#/$defs/utc"},
+    "raw_retention_until": {"$ref": "#/$defs/utc"},
+    "reviewed_at": {"$ref": "#/$defs/utc"},
+    "reviewer_id": {"$ref": "#/$defs/safe_id"},
+    "approval_id": {"$ref": "#/$defs/safe_id"},
+    "evidence_document_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "safe_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "utc": {
+      "type": "string",
+      "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z)$"
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-adapters:schema:sportradar-tennis-transport-error-v1",
+  "title": "Sportradar sanitized transport error v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "exception_type",
+    "status_code",
+    "error_code",
+    "request_id"
+  ],
+  "properties": {
+    "exception_type": {
+      "enum": [
+        "connect_error",
+        "timeout_error",
+        "tls_error",
+        "http_status_error",
+        "redirect_error",
+        "body_limit_error",
+        "transport_contract_error"
+      ]
+    },
+    "status_code": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        {"type": "null"}
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "connect_failed",
+        "timeout",
+        "tls_failed",
+        "http_4xx",
+        "http_5xx",
+        "http_other",
+        "redirect_denied",
+        "body_too_large",
+        "transport_contract_invalid"
+      ]
+    },
+    "request_id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "value"],
+      "properties": {
+        "state": {"const": "redacted"},
+        "value": {"const": "<redacted>"}
+      }
+    }
+  }
+}

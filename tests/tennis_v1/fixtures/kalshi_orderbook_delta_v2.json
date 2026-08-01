@@ -1,0 +1,14 @@
+{
+  "fixture_domain": "inci-tennis-expert-normalized-book-v1",
+  "payload": {
+    "ticker": "MATCH-HOME",
+    "connection_epoch": 4,
+    "sequence": 11,
+    "source_wall_ns": 1001,
+    "observed_monotonic_ns": 2001,
+    "clock_uncertainty_ns": 3,
+    "contract_side": "no",
+    "price": "0.45",
+    "quantity": "1"
+  }
+}

@@ -16,7 +16,7 @@ parse_order (with required status) is for polling/list responses only.
 """
 import re
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation
 
 
 class SchemaError(Exception):
@@ -437,6 +437,214 @@ def parse_cancel_ack(a):
     }
 
 
+def _string_list(value, ctx, *, require_nonempty=False):
+    if not isinstance(value, list):
+        raise SchemaError(f"{ctx}: expected list, got {_diagnostic(value)}")
+    if require_nonempty and not value:
+        raise SchemaError(f"{ctx}: expected nonempty list, got {_diagnostic(value)}")
+    parsed = []
+    seen = set()
+    for item in value:
+        text = _text(item, ctx)
+        if text in seen:
+            raise SchemaError(f"{ctx}: duplicate value {_diagnostic(item)}")
+        seen.add(text)
+        parsed.append(text)
+    return tuple(parsed)
+
+
+def parse_sports_filters_response(response):
+    """Normalize the documented public Sports filters response."""
+    filters = _req(response, "filters_by_sports", "sports_filters")
+    ordering = _string_list(
+        _req(response, "sport_ordering", "sports_filters"),
+        "sports_filters.sport_ordering", require_nonempty=True)
+    if not isinstance(filters, dict):
+        raise SchemaError("sports_filters.filters_by_sports: expected object, "
+                          f"got {_diagnostic(filters)}")
+    sport_names = list(filters)
+    if any(not isinstance(name, str) or not name for name in sport_names):
+        raise SchemaError("sports_filters.filters_by_sports: expected nonempty "
+                          f"sport names, got {_diagnostic(filters)}")
+    folded = [name.casefold() for name in sport_names]
+    if len(folded) != len(set(folded)):
+        raise SchemaError("sports_filters.filters_by_sports: duplicate "
+                          f"case-insensitive sport names, got {_diagnostic(filters)}")
+    if set(ordering) != set(sport_names):
+        raise SchemaError("sports_filters: sport_ordering/filter keys disagree, "
+                          f"ordering={_diagnostic(ordering)} "
+                          f"filters={_diagnostic(filters)}")
+
+    sports = {}
+    for sport in ordering:
+        details = filters[sport]
+        if not isinstance(details, dict):
+            raise SchemaError(f"sports_filters.{sport}: expected object, got "
+                              f"{_diagnostic(details)}")
+        scopes = frozenset(_string_list(
+            _req(details, "scopes", f"sports_filters.{sport}"),
+            f"sports_filters.{sport}.scopes"))
+        competitions = _req(details, "competitions", f"sports_filters.{sport}")
+        if not isinstance(competitions, dict):
+            raise SchemaError(f"sports_filters.{sport}.competitions: expected "
+                              f"object, got {_diagnostic(competitions)}")
+        parsed_competitions = {}
+        for name, competition in competitions.items():
+            name = _text(name, f"sports_filters.{sport}.competition")
+            if not isinstance(competition, dict):
+                raise SchemaError(
+                    f"sports_filters.{sport}.competitions.{name}: expected "
+                    f"object, got {_diagnostic(competition)}")
+            parsed_competitions[name] = frozenset(_string_list(
+                _req(competition, "scopes",
+                     f"sports_filters.{sport}.competitions.{name}"),
+                f"sports_filters.{sport}.competitions.{name}.scopes"))
+        sports[sport] = {"scopes": scopes, "competitions": parsed_competitions}
+    return {"sport_ordering": ordering, "sports": sports}
+
+
+def parse_series_list_response(response):
+    rows = _req(response, "series", "series_response")
+    if "cursor" in response:
+        cursor = response["cursor"]
+        if not isinstance(cursor, str):
+            raise SchemaError(
+                "series_response.cursor: expected string, got "
+                f"{_diagnostic(cursor)}")
+        if cursor:
+            raise SchemaError(
+                "series_response: nonempty cursor means the documented "
+                "one-response Sports Series inventory is incomplete, got "
+                f"{_diagnostic(cursor)}")
+    if not isinstance(rows, list):
+        raise SchemaError("series_response.series: expected list, got "
+                          f"{_diagnostic(rows)}")
+    parsed = []
+    seen_tickers = set()
+    for row in rows:
+        ticker = _text(_req(row, "ticker", "series"), "series.ticker")
+        if ticker in seen_tickers:
+            raise SchemaError(f"series_response: duplicate ticker {ticker!r}")
+        seen_tickers.add(ticker)
+        category = _text(_req(row, "category", "series"), "series.category")
+        raw_tags = row.get("tags")
+        tags = () if raw_tags is None else _string_list(raw_tags, "series.tags")
+        parsed.append({"series_ticker": ticker, "category": category,
+                       "tags": tags})
+    return tuple(parsed)
+
+
+def parse_milestone(milestone):
+    milestone_id = _text(_req(milestone, "id", "milestone"), "milestone.id")
+    details = _req(milestone, "details", "milestone")
+    if not isinstance(details, dict):
+        raise SchemaError("milestone.details: expected object, got "
+                          f"{_diagnostic(details)}")
+
+    def optional_detail(field):
+        value = details.get(field)
+        return None if value is None else _text(value, f"milestone.details.{field}")
+
+    return {
+        "milestone_id": milestone_id,
+        "category": _text(_req(milestone, "category", "milestone"),
+                          "milestone.category"),
+        "type": _text(_req(milestone, "type", "milestone"), "milestone.type"),
+        "start_ts": _iso_timestamp(
+            _req(milestone, "start_date", "milestone"), "milestone.start_date"),
+        "title": _text(_req(milestone, "title", "milestone"), "milestone.title"),
+        "league": optional_detail("league"),
+        "main_game_event_ticker": optional_detail("main_game_event_ticker"),
+        "primary_event_tickers": _string_list(
+            _req(milestone, "primary_event_tickers", "milestone"),
+            "milestone.primary_event_tickers"),
+        "related_event_tickers": _string_list(
+            _req(milestone, "related_event_tickers", "milestone"),
+            "milestone.related_event_tickers"),
+    }
+
+
+def _parse_cursor_page(response, key, parser, ctx):
+    rows = _req(response, key, ctx)
+    if not isinstance(rows, list):
+        raise SchemaError(f"{ctx}.{key}: expected list, got {_diagnostic(rows)}")
+    cursor = _req(response, "cursor", ctx)
+    if not isinstance(cursor, str):
+        raise SchemaError(f"{ctx}.cursor: expected string, got "
+                          f"{_diagnostic(cursor)}")
+    return tuple(parser(row) for row in rows), cursor
+
+
+def parse_milestones_page(response):
+    return _parse_cursor_page(response, "milestones", parse_milestone,
+                              "milestones_response")
+
+
+def parse_event(event):
+    event_ticker = _text(_req(event, "event_ticker", "event"),
+                         "event.event_ticker")
+    markets = _req(event, "markets", "event")
+    if not isinstance(markets, list):
+        raise SchemaError("event.markets: expected list, got "
+                          f"{_diagnostic(markets)}")
+    parsed_markets = []
+    skips = {}
+    for market in markets:
+        try:
+            parsed = parse_market(market)
+        except UnsupportedMarketType as error:
+            raw_event_ticker = _text(
+                _req(market, "event_ticker", "nested_market"),
+                "nested_market.event_ticker")
+            if raw_event_ticker != event_ticker:
+                raise SchemaError(
+                    f"event {event_ticker}: nested market event mismatch "
+                    f"{raw_event_ticker!r}") from error
+            skips[error.market_type] = skips.get(error.market_type, 0) + 1
+            continue
+        if parsed["event_ticker"] != event_ticker:
+            raise SchemaError(f"event {event_ticker}: nested market "
+                              f"{parsed['ticker']!r} belongs to "
+                              f"{parsed['event_ticker']!r}")
+        parsed_markets.append(parsed)
+    return {
+        "event_ticker": event_ticker,
+        "series_ticker": _text(_req(event, "series_ticker", "event"),
+                                 "event.series_ticker"),
+        "category": _text(_req(event, "category", "event"), "event.category"),
+        "title": _text(_req(event, "title", "event"), "event.title"),
+        "markets": tuple(parsed_markets),
+        "market_skips": dict(sorted(skips.items())),
+    }
+
+
+def parse_events_page(response):
+    return _parse_cursor_page(response, "events", parse_event, "events_response")
+
+
+def parse_event_response(response):
+    event = _req(response, "event", "event_response")
+    top_markets = _req(response, "markets", "event_response")
+    if not isinstance(top_markets, list):
+        raise SchemaError("event_response.markets: expected list, got "
+                          f"{_diagnostic(top_markets)}")
+    nested_markets = _req(event, "markets", "event_response.event")
+    if not isinstance(nested_markets, list):
+        raise SchemaError("event_response.event.markets: expected list, got "
+                          f"{_diagnostic(nested_markets)}")
+
+    def market_tickers(rows, ctx):
+        return {_text(_req(row, "ticker", ctx), f"{ctx}.ticker") for row in rows}
+
+    if (top_markets and market_tickers(
+            top_markets, "event_response.markets") != market_tickers(
+                nested_markets, "event_response.event.markets")):
+        raise SchemaError("event_response: top-level and nested Market tickers "
+                          f"disagree, top={_diagnostic(top_markets)} "
+                          f"nested={_diagnostic(nested_markets)}")
+    return parse_event(event)
+
+
 def parse_market_response(response):
     return parse_market(_req(response, "market", "market_response"))
 
@@ -470,13 +678,12 @@ def parse_balance(response):
         "balance.portfolio_value")
     updated_ts = _nonnegative_int(_req(response, "updated_ts", "balance"),
                                   "balance.updated_ts")
-        expected_legacy_balance = int(
-        (dollars * 100).to_integral_value(rounding=ROUND_DOWN)
-    )
-    if balance != expected_legacy_balance:
+    difference_cents = abs(
+        dollars * Decimal("100") - Decimal(balance))
+    if difference_cents >= Decimal("1"):
         raise SchemaError(
-            "balance: legacy cents do not match truncated balance_dollars, "
-            f"got balance={raw_balance!r}, "
-            f"balance_dollars={raw_dollars!r}")
+            "balance: cents/dollars mismatch, got "
+            f"balance={raw_balance!r}, balance_dollars={raw_dollars!r}, "
+            f"difference_cents={difference_cents}")
     return {"balance": balance, "balance_dollars": dollars,
             "portfolio_value": portfolio_value, "updated_ts": updated_ts}

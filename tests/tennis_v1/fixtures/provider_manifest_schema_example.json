@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "provider_id": "synthetic-provider",
+  "product_tier": "trial-v1",
+  "entitlement_id": "schema-only-opaque-entitlement",
+  "source_lineage_id": "synthetic-lineage-v1",
+  "terms_url": "https://provider.invalid/terms/trial-v1",
+  "terms_version": "terms-2026-07",
+  "permission": {
+    "artifact_path": "/outside-repository/schema-only-permission.json",
+    "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "evidence_path": "/outside-repository/schema-only-terms.pdf",
+    "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "billing_mode": "trial",
+  "auto_renew": false,
+  "access_starts_at": "2026-07-27T12:00:00Z",
+  "access_expires_at": "2026-08-03T12:00:00Z",
+  "analysis_expires_at": "2026-08-03T12:00:00Z",
+  "raw_retention_until": "2026-08-03T12:00:00Z",
+  "max_raw_retention_seconds": 604800,
+  "credential_env_names": ["SYNTHETIC_API_KEY"],
+  "quotas": {
+    "requests_per_rolling_60_seconds": 100,
+    "requests_per_utc_calendar_day": 10000,
+    "requests_per_rolling_second": 20,
+    "max_connections": 2,
+    "max_subscriptions": 10,
+    "resync_requests_per_rolling_hour": 20
+  },
+  "capabilities": {
+    "stable_match_ids": true,
+    "stable_player_ids": true,
+    "point_state": true,
+    "current_server": true,
+    "match_format": true,
+    "source_event_time": true,
+    "provider_generated_time": true,
+    "monotonic_sequence_or_revision": true,
+    "correction_semantics": true,
+    "resync_snapshot": true,
+    "supported_formats": ["rest_json", "websocket_json"],
+    "declared_strata": [{
+      "sport": "tennis",
+      "tour": "ATP",
+      "competition_tier": "MASTERS-1000",
+      "match_format": "BEST_OF_3",
+      "round_code": "R16"
+    }]
+  },
+  "qualification": {
+    "artifact_path": "/outside-repository/schema-only-qualification.json",
+    "artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "evidence_trace_path": "/outside-repository/schema-only-trace.wal",
+    "evidence_trace_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}

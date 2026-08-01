@@ -1,0 +1,651 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-adapters:schema:sportradar-tennis-qualification-output-v1",
+  "title": "Sportradar tennis candidate qualification output v1",
+  "oneOf": [
+    {"$ref": "#/$defs/summary"},
+    {"$ref": "#/$defs/permitRow"},
+    {"$ref": "#/$defs/captureRow"},
+    {"$ref": "#/$defs/parserResultRow"},
+    {"$ref": "#/$defs/failureRow"},
+    {"$ref": "#/$defs/terminalRow"}
+  ],
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "nonnegativeInt64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "positiveInt64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "nullableNonnegativeInt64": {
+      "oneOf": [
+        {"$ref": "#/$defs/nonnegativeInt64"},
+        {"type": "null"}
+      ]
+    },
+    "nullableSha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "quotaCoordinates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rolling_second_attempts",
+        "rolling_60_seconds_attempts",
+        "utc_day_attempts",
+        "active_connections",
+        "active_subscriptions",
+        "rolling_hour_resync_attempts"
+      ],
+      "properties": {
+        "rolling_second_attempts": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        },
+        "rolling_60_seconds_attempts": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        },
+        "utc_day_attempts": {"$ref": "#/$defs/nonnegativeInt64"},
+        "active_connections": {"$ref": "#/$defs/nonnegativeInt64"},
+        "active_subscriptions": {"$ref": "#/$defs/nonnegativeInt64"},
+        "rolling_hour_resync_attempts": {
+          "$ref": "#/$defs/nonnegativeInt64"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "prefixItems": [
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "correction_semantics"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "current_server"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "match_format"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "monotonic_sequence_or_revision"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "point_state"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "provider_generated_time"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "resync_snapshot"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "source_event_time"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "stable_match_ids"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"const": "stable_player_ids"},
+            {"type": "boolean"}
+          ],
+          "items": false
+        }
+      ],
+      "items": false
+    },
+    "outputDigests": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/sha256"}
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "session_id",
+        "session_manifest_sha256",
+        "production_preflight_status",
+        "candidate_manifest_sha256",
+        "manifest_core_sha256",
+        "candidate_authorization_sha256",
+        "candidate_decision_sha256",
+        "candidate_binding_sha256",
+        "quota_closure_sha256",
+        "candidate_source_seals_sha256",
+        "match_binding_universe_sha256",
+        "requested_provider_match_ids",
+        "session_start_wall_ns",
+        "session_end_wall_ns",
+        "retention_delete_by_ns",
+        "terminal_reason",
+        "permit_count",
+        "capture_count",
+        "accepted_count",
+        "ignored_count",
+        "rejected_count",
+        "failure_count",
+        "trace_record_count",
+        "trace_sha256",
+        "last_trace_receipt_sha256",
+        "completed_wall_ns"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "record_type": {"const": "qualification_summary"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "session_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "production_preflight_status": {
+          "const": "not_run_candidate_only"
+        },
+        "candidate_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_core_sha256": {"$ref": "#/$defs/sha256"},
+        "candidate_authorization_sha256": {"$ref": "#/$defs/sha256"},
+        "candidate_decision_sha256": {"$ref": "#/$defs/sha256"},
+        "candidate_binding_sha256": {"$ref": "#/$defs/sha256"},
+        "quota_closure_sha256": {"$ref": "#/$defs/sha256"},
+        "candidate_source_seals_sha256": {"$ref": "#/$defs/sha256"},
+        "match_binding_universe_sha256": {"$ref": "#/$defs/sha256"},
+        "requested_provider_match_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safeId"}
+        },
+        "session_start_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "session_end_wall_ns": {"$ref": "#/$defs/positiveInt64"},
+        "retention_delete_by_ns": {"$ref": "#/$defs/positiveInt64"},
+        "terminal_reason": {"$ref": "#/$defs/terminalReason"},
+        "permit_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "capture_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "accepted_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "ignored_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "rejected_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "failure_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "trace_record_count": {"$ref": "#/$defs/positiveInt64"},
+        "trace_sha256": {"$ref": "#/$defs/sha256"},
+        "last_trace_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "completed_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"}
+      }
+    },
+    "permitRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "session_id",
+        "record_index",
+        "recorded_wall_ns",
+        "retention_delete_by_ns",
+        "previous_record_sha256",
+        "route",
+        "provider_match_id",
+        "resync",
+        "connection_epoch",
+        "permit_sha256",
+        "quota_coordinates"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "record_type": {"const": "permit"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "record_index": {"$ref": "#/$defs/positiveInt64"},
+        "recorded_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "retention_delete_by_ns": {"$ref": "#/$defs/positiveInt64"},
+        "previous_record_sha256": {"$ref": "#/$defs/sha256"},
+        "route": {"enum": ["summary", "timeline"]},
+        "provider_match_id": {"$ref": "#/$defs/safeId"},
+        "resync": {"type": "boolean"},
+        "connection_epoch": {"const": 1},
+        "permit_sha256": {"$ref": "#/$defs/sha256"},
+        "quota_coordinates": {"$ref": "#/$defs/quotaCoordinates"}
+      }
+    },
+    "captureRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "session_id",
+        "record_index",
+        "recorded_wall_ns",
+        "retention_delete_by_ns",
+        "previous_record_sha256",
+        "permit_record_sha256",
+        "event_type",
+        "event_version",
+        "source_kind",
+        "source_id",
+        "source_entity_id",
+        "endpoint_id",
+        "endpoint_state",
+        "channel_id",
+        "channel_state",
+        "request_id",
+        "request_id_state",
+        "source_wall_ns",
+        "source_generated_ns",
+        "local_wall_ns",
+        "local_monotonic_ns",
+        "clock_uncertainty_ns",
+        "connection_epoch",
+        "provider_sequence",
+        "content_type",
+        "payload_encoding",
+        "payload_transform",
+        "payload_hex",
+        "payload_sha256",
+        "capture_envelope_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "record_type": {"const": "capture"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "record_index": {"$ref": "#/$defs/positiveInt64"},
+        "recorded_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "retention_delete_by_ns": {"$ref": "#/$defs/positiveInt64"},
+        "previous_record_sha256": {"$ref": "#/$defs/sha256"},
+        "permit_record_sha256": {"$ref": "#/$defs/sha256"},
+        "event_type": {
+          "enum": [
+            "sportradar_tennis_summary_v3",
+            "sportradar_tennis_timeline_v3",
+            "sportradar_tennis_transport_error_v1"
+          ]
+        },
+        "event_version": {"const": 1},
+        "source_kind": {"const": "provider"},
+        "source_id": {"const": "sportradar"},
+        "source_entity_id": {"$ref": "#/$defs/safeId"},
+        "endpoint_id": {"const": "sportradar-api"},
+        "endpoint_state": {"const": "safe_original"},
+        "channel_id": {"const": "sportradar-rest"},
+        "channel_state": {"const": "safe_original"},
+        "request_id": {"const": "<redacted>"},
+        "request_id_state": {"const": "redacted"},
+        "source_wall_ns": {"$ref": "#/$defs/nullableNonnegativeInt64"},
+        "source_generated_ns": {
+          "$ref": "#/$defs/nullableNonnegativeInt64"
+        },
+        "local_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "local_monotonic_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "clock_uncertainty_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "connection_epoch": {"const": 1},
+        "provider_sequence": {
+          "oneOf": [
+            {"$ref": "#/$defs/safeId"},
+            {"type": "null"}
+          ]
+        },
+        "content_type": {
+          "enum": [
+            "application/json",
+            "application/vnd.inci.transport-error+json"
+          ]
+        },
+        "payload_encoding": {
+          "enum": ["json", "canonical-json-v1"]
+        },
+        "payload_transform": {
+          "enum": [
+            "identity-public-market-v1",
+            "json-secret-redaction-v1",
+            "sanitized-transport-error-v1"
+          ]
+        },
+        "payload_hex": {
+          "type": "string",
+          "maxLength": 2097152,
+          "pattern": "^(?:[0-9a-f]{2})*$"
+        },
+        "payload_sha256": {"$ref": "#/$defs/sha256"},
+        "capture_envelope_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "parserResultRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "session_id",
+        "record_index",
+        "recorded_wall_ns",
+        "retention_delete_by_ns",
+        "previous_record_sha256",
+        "capture_record_sha256",
+        "evidence_sha256",
+        "parser_outcome",
+        "reason",
+        "output_contract_sha256s",
+        "capabilities",
+        "first_correction_epoch",
+        "first_revision",
+        "last_correction_epoch",
+        "last_revision"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "record_type": {"const": "parser_result"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "record_index": {"$ref": "#/$defs/positiveInt64"},
+        "recorded_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "retention_delete_by_ns": {"$ref": "#/$defs/positiveInt64"},
+        "previous_record_sha256": {"$ref": "#/$defs/sha256"},
+        "capture_record_sha256": {"$ref": "#/$defs/sha256"},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "parser_outcome": {"enum": ["accepted", "ignored", "rejected"]},
+        "reason": {
+          "oneOf": [
+            {
+              "enum": [
+                "event_not_relevant",
+                "normalizer_schema_unknown",
+                "normalizer_payload_invalid",
+                "normalizer_contract_violation",
+                "normalizer_exception"
+              ]
+            },
+            {"type": "null"}
+          ]
+        },
+        "output_contract_sha256s": {"$ref": "#/$defs/outputDigests"},
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "first_correction_epoch": {
+          "$ref": "#/$defs/nullableNonnegativeInt64"
+        },
+        "first_revision": {"$ref": "#/$defs/nullableNonnegativeInt64"},
+        "last_correction_epoch": {
+          "$ref": "#/$defs/nullableNonnegativeInt64"
+        },
+        "last_revision": {"$ref": "#/$defs/nullableNonnegativeInt64"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "parser_outcome": {"const": "accepted"},
+            "reason": {"type": "null"},
+            "output_contract_sha256s": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64
+            },
+            "first_correction_epoch": {
+              "$ref": "#/$defs/nonnegativeInt64"
+            },
+            "first_revision": {"$ref": "#/$defs/nonnegativeInt64"},
+            "last_correction_epoch": {
+              "$ref": "#/$defs/nonnegativeInt64"
+            },
+            "last_revision": {"$ref": "#/$defs/nonnegativeInt64"}
+          }
+        },
+        {
+          "properties": {
+            "parser_outcome": {"const": "ignored"},
+            "reason": {"const": "event_not_relevant"},
+            "output_contract_sha256s": {
+              "type": "array",
+              "maxItems": 0
+            },
+            "first_correction_epoch": {"type": "null"},
+            "first_revision": {"type": "null"},
+            "last_correction_epoch": {"type": "null"},
+            "last_revision": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "parser_outcome": {"const": "rejected"},
+            "reason": {
+              "enum": [
+                "normalizer_schema_unknown",
+                "normalizer_payload_invalid",
+                "normalizer_contract_violation",
+                "normalizer_exception"
+              ]
+            },
+            "output_contract_sha256s": {
+              "type": "array",
+              "maxItems": 0
+            },
+            "first_correction_epoch": {"type": "null"},
+            "first_revision": {"type": "null"},
+            "last_correction_epoch": {"type": "null"},
+            "last_revision": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "failureRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "session_id",
+        "record_index",
+        "recorded_wall_ns",
+        "retention_delete_by_ns",
+        "previous_record_sha256",
+        "stage",
+        "failure_code",
+        "permit_record_sha256",
+        "capture_record_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "record_type": {"const": "failure"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "record_index": {"$ref": "#/$defs/positiveInt64"},
+        "recorded_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "retention_delete_by_ns": {"$ref": "#/$defs/positiveInt64"},
+        "previous_record_sha256": {"$ref": "#/$defs/sha256"},
+        "stage": {
+          "enum": ["permit", "transport", "capture", "parser", "output"]
+        },
+        "failure_code": {
+          "enum": [
+            "quota_denied",
+            "transport_failed",
+            "capture_failed",
+            "parser_rejected",
+            "output_failed",
+            "contract_failed"
+          ]
+        },
+        "permit_record_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "capture_record_sha256": {"$ref": "#/$defs/nullableSha256"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "stage": {"const": "permit"},
+            "failure_code": {
+              "enum": ["quota_denied", "contract_failed"]
+            }
+          },
+          "required": ["stage", "failure_code"]
+        },
+        {
+          "properties": {
+            "stage": {"const": "transport"},
+            "failure_code": {
+              "enum": ["transport_failed", "contract_failed"]
+            }
+          },
+          "required": ["stage", "failure_code"]
+        },
+        {
+          "properties": {
+            "stage": {"const": "capture"},
+            "failure_code": {
+              "enum": ["capture_failed", "contract_failed"]
+            }
+          },
+          "required": ["stage", "failure_code"]
+        },
+        {
+          "properties": {
+            "stage": {"const": "parser"},
+            "failure_code": {
+              "enum": ["parser_rejected", "contract_failed"]
+            }
+          },
+          "required": ["stage", "failure_code"]
+        },
+        {
+          "properties": {
+            "stage": {"const": "output"},
+            "failure_code": {
+              "enum": ["output_failed", "contract_failed"]
+            }
+          },
+          "required": ["stage", "failure_code"]
+        }
+      ]
+    },
+    "terminalRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "session_id",
+        "record_index",
+        "recorded_wall_ns",
+        "retention_delete_by_ns",
+        "previous_record_sha256",
+        "terminal_reason",
+        "permit_count",
+        "capture_count",
+        "accepted_count",
+        "ignored_count",
+        "rejected_count",
+        "failure_count"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "record_type": {"const": "terminal"},
+        "session_id": {"$ref": "#/$defs/uuid"},
+        "record_index": {"$ref": "#/$defs/positiveInt64"},
+        "recorded_wall_ns": {"$ref": "#/$defs/nonnegativeInt64"},
+        "retention_delete_by_ns": {"$ref": "#/$defs/positiveInt64"},
+        "previous_record_sha256": {"$ref": "#/$defs/sha256"},
+        "terminal_reason": {"$ref": "#/$defs/terminalReason"},
+        "permit_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "capture_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "accepted_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "ignored_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "rejected_count": {"$ref": "#/$defs/nonnegativeInt64"},
+        "failure_count": {"$ref": "#/$defs/nonnegativeInt64"}
+      }
+    },
+    "terminalReason": {
+      "enum": [
+        "completed",
+        "operator_stop",
+        "authorization_expired",
+        "session_expired",
+        "retention_expired",
+        "quota_denied",
+        "transport_failed",
+        "capture_failed",
+        "parser_rejected",
+        "source_seal_failed",
+        "output_failed",
+        "internal_contract_failure"
+      ]
+    }
+  }
+}

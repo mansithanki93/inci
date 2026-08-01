@@ -1,0 +1,53 @@
+{
+  "event_id": "synthetic-summary-event-1",
+  "generated_at": "2030-01-15T17:00:00.250000000Z",
+  "revision": 0,
+  "correction_epoch": 0,
+  "snapshot_complete": true,
+  "source_event_time": "2030-01-15T17:00:00Z",
+  "sport_event": {
+    "id": "synthetic-match-1",
+    "scheduled": "2030-01-15T18:00:00Z",
+    "type": "SINGLES",
+    "best_of": 3,
+    "match_format": "standard_advantage_bo3_tb7_all_sets",
+    "competitors": [
+      {
+        "id": "synthetic-player-home",
+        "qualifier": "HOME"
+      },
+      {
+        "id": "synthetic-player-away",
+        "qualifier": "AWAY"
+      }
+    ]
+  },
+  "sport_event_status": {
+    "status": "SCHEDULED",
+    "termination": "NONE",
+    "winner_id": null,
+    "retired_id": null,
+    "completed_sets": [],
+    "games_home": 0,
+    "games_away": 0,
+    "points_home": "LOVE",
+    "points_away": "LOVE",
+    "in_tiebreak": false,
+    "tiebreak_points_home": 0,
+    "tiebreak_points_away": 0,
+    "tiebreak_first_server_id": null,
+    "server_id": null
+  },
+  "coverage": {
+    "correction_semantics": true,
+    "current_server": true,
+    "match_format": true,
+    "monotonic_sequence_or_revision": true,
+    "point_state": true,
+    "provider_generated_time": true,
+    "resync_snapshot": true,
+    "source_event_time": true,
+    "stable_match_ids": true,
+    "stable_player_ids": true
+  }
+}

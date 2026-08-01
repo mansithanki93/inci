@@ -4,9 +4,7 @@ by event, never by sibling contract.
 
 Usage: python analyze.py logs/ticks_<date>.csv
 """
-import csv
 import hashlib
-import math
 import sys
 from collections import defaultdict
 from decimal import Decimal
@@ -14,10 +12,15 @@ from decimal import Decimal
 from config import Config
 from fees import fee_cents
 from signals import dip_signal
-from replay import replay, validate_logged_book, _utc_day
-from research_log import config_fingerprint, code_fingerprint
+from replay import load_log, replay
 
 CFG = Config()
+SUPPORTED_LABEL = (
+    "SUPPORTED HYPOTHESIS: TEST is evaluable and net P&L > 0"
+)
+NOT_SUPPORTED_LABEL = (
+    "NOT SUPPORTED: TEST <= 0, empty, or not evaluable"
+)
 
 
 def build_horizons(max_hold_seconds):
@@ -29,112 +32,28 @@ MARKOUT_TOLERANCE_S = max(1.0, CFG.poll_interval * 2)
 
 
 def load(path):
-    series = defaultdict(list)
-    groups = {}
-    session_id = None
-    starting_pnl = None
-    starting_day = None
-    config_id = None
-    code_id = None
-    terminal_seen = False
-    terminal_clean = False
-    last_timestamp = None
-    expected_config = config_fingerprint(CFG)
-    expected_code = code_fingerprint()
-    with open(path) as f:
-        for row in csv.DictReader(f):
-            if (row.get("schema_version") != "5"
-                    or not row.get("session_id")
-                    or row.get("starting_daily_pnl_usd") in (None, "")
-                    or not row.get("starting_utc_day")
-                    or not row.get("utc_day")
-                    or not row.get("config_fingerprint")
-                    or not row.get("code_fingerprint")):
-                raise ValueError(
-                    "analyzer requires v5 single-session logs with provenance, "
-                    "session_id "
-                    "and event_id on quotes; legacy/mixed logs are not valid TEST "
-                    "evidence")
-            try:
-                timestamp = float(row["ts"])
-                row_start = Decimal(row["starting_daily_pnl_usd"])
-            except Exception as error:
-                raise ValueError("invalid v5 timestamp/session P&L") from error
-            if (not row_start.is_finite() or not math.isfinite(timestamp)
-                    or timestamp < 0):
-                raise ValueError("non-finite/negative timestamp or starting P&L")
-            if row["utc_day"] != _utc_day(timestamp):
-                raise ValueError("utc_day disagrees with quote timestamp")
-            if row["utc_day"] < row["starting_utc_day"]:
-                raise ValueError("quote precedes process-session start day")
-            if last_timestamp is not None and timestamp < last_timestamp:
-                raise ValueError("non-monotonic observation timestamps")
-            last_timestamp = timestamp
-            if terminal_seen:
-                raise ValueError("row appears after session terminal record")
-            if session_id is None:
-                session_id = row["session_id"]
-                starting_pnl = row_start
-                starting_day = row["starting_utc_day"]
-                config_id = row["config_fingerprint"]
-                code_id = row["code_fingerprint"]
-            elif row["session_id"] != session_id:
-                raise ValueError("analyzer refuses mixed process sessions")
-            elif row_start != starting_pnl:
-                raise ValueError("session starting P&L changed within one log")
-            elif row["starting_utc_day"] != starting_day:
-                raise ValueError("session starting UTC day changed within log")
-            elif (row["config_fingerprint"] != config_id
-                  or row["code_fingerprint"] != code_id):
-                raise ValueError("session provenance changed within log")
-            if config_id != expected_config or code_id != expected_code:
-                raise ValueError("research config/code fingerprint mismatch")
-            event = row.get("event") or "quote"
-            if event in ("session_end", "session_halt"):
-                if row.get("ticker") or row.get("event_id"):
-                    raise ValueError(
-                        "session terminal record must not name a market")
-                if not row.get("detail"):
-                    raise ValueError("session terminal record lacks a reason")
-                terminal_seen = True
-                terminal_clean = event == "session_end"
-                continue
-            if event != "quote":
-                continue
-            if not row.get("event_id"):
-                raise ValueError(
-                    "quote row lacks verified event_id; ticker-level grouping "
-                    "is not valid TEST evidence")
-            if not row.get("ticker"):
-                raise ValueError("quote row lacks ticker")
-            if any(row.get(k) in (None, "")
-                   for k in ("close_ts", "can_close_early", "mid", "bid",
-                             "ask", "bid_qty", "ask_qty")):
-                raise ValueError(
-                    "malformed quote row has missing price/depth field")
-            try:
-                close_ts = float(row["close_ts"])
-                if (not math.isfinite(close_ts) or close_ts < 0
-                        or row["can_close_early"] not in ("true", "false")):
-                    raise ValueError("invalid market lifecycle fields")
-                mid, bid, ask, _, _ = validate_logged_book(
-                    Decimal(row["mid"]), Decimal(row["bid"]),
-                    Decimal(row["ask"]), Decimal(row["bid_qty"]),
-                    Decimal(row["ask_qty"]))
-            except Exception as error:
-                raise ValueError(f"malformed quote row: {error}") from error
-            ticker = row["ticker"]
-            group = row.get("event_id") or row.get("group_id") or ticker
-            if ticker in groups and groups[ticker] != group:
-                raise ValueError(f"ticker {ticker} maps to multiple events")
-            groups[ticker] = group
-            series[ticker].append((timestamp, mid, bid, ask))
-    if not terminal_seen:
+    rows, data_gaps, _, _, terminal_status, terminal_reason, \
+        selected_sports, provenance_by_ticker = load_log(
+            path, include_metadata=True, cfg=CFG)
+    if terminal_status != "clean":
+        if terminal_status == "halted":
+            raise ValueError(
+                "analyzer refuses a halted research session: "
+                f"{terminal_reason or 'missing reason'}")
         raise ValueError(
             "analyzer requires one durable clean session terminal record")
-    if not terminal_clean:
-        raise ValueError("analyzer refuses a halted research session")
-    return series, groups
+    if data_gaps:
+        raise ValueError(
+            f"analyzer refuses {data_gaps} research data gap(s)")
+    series = defaultdict(list)
+    for timestamp, ticker, mid, bid, ask, _, _, _, _ in rows:
+        series[ticker].append((timestamp, mid, bid, ask))
+    groups = {
+        ticker: provenance.event_ticker
+        for ticker, provenance in provenance_by_ticker.items()
+    }
+    return (
+        series, groups, selected_sports, provenance_by_ticker)
 
 
 def split_bucket(group_id, version="event-v1"):
@@ -145,6 +64,204 @@ def split_bucket(group_id, version="event-v1"):
 def split_markets(tickers, groups):
     train = {t for t in tickers if split_bucket(groups[t]) == "TRAIN"}
     return train, set(tickers) - train
+
+
+def validate_replay_metadata(selected_sports, provenance, result):
+    """Require the loader and one full replay to describe one session."""
+    try:
+        replay_sports = tuple(result["selected_sports"])
+        replay_provenance = dict(result["market_provenance"])
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "replay result lacks selected-Sports/provenance metadata") \
+            from error
+    if replay_sports != tuple(selected_sports):
+        raise ValueError(
+            "load/replay selected-Sports metadata mismatch")
+    if replay_provenance != dict(provenance):
+        raise ValueError(
+            "load/replay market provenance metadata mismatch")
+
+
+def build_partitions(series, groups, selected_sports, provenance):
+    """Build deterministic Event-level partitions without touching rows."""
+    selected_sports = tuple(selected_sports)
+    if (not selected_sports
+            or len(set(selected_sports)) != len(selected_sports)
+            or any(not isinstance(sport, str) or not sport
+                   for sport in selected_sports)):
+        raise ValueError(
+            "analysis requires unique nonempty selected Sports")
+    tickers = set(series)
+    if tickers != set(groups) or tickers != set(provenance):
+        raise ValueError(
+            "analysis requires complete matching series/group/provenance "
+            "ticker sets")
+
+    bucket_by_ticker = {}
+    for ticker in tickers:
+        item = provenance[ticker]
+        event_ticker = getattr(item, "event_ticker", None)
+        sport = getattr(item, "sport", None)
+        if not event_ticker or groups[ticker] != event_ticker:
+            raise ValueError(
+                f"inconsistent Event provenance for {ticker!r}")
+        if sport not in selected_sports:
+            raise ValueError(
+                f"missing/unselected Sport provenance for {ticker!r}")
+        bucket_by_ticker[ticker] = split_bucket(event_ticker)
+
+    overall = {
+        bucket: tuple(sorted(
+            ticker for ticker in tickers
+            if bucket_by_ticker[ticker] == bucket))
+        for bucket in ("TRAIN", "TEST")
+    }
+    sports = {}
+    for sport in selected_sports:
+        sport_tickers = {
+            ticker for ticker in tickers
+            if provenance[ticker].sport == sport
+        }
+        sports[sport] = {
+            bucket: tuple(sorted(
+                ticker for ticker in sport_tickers
+                if bucket_by_ticker[ticker] == bucket))
+            for bucket in ("TRAIN", "TEST")
+        }
+    return {
+        "selected_sports": selected_sports,
+        "bucket_by_ticker": bucket_by_ticker,
+        "overall": overall,
+        "sports": sports,
+    }
+
+
+def summarize_partition(tickers, result):
+    """Attribute one partition from the already-computed shared replay."""
+    tickers = tuple(sorted(tickers))
+    selected = frozenset(tickers)
+    exits = sum(
+        ticker in selected and side == "SELL"
+        for ticker, side, _, _ in result["trades"])
+    net_pnl = sum(
+        (result["per_ticker_total"].get(ticker, Decimal(0))
+         for ticker in tickers),
+        Decimal(0))
+    residuals = {
+        ticker: result["residuals"][ticker]
+        for ticker in tickers
+        if ticker in result["residuals"]
+    }
+    residual_contracts = sum(
+        (detail["contracts"] for detail in residuals.values()),
+        Decimal(0))
+    residual_marked = sum(
+        (detail["marked_pnl"] for detail in residuals.values()),
+        Decimal(0))
+    return {
+        "tickers": tickers,
+        "markets": len(tickers),
+        "exits": exits,
+        "net_pnl": net_pnl,
+        "residuals": residuals,
+        "residual_contracts": residual_contracts,
+        "residual_marked": residual_marked,
+    }
+
+
+def _replay_is_evaluable(result):
+    """Fail closed if the replay flag contradicts concrete incomplete state."""
+    try:
+        return bool(
+            result["evaluable"]
+            and not result["residuals"]
+            and Decimal(str(result["residual_contracts"])) == 0
+            and result["pending_orders"] == 0
+            and result["data_gaps"] == 0
+            and not result["halted"]
+            and result["terminal_status"] == "clean"
+            and result["rows_processed"] > 0
+            and result["rows_processed"] == result["rows_available"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _incomplete_reasons(summary, result):
+    reasons = []
+    if summary["residual_contracts"]:
+        reasons.append("partition residual inventory")
+    elif result.get("residuals") or result.get("residual_contracts"):
+        reasons.append("portfolio residual inventory")
+    if result.get("pending_orders"):
+        reasons.append("pending orders")
+    if result.get("halted"):
+        reasons.append(
+            f"safety halt: {result.get('halt_reason') or 'missing reason'}")
+    if result.get("terminal_status") != "clean":
+        reasons.append(
+            f"session terminal={result.get('terminal_status', 'missing')}: "
+            f"{result.get('terminal_reason') or 'missing reason'}")
+    if result.get("data_gaps"):
+        reasons.append("data gaps")
+    processed = result.get("rows_processed", 0)
+    available = result.get("rows_available", 0)
+    if processed != available:
+        reasons.append(f"unprocessed rows {processed}/{available}")
+    if not processed:
+        reasons.append("no quote rows")
+    if not reasons:
+        reasons.append("replay marked non-evaluable")
+    return reasons
+
+
+def _format_partition(bucket, tickers, result):
+    summary = summarize_partition(tickers, result)
+    if _replay_is_evaluable(result):
+        status = (
+            f"net P&L {summary['net_pnl']:+.2f} USD "
+            "[RESEARCH-EVALUABLE; ESTIMATED FEES]")
+    else:
+        status = (
+            f"P&L NOT REPORTABLE; diagnostic mark "
+            f"{summary['net_pnl']:+.2f} USD [INCOMPLETE: "
+            f"{', '.join(_incomplete_reasons(summary, result))}]")
+    residual = (
+        f" (incl. residual {summary['residual_contracts']} contracts "
+        f"marked {summary['residual_marked']:+.2f})"
+        if summary["residual_contracts"] else "")
+    return (
+        f"  {bucket}: {summary['markets']} markets, "
+        f"{summary['exits']} exits, {status}{residual}")
+
+
+def format_replay_report(partitions, result):
+    """Format deterministic overall/per-Sport shared replay attribution."""
+    lines = [
+        "FULL REPLAY through one shared portfolio path:",
+        "",
+        "OVERALL",
+        _format_partition("TRAIN", partitions["overall"]["TRAIN"], result),
+        _format_partition("TEST", partitions["overall"]["TEST"], result),
+    ]
+    globally_evaluable = _replay_is_evaluable(result)
+    for sport in partitions["selected_sports"]:
+        sport_partitions = partitions["sports"][sport]
+        test_summary = summarize_partition(
+            sport_partitions["TEST"], result)
+        supported = bool(
+            test_summary["tickers"]
+            and globally_evaluable
+            and test_summary["net_pnl"] > Decimal(0))
+        lines.extend([
+            "",
+            f"SPORT: {sport}",
+            _format_partition("TRAIN", sport_partitions["TRAIN"], result),
+            _format_partition("TEST", sport_partitions["TEST"], result),
+            "  Held-out: "
+            + (SUPPORTED_LABEL if supported else NOT_SUPPORTED_LABEL),
+        ])
+    return "\n".join(lines)
 
 
 def find_signals(points, dip):
@@ -200,7 +317,9 @@ def report_markouts(name, sigs):
 
 
 def main(path):
-    series, groups = load(path)
+    series, groups, selected_sports, provenance = load(path)
+    partitions = build_partitions(
+        series, groups, selected_sports, provenance)
     tickers = sorted(series)
     print(f"Loaded {sum(len(v) for v in series.values())} ticks, "
           f"{len(tickers)} markets")
@@ -208,7 +327,8 @@ def main(path):
           f"stop={CFG.stop_loss}c hold={CFG.max_hold_seconds}s "
           f"latency={CFG.sim_latency_s}s slip={CFG.sim_slippage_cents}c "
           f"balance_precision=${CFG.balance_precision_usd}\n")
-    train, test = split_markets(set(tickers), groups)
+    train = partitions["overall"]["TRAIN"]
+    test = partitions["overall"]["TEST"]
 
     print("MARK-OUTS (NON-EXECUTABLE hypothesis diagnostics; no latency/depth):")
     for name, group in (("TRAIN", train), ("TEST", test)):
@@ -220,49 +340,9 @@ def main(path):
                          for i in find_signals(pts, CFG.dip_threshold)]
         report_markouts(name, sigs)
 
-    print("\nFULL REPLAY through one shared portfolio path (P&L attributed by "
-          "partition):")
     r = replay(path, cfg=CFG)
-    for name, group in (("TRAIN", train), ("TEST", test)):
-        sells = [t for t in r["trades"]
-                 if t[0] in group and t[1] == "SELL"]
-        total = sum((r["per_ticker_total"].get(t, Decimal(0))
-                     for t in group), Decimal(0))
-        group_residuals = {t: detail for t, detail in r["residuals"].items()
-                           if t in group}
-        residual_contracts = sum(
-            (d["contracts"] for d in group_residuals.values()), Decimal(0))
-        residual_marked = sum(
-            (d["marked_pnl"] for d in group_residuals.values()), Decimal(0))
-        resid = (f" (incl. residual {residual_contracts} contracts "
-                 f"marked {residual_marked:+.2f})"
-                 if residual_contracts else "")
-        if r["evaluable"]:
-            result_text = (f"net P&L {total:+.2f} USD "
-                           "[RESEARCH-EVALUABLE; ESTIMATED FEES]")
-        else:
-            reasons = []
-            if residual_contracts:
-                reasons.append("partition residual inventory")
-            elif r["residual_contracts"]:
-                reasons.append("portfolio residual inventory")
-            if r["pending_orders"]:
-                reasons.append("pending orders")
-            if r["data_gaps"]:
-                reasons.append("data gaps")
-            if r["halted"]:
-                reasons.append(f"safety halt: {r['halt_reason']}")
-            if r["terminal_status"] != "clean":
-                reasons.append(
-                    f"session terminal={r['terminal_status']}: "
-                    f"{r['terminal_reason'] or 'missing reason'}")
-            if not r["rows_processed"]:
-                reasons.append("no quote rows")
-            result_text = (f"P&L NOT REPORTABLE; diagnostic mark "
-                           f"{total:+.2f} USD [INCOMPLETE: "
-                           f"{', '.join(reasons) or 'unknown'}]")
-        print(f"  {name}: {len(sells)} exits across {len(group)} markets, "
-              f"{result_text}{resid}")
+    validate_replay_metadata(selected_sports, provenance, r)
+    print("\n" + format_replay_report(partitions, r))
     print("\nJudge only on TEST. Research-evaluable does not prove live "
           "profitability; current series fees and every README checklist "
           "item still require independent verification.")

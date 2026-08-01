@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:inci-tennis-expert:schema:binding-review-v1",
+  "title": "Inci Tennis Expert Binding Review v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "artifact_created_wall_ns",
+    "binding_artifact_id",
+    "binding_artifact_sha256",
+    "decision",
+    "reviewer_id",
+    "reviewed_wall_ns",
+    "review_evidence_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "artifact_created_wall_ns": {
+      "$ref": "#/$defs/nonnegativeInt64"
+    },
+    "binding_artifact_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "binding_artifact_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "decision": {
+      "const": "approved"
+    },
+    "reviewer_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "reviewed_wall_ns": {
+      "$ref": "#/$defs/nonnegativeInt64"
+    },
+    "review_evidence_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$comment": "Production requires exact canonical JSON bytes, independently authorized raw pins, complete review-evidence projection equality, and artifact/review/start chronology.",
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^(?![Hh][Tt][Tt][Pp][Ss]?:|[Ff][Ii][Ll][Ee]:)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonnegativeInt64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    }
+  }
+}

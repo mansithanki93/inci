@@ -3,9 +3,14 @@ bid, ask, AND top-of-book quantities). Staleness is tracked from subscribe
 time, so a market that never delivers a quote counts as stale from t=0."""
 import time
 import collections
+from types import MappingProxyType
 
 from schemas import SchemaError
-from kalshi_client import format_market_skips
+from sports_discovery import (
+    DiscoveryResult,
+    SelectedContract,
+    discover_game_contracts,
+)
 
 
 class MarketUnavailable(Exception):
@@ -21,35 +26,77 @@ class PriceFeed:
             lambda: collections.deque(maxlen=600))
         self.last_good = {}
         self.last_book = {}     # ticker -> (bid, bid_qty, ask, ask_qty)
-        self.group_ids = {}
+        self.contracts_by_ticker = MappingProxyType({})
+        self.provenance_by_ticker = MappingProxyType({})
+        self._discovery_installed = False
         self.close_times = {}
         self.can_close_early = {}
 
-    def subscribe(self, tickers):
-        now = self.clock()
-        for t in tickers:
-            self.last_good.setdefault(t, now)   # stale clock starts NOW
+    def install_discovery(self, discovery):
+        """Install one complete, immutable discovery result atomically."""
+        if self._discovery_installed:
+            raise ValueError("discovery is already installed")
+        if not isinstance(discovery, DiscoveryResult):
+            raise ValueError("discovery must be a DiscoveryResult")
+
+        selected_sports = frozenset(discovery.selected_sports)
+        contracts = {}
+        provenance = {}
+        for contract in discovery.contracts:
+            if not isinstance(contract, SelectedContract):
+                raise ValueError(
+                    "discovery contracts must contain SelectedContract values")
+            ticker = contract.ticker
+            if ticker in contracts:
+                raise ValueError(f"duplicate discovery ticker {ticker!r}")
+            if contract.provenance.sport not in selected_sports:
+                raise ValueError(
+                    f"contract {ticker!r} Sport "
+                    f"{contract.provenance.sport!r} is not selected")
+            contracts[ticker] = contract
+            provenance[ticker] = contract.provenance
+
+        self.contracts_by_ticker = MappingProxyType(contracts)
+        self.provenance_by_ticker = MappingProxyType(provenance)
+        self._discovery_installed = True
+
+    def discover(self, *, now=None):
+        result = discover_game_contracts(
+            self.cfg, self.client, now=now)
+        self.install_discovery(result)
+        return result
 
     def discover_tickers(self):
-        if self.cfg.tickers:
-            return self.cfg.tickers
-        found = []
-        markets = self.client.get_markets(
-            status="open", limit=200, mve_filter="exclude")
-        print("[discover] " + format_market_skips(
-            getattr(self.client, "last_market_skips", {})))
-        keywords = [k.lower() for k in self.cfg.market_keywords]
-        for m in markets:
-            if (m["status"] != "active"
-                    or m["yes_bid"] is None or m["yes_ask"] is None
-                    or m["yes_bid_size"] <= 0 or m["yes_ask_size"] <= 0):
-                continue
-            text = (m["title"] + " " + m["ticker"]).lower()
-            if any(kw in text for kw in keywords):
-                found.append(m["ticker"])
-                self.group_ids[m["ticker"]] = m["event_ticker"]
-                print(f"[discover] {m['ticker']}: {m['title'][:60]}")
-        return found
+        """Compatibility adapter; production startup uses ``discover``."""
+        return list(self.discover().tickers)
+
+    def subscribe(self, tickers):
+        if not self._discovery_installed:
+            raise SchemaError("discovery provenance is not installed")
+        if isinstance(tickers, (str, bytes)):
+            raise ValueError("subscription tickers must be a sequence")
+        try:
+            tickers = tuple(tickers)
+        except TypeError as error:
+            raise ValueError(
+                "subscription tickers must be an iterable") from error
+
+        seen = set()
+        for ticker in tickers:
+            if not isinstance(ticker, str) or not ticker:
+                raise ValueError(
+                    "subscription tickers must be nonempty strings")
+            if ticker in seen:
+                raise ValueError(
+                    f"duplicate subscription ticker {ticker!r}")
+            if ticker not in self.provenance_by_ticker:
+                raise SchemaError(
+                    f"subscription ticker {ticker!r} was not discovered")
+            seen.add(ticker)
+
+        now = self.clock()
+        for ticker in tickers:
+            self.last_good.setdefault(ticker, now)   # stale clock starts NOW
 
     def get_quote(self, ticker):
         """Return ``(mid, bid, ask, observed_at)``.
@@ -59,14 +106,18 @@ class PriceFeed:
         fills.  One call to the market
         endpoint yields bid, ask, AND top-of-book sizes (live V2 schema).
         Raises on transport/schema errors so safety can count them."""
+        expected = self.provenance(ticker)
         m = self.client.get_market(ticker)          # SchemaError propagates
-        observed_at = self.clock()
-        event_ticker = m.get("event_ticker")
-        if not event_ticker:
+        if m.get("ticker") != ticker:
             raise SchemaError(
-                f"market {ticker}: missing event_ticker; research grouping "
-                "would be unsafe")
-        self.group_ids[ticker] = event_ticker
+                f"market identity mismatch for {ticker!r}: "
+                f"got ticker={m.get('ticker')!r}")
+        if m.get("event_ticker") != expected.event_ticker:
+            raise SchemaError(
+                f"market event mismatch for {ticker!r}: expected "
+                f"{expected.event_ticker!r}, got "
+                f"{m.get('event_ticker')!r}")
+        observed_at = self.clock()
         if m.get("close_ts") is not None:
             self.close_times[ticker] = m["close_ts"]
         self.can_close_early[ticker] = bool(m.get("can_close_early"))
@@ -89,8 +140,20 @@ class PriceFeed:
     def top_of_book(self, ticker):
         return self.last_book.get(ticker, (None, None, None, None))
 
+    def provenance(self, ticker):
+        if not isinstance(ticker, str) or not ticker:
+            raise SchemaError("ticker must be a nonempty string")
+        if not self._discovery_installed:
+            raise SchemaError("discovery provenance is not installed")
+        try:
+            return self.provenance_by_ticker[ticker]
+        except KeyError as error:
+            raise SchemaError(
+                f"ticker {ticker!r} has no installed discovery provenance") \
+                from error
+
     def group_id(self, ticker):
-        return self.group_ids.get(ticker)
+        return self.provenance(ticker).event_ticker
 
     def lifecycle(self, ticker):
         """Return the lifecycle facts attached to the latest observation."""

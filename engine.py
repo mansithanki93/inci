@@ -21,6 +21,15 @@ class Context:
         self.clock = clock
         self.latest_bid = {}
         self.bid_ts = {}          # ticker -> time of last usable bid
+        self.entry_status = {}    # ticker -> stable lifecycle gate status
+
+
+def set_entry_status(ctx, ticker, status, message=None):
+    """Publish lifecycle gate state without repeating unchanged console text."""
+    previous = ctx.entry_status.get(ticker)
+    ctx.entry_status[ticker] = status
+    if message is not None and previous != status:
+        print(message)
 
 
 def sync_execution_observation(ctx, ticker):
@@ -41,18 +50,17 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
     # timestamp.  This prevents processing delay from making an old quote
     # eligible for a latency-delayed paper fill.
     now = ctx.clock() if observed_at is None else observed_at
-    group_id = (ctx.feed.group_id(ticker)
-                if hasattr(ctx.feed, "group_id") else ticker)
     if ctx.log:
         _, bq, _, aq = ctx.feed.top_of_book(ticker)
         close_ts, can_close_early = (
             ctx.feed.lifecycle(ticker)
             if hasattr(ctx.feed, "lifecycle") else (None, None))
-        ctx.log.tick(ticker, mid, bid, ask, bq, aq, ts=now,
-                     group_id=group_id,
-                     event="quote" if mid is not None else "no_quote",
-                     close_ts=close_ts,
-                     can_close_early=can_close_early)
+        if mid is None:
+            ctx.log.event(ticker, "no_quote", ts=now)
+        else:
+            ctx.log.tick(
+                ticker, mid, bid, ask, bq, aq, ts=now,
+                close_ts=close_ts, can_close_early=can_close_early)
     if bid is not None:
         ctx.latest_bid[ticker] = bid
         ctx.bid_ts[ticker] = now
@@ -65,13 +73,9 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
                 ctx.strategy.record_fill(
                     pending.ticker, pending.side, *result, now=now)
                 if ctx.log:
-                    pending_group = (
-                        ctx.feed.group_id(pending.ticker)
-                        if hasattr(ctx.feed, "group_id") else pending.ticker)
                     ctx.log.trade(pending.ticker, pending.side,
                                   result[0], result[1], pending.reason,
-                                  fee=result[2], ts=now,
-                                  group_id=pending_group)
+                                  fee=result[2], ts=now)
 
     # Revalue all exposure after each observation (and any due fill), before
     # another exit/entry can be scheduled.  This gives runtime and replay the
@@ -104,7 +108,7 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
             if ctx.log:
                 ctx.log.trade(ticker, "SELL", result[0], result[1],
                               exit_sig["reason"], fee=result[2],
-                              ts=now, group_id=group_id)
+                              ts=now)
         check_loss_limit(ctx)
         return
 
@@ -118,10 +122,26 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
             and not ctx.feed.entry_allowed(
                 ticker, now,
                 ctx.cfg.max_hold_seconds + ctx.cfg.close_buffer_seconds)):
+        set_entry_status(
+            ctx, ticker, "blocked:close_horizon",
+            f"[entry] BLOCKED {ticker}: insufficient close horizon")
         return
-    if (hasattr(ctx.feed, "early_close_risk")
-            and ctx.feed.early_close_risk(ticker)):
-        return
+    early_close_risk = (
+        hasattr(ctx.feed, "early_close_risk")
+        and ctx.feed.early_close_risk(ticker))
+    if early_close_risk:
+        if not ctx.cfg.paper_trading:
+            set_entry_status(
+                ctx, ticker, "blocked:can_close_early",
+                f"[entry] BLOCKED {ticker}: can_close_early=true "
+                "outside paper mode")
+            return
+        set_entry_status(
+            ctx, ticker, "paper_allowed:can_close_early",
+            f"[entry] PAPER-ONLY {ticker}: can_close_early=true; "
+            "entry remains enabled")
+    else:
+        set_entry_status(ctx, ticker, "eligible")
     entry_sig = ctx.strategy.check_entry(ticker, hist, now,
                                          mid, bid, ask)
     if entry_sig:
@@ -145,7 +165,7 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
             if ctx.log:
                 ctx.log.trade(ticker, "BUY", result[0], result[1],
                               entry_sig["reason"], fee=result[2],
-                              ts=now, group_id=group_id)
+                              ts=now)
         check_loss_limit(ctx)
 
 

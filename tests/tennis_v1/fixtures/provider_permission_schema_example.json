@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "provider_id": "synthetic-provider",
+  "product_tier": "trial-v1",
+  "entitlement_id_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "terms_version": "terms-2026-07",
+  "basis": "trial_terms",
+  "intended_use": "private_paper_evaluation",
+  "permitted_operations": ["provider_ingest", "raw_retention", "derived_signals"],
+  "access_starts_at": "2026-07-27T12:00:00Z",
+  "access_expires_at": "2026-08-03T12:00:00Z",
+  "analysis_expires_at": "2026-08-03T12:00:00Z",
+  "raw_retention_until": "2026-08-03T12:00:00Z",
+  "reviewed_at": "2026-07-26T12:00:00Z",
+  "reviewer_id": "reviewer-test",
+  "approval_id": "approval-test",
+  "evidence_document_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

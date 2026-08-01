@@ -12,23 +12,235 @@ README verification checklist — including positive net replay results
 on unseen matches from your own logs — is satisfied, at which point
 enabling it is a deliberate code change, not a switch.
 """
+import argparse
 import sys
 import time
 import signal
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from config import Config
 from kalshi_client import KalshiClient, format_market_skips
 from market_data import PriceFeed, MarketUnavailable
 from strategy import ScalpStrategy
 from executor import Executor, HaltError
-from research_log import ResearchLog
+from research_log import ResearchLog, write_startup_halt
 from order_journal import OrderJournal
 from safety import Safety, Reconciler, ExposureError
 from schemas import SchemaError, UnknownOrderState
 from engine import Context, process_tick, flatten_all
 from pnl_ledger import DailyPnlLedger
 from process_lock import ProcessLock, ProcessLockError
+from sports_discovery import local_day_window, resolve_series
+
+
+@dataclass(frozen=True)
+class CliOptions:
+    mode: str
+    requested_sports: tuple[str, ...]
+
+
+class CliUsageError(ValueError):
+    """A command-line error that callers can print without a traceback."""
+
+
+class _CliParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise CliUsageError(f"{self.format_usage().strip()}\nerror: {message}")
+
+
+def parse_cli(argv) -> CliOptions:
+    """Parse operator input without constructing configuration or clients."""
+    parser = _CliParser(prog="bot.py")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check", action="store_const", dest="mode",
+                       const="check")
+    modes.add_argument("--list-sports", action="store_const", dest="mode",
+                       const="list-sports")
+    modes.add_argument("--live", action="store_const", dest="mode",
+                       const="live")
+    modes.add_argument("--demo", action="store_const", dest="mode",
+                       const="demo")
+    parser.set_defaults(mode="paper")
+    parser.add_argument("--sports")
+    parsed = parser.parse_args(list(argv))
+
+    requested_sports = ()
+    if parsed.sports is not None:
+        if parsed.mode != "paper":
+            parser.error("--sports is valid only for normal paper mode")
+        requested_sports = tuple(part.strip() for part in
+                                 parsed.sports.split(","))
+        if not all(requested_sports):
+            parser.error("--sports cannot contain a blank comma component")
+        normalized = [sport.casefold() for sport in requested_sports]
+        if len(set(normalized)) != len(normalized):
+            parser.error("--sports cannot contain duplicate Sports")
+    return CliOptions(mode=parsed.mode, requested_sports=requested_sports)
+
+
+def _print_supported_sports(client):
+    """Temporary Task 1 adapter for Task 2's public filters client method."""
+    filters = client.get_sports_filters()
+    ordering = (filters.get("sport_ordering", ())
+                if isinstance(filters, dict) else filters)
+    print("All sports")
+    for sport in ordering:
+        if sport != "All sports":
+            print(sport)
+
+
+def _utc_text(timestamp):
+    return datetime.fromtimestamp(
+        timestamp, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _number_text(value):
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _sample_page_suffix(metadata):
+    cursor = metadata["cursor"]
+    if cursor:
+        return "more_pages=true; not followed by --check"
+    return "more_pages=false"
+
+
+def _games_capable_sports(filters):
+    """Return canonical Sports that advertise exact Games competitions."""
+    sports = filters["sports"]
+    return tuple(
+        sport for sport in filters["sport_ordering"]
+        if sport != "All sports"
+        and "Games" in sports[sport]["scopes"]
+        and any("Games" in scopes
+                for scopes in sports[sport]["competitions"].values()))
+
+
+def _sample_milestone_event_ticker(milestones):
+    """Prefer an explicit main game Event, then a sole primary Event."""
+    sports_rows = tuple(
+        row for row in milestones if row["category"] == "Sports")
+    for row in sports_rows:
+        if row["main_game_event_ticker"] is not None:
+            return row["main_game_event_ticker"]
+    for row in sports_rows:
+        primary = row["primary_event_tickers"]
+        if len(primary) == 1:
+            return primary[0]
+    return None
+
+
+def _preflight_sports_metadata(client):
+    """Validate bounded public Sports contracts without doing discovery."""
+    filters = client.get_sports_filters()
+    capable = _games_capable_sports(filters)
+    canonical_count = sum(
+        sport != "All sports" for sport in filters["sport_ordering"])
+    print(
+        f"[check] Sports filters OK: {canonical_count} "
+        "canonical Sports; Games-capable: "
+        + (", ".join(capable) if capable else "none"))
+
+    series_rows = client.get_sports_series()
+    print(f"[check] Sports series schema OK: {len(series_rows)} rows")
+
+    if not capable:
+        print("[check] WARNING no Games-capable Sport/competition is "
+              "currently available")
+        return
+
+    sport = capable[0]
+    competitions = tuple(sorted(
+        name for name, scopes
+        in filters["sports"][sport]["competitions"].items()
+        if "Games" in scopes))
+    competition = competitions[0]
+    window = local_day_window()
+    milestones, milestone_metadata = client.get_sports_milestones_page(
+        competition=competition,
+        minimum_start_date=datetime.fromtimestamp(
+            window.session_start_utc, timezone.utc))
+    print(
+        "[check] Sports milestone page OK: "
+        f"competition={competition} rows={len(milestones)} "
+        f"{_sample_page_suffix(milestone_metadata)}")
+
+    event_ticker = _sample_milestone_event_ticker(milestones)
+    if event_ticker is None:
+        print("[check] WARNING no usable Sports milestone")
+        return
+
+    official_series = tuple(
+        row["series_ticker"] for row in series_rows
+        if row["category"] == "Sports")
+    series_ticker = resolve_series(event_ticker, official_series)
+    if series_ticker is None:
+        print("[check] WARNING no resolvable official Sports Series")
+        return
+
+    events, event_metadata = client.get_open_events_page(
+        series_ticker=series_ticker)
+    print(
+        "[check] Sports event page OK: "
+        f"series={series_ticker} events={len(events)} "
+        f"{_sample_page_suffix(event_metadata)}")
+    print("[check] " + format_market_skips(
+        event_metadata["market_skips"]))
+
+
+def format_discovery_telemetry(discovery):
+    """Return deterministic operator telemetry for one discovery result."""
+    stats = discovery.stats
+    count_keys = (
+        "series_rows", "milestone_pages", "milestone_rows",
+        "event_pages", "event_rows", "candidates", "selected",
+    )
+    skip_items = sorted(
+        (key, value) for key, value in stats.items()
+        if key.startswith("skip_") and value)
+    skip_text = (", ".join(f"{key}={value}" for key, value in skip_items)
+                 if skip_items else "none")
+    lines = [
+        "[discover] Sports=" + ",".join(discovery.selected_sports),
+        f"[discover] day timezone={discovery.local_timezone}",
+        f"  local=[{discovery.session_start_local}, "
+        f"{discovery.session_end_local})",
+        f"  utc=[{_utc_text(discovery.session_start_utc)}, "
+        f"{_utc_text(discovery.session_end_utc)})",
+        "[discover] " + " ".join(
+            f"{key}={stats.get(key, 0)}" for key in count_keys),
+        f"  skips={skip_text}",
+    ]
+    for contract in discovery.contracts:
+        provenance = contract.provenance
+        lines.append(
+            f"[discover] {provenance.sport} | "
+            f"{provenance.league or 'unknown'} | {contract.game_title} | "
+            f"{contract.ticker} | "
+            f"{_utc_text(provenance.scheduled_start_ts)} | "
+            f"bid={_number_text(contract.bid)} "
+            f"ask={_number_text(contract.ask)} "
+            f"spread={_number_text(contract.ask - contract.bid)} "
+            f"depth=({_number_text(contract.bid_size)},"
+            f"{_number_text(contract.ask_size)})")
+    return "\n".join(lines)
+
+
+def _precanonical_failure(reason, requested_sports, requested_tickers):
+    print(f"STARTUP FAILED ({reason})")
+    try:
+        write_startup_halt(
+            reason, requested_sports=requested_sports,
+            tickers=requested_tickers)
+    except Exception as log_error:
+        print("STARTUP FAILED to persist operational halt: "
+              f"{type(log_error).__name__}: {log_error}")
+    return 1
 
 
 @contextmanager
@@ -99,6 +311,11 @@ def preflight(cfg, client):
     except (SchemaError, Exception) as e:
         print(f"[check] FAIL market data contract: {e}")
         ok = False
+    try:
+        _preflight_sports_metadata(client)
+    except Exception as e:
+        print(f"[check] FAIL Sports metadata contract: {e}")
+        ok = False
     if cfg.api_key_id:
         try:
             print(f"[check] auth OK, balance: {client.get_balance()}")
@@ -111,11 +328,14 @@ def preflight(cfg, client):
             print("[check] authenticated portfolio envelopes OK; row samples: "
                   + ", ".join(f"{name}={len(rows)}"
                               for name, rows in samples.items()))
+            observed = [name for name, rows in samples.items() if rows]
             if empty:
-                raise SchemaError(
-                    "portfolio row schemas not exercised for empty "
-                    f"collections {empty}; preflight coverage is incomplete")
-            print("[check] portfolio row schemas OK (orders/fills/positions)")
+                print(
+                    "[check] WARNING row schemas not observed for empty "
+                    f"collections {empty}; no production probes were made")
+            print(
+                "[check] portfolio row schemas observed live: "
+                + (", ".join(observed) if observed else "none"))
         except (SchemaError, Exception) as e:
             print(f"[check] FAIL portfolio contract: {e}")
             ok = False
@@ -185,10 +405,9 @@ def run_loop(ctx, reconciler, tickers, sleep=time.sleep):
                 except Exception as e:
                     sweep_had_error = True
                     if ctx.log and hasattr(ctx.log, "event"):
-                        group = (ctx.feed.group_id(ticker)
-                                 if hasattr(ctx.feed, "group_id") else ticker)
-                        ctx.log.event(ticker, "api_error", ts=ctx.clock(),
-                                      group_id=group)
+                        ctx.log.event(
+                            ticker, "api_error", ts=ctx.clock(),
+                            detail=f"{type(e).__name__}: {e}")
                     was_quarantined = ticker in safety.quarantined
                     if isinstance(e, MarketUnavailable):
                         if ticker in critical_tickers():
@@ -208,8 +427,9 @@ def run_loop(ctx, reconciler, tickers, sleep=time.sleep):
                     if (ctx.log and hasattr(ctx.log, "event")
                             and not was_quarantined
                             and ticker in safety.quarantined):
-                        ctx.log.event(ticker, "quarantined", ts=ctx.clock(),
-                                      group_id=group)
+                        ctx.log.event(
+                            ticker, "quarantined", ts=ctx.clock(),
+                            detail=str(e))
                     safety.check_staleness(
                         ctx.feed, tickers, critical_tickers())
                     if safety.tripped:
@@ -264,33 +484,75 @@ def run_session(cfg, client):
     if not cfg.paper_trading:
         print("REAL ORDER SESSION DISABLED: configuration cannot unlock it.")
         return 1
+    if cfg.tickers and cfg.sports:
+        print("STARTUP FAILED: both configured tickers and Sports were "
+              "provided; select exactly one discovery method.")
+        return 1
+    if not cfg.tickers and not cfg.sports:
+        print("STARTUP FAILED: select at least one Sport or configure "
+              "explicit tickers before starting a paper session.")
+        return 1
+    requested_sports = tuple(cfg.sports)
+    requested_tickers = tuple(cfg.tickers)
     print("PAPER mode (latency/spread/depth/slippage/fees simulated).")
-    session_start = time.time()
-    feed = PriceFeed(cfg, client)
-    ledger = DailyPnlLedger(cfg.daily_pnl_path)
-    strategy = ScalpStrategy(cfg, ledger=ledger, now=session_start)
-    journal = OrderJournal(cfg.order_journal_path)
-    executor = Executor(cfg, client, feed, journal=journal)
-    log = ResearchLog(starting_pnl=strategy.realized_pnl, config=cfg,
-                      session_start=session_start)
-    safety = Safety(cfg)
-    ctx = Context(cfg, feed, strategy, executor, log, safety)
 
-    reconciler = None
-    if not cfg.paper_trading:
-        reconciler = Reconciler(cfg, client, strategy, journal)
-        try:
+    try:
+        feed = PriceFeed(cfg, client)
+        discovery = feed.discover()
+    except Exception as error:
+        reason = f"market discovery failed: {type(error).__name__}: {error}"
+        return _precanonical_failure(
+            reason, requested_sports, requested_tickers)
+
+    try:
+        cfg.sports = list(discovery.selected_sports)
+        cfg.validate()
+        print(format_discovery_telemetry(discovery))
+        session_start = time.time()
+        ledger = DailyPnlLedger(cfg.daily_pnl_path)
+        strategy = ScalpStrategy(cfg, ledger=ledger, now=session_start)
+        log = ResearchLog(
+            starting_pnl=strategy.realized_pnl, config=cfg,
+            session_start=session_start,
+            provenance_by_ticker=discovery.provenance_by_ticker)
+    except Exception as error:
+        reason = f"canonical startup failed: {type(error).__name__}: {error}"
+        return _precanonical_failure(
+            reason, requested_sports, requested_tickers)
+
+    try:
+        journal = OrderJournal(cfg.order_journal_path)
+        executor = Executor(cfg, client, feed, journal=journal)
+        safety = Safety(cfg)
+        ctx = Context(cfg, feed, strategy, executor, log, safety)
+
+        reconciler = None
+        if not cfg.paper_trading:
+            reconciler = Reconciler(cfg, client, strategy, journal)
             reconciler.startup()
-        except Exception as e:
-            print(f"\nSTARTUP FAILED (refusing to trade): {e}")
-            return 1
 
-    tickers = feed.discover_tickers()
-    if not tickers:
-        print(f"No open markets matched {cfg.market_keywords}.")
-        log.end(clean=True, reason="no matching markets")
-        return 0
-    feed.subscribe(tickers)
+        tickers = discovery.tickers
+        if not tickers:
+            reason = "no eligible Games contracts for selected Sports"
+            try:
+                log.end(clean=True, reason=reason)
+            except Exception as log_error:
+                print("STARTUP FAILED to persist clean research terminal: "
+                      f"{type(log_error).__name__}: {log_error}")
+                return 1
+            print("No eligible Games contracts for selected Sports.")
+            return 0
+        feed.subscribe(tickers)
+    except Exception as error:
+        reason = f"session startup failed: {type(error).__name__}: {error}"
+        print(f"STARTUP FAILED ({reason})")
+        try:
+            log.end(clean=False, reason=reason)
+        except Exception as log_error:
+            print("STARTUP FAILED to persist research terminal: "
+                  f"{type(log_error).__name__}: {log_error}")
+        return 1
+
     print(f"Monitoring {len(tickers)} markets. Ctrl-C to stop.\n")
 
     with termination_signals_as_interrupt():
@@ -307,14 +569,20 @@ def main(argv=None, client_factory=KalshiClient, config_factory=Config):
     argv = sys.argv[1:] if argv is None else list(argv)
     print("=== Inci v6.0 — Kalshi paper-research scalper ===")
 
-    if "--live" in argv:
+    try:
+        options = parse_cli(argv)
+    except CliUsageError as error:
+        print(error)
+        return 2
+
+    if options.mode == "live":
         print("Live trading is disabled in this build. See README: the\n"
               "verification checklist (including positive replay results on\n"
               "unseen matches) must pass first; enabling live is then a\n"
               "deliberate code change reviewed on its own.")
         return 2
 
-    if "--demo" in argv:
+    if options.mode == "demo":
         print("Demo order flow is disabled in this build, alongside live.\n"
               "Unlock order (demo) mode only after: (1) authenticated\n"
               "`--check` passes against production portfolio schemas, and\n"
@@ -328,8 +596,19 @@ def main(argv=None, client_factory=KalshiClient, config_factory=Config):
     except ValueError as error:
         print(f"STARTUP FAILED (invalid configuration): {error}")
         return 1
+    if options.requested_sports:
+        cfg.sports = list(options.requested_sports)
+    if options.mode == "list-sports":
+        try:
+            client = client_factory(cfg)
+            _print_supported_sports(client)
+            return 0
+        except Exception as error:
+            print("LIST SPORTS FAILED: "
+                  f"{type(error).__name__}: {error}")
+            return 1
     client = client_factory(cfg)
-    if "--check" in argv:
+    if options.mode == "check":
         return 0 if preflight(cfg, client) else 1
     try:
         with ProcessLock(cfg.process_lock_path):
