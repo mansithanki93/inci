@@ -907,6 +907,7 @@ class TrialUsageLedger:
         dispositions_by_session: dict[str, list[dict[str, object]]] = {}
         shadow_discovery_sessions: set[str] = set()
         shadow_collection_sessions: set[str] = set()
+        failed_shadow_discovery_sessions: set[str] = set()
         coordinates_by_session: dict[str, list[int]] = {}
         for coordinate, history in self._attempt_history.items():
             coordinates_by_session.setdefault(history[0], []).append(coordinate)
@@ -1020,6 +1021,16 @@ class TrialUsageLedger:
                             and provider is not None
                             and last_is_observation
                         )
+                        if coherent and command == "shadow":
+                            coherent = (
+                                session_id in shadow_collection_sessions
+                                and dispositions[-1].get("route")
+                                in {"summary", "timeline"}
+                                and dispositions[-1].get(
+                                    "provider_match_id"
+                                )
+                                == provider
+                            )
                     elif (
                         coherent
                         and reason == "cancelled"
@@ -1035,6 +1046,12 @@ class TrialUsageLedger:
                             command in {"check", "observe", "shadow"}
                             and last_is_observation
                             and dispositions[-1].get("terminal_reason") == reason
+                        )
+                    if session_id in failed_shadow_discovery_sessions:
+                        coherent = (
+                            coherent
+                            and provider is None
+                            and reason in {"halted", "cancelled"}
                         )
                 if not coherent:
                     _fail("sportradar_audit_ledger_corrupt")
@@ -1083,6 +1100,8 @@ class TrialUsageLedger:
                 _fail("sportradar_audit_ledger_corrupt")
             if command == "shadow":
                 session = row["session_id"]
+                if session in failed_shadow_discovery_sessions:
+                    _fail("sportradar_audit_ledger_corrupt")
                 if row["route"] == "live_summaries":
                     if (
                         session in shadow_discovery_sessions
@@ -1098,6 +1117,8 @@ class TrialUsageLedger:
             if schema == "inci-sportradar-trial-parser-failure-v1":
                 if not _safe_code(row["code"]):
                     _fail("sportradar_audit_ledger_corrupt")
+                if command == "shadow" and row["route"] == "live_summaries":
+                    failed_shadow_discovery_sessions.add(row["session_id"])
                 dispositions_by_session.setdefault(
                     row["session_id"], []
                 ).append(row)
