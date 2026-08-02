@@ -482,6 +482,7 @@ def _safe_display(value: object, maximum: int = 160) -> str:
 
 def _chooser_text(snapshot: ShadowChooserSnapshot) -> str:
     lines = [
+        "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS\n",
         "READY TO COLLECT\n",
         "----------------\n",
     ]
@@ -522,7 +523,11 @@ def _prompt_choice(
         _write(stdout, f"Select [1-{len(snapshot.ready)}] or Q: ")
         try:
             stop.prompting = True
+            if stop():
+                raise KeyboardInterrupt
             value = stdin.readline()
+            if stop():
+                raise KeyboardInterrupt
         finally:
             stop.prompting = False
         if type(value) is not str:
@@ -774,6 +779,24 @@ async def _run_choose(
                         reason="list_complete",
                     )
                     return "list_complete"
+                selected_wall_ns = services.wall_ns()
+                if (
+                    type(selected_wall_ns) is not int
+                    or selected_wall_ns <= 0
+                ):
+                    raise ShadowCollectorError("shadow_clock_invalid")
+                selected_source_age = (
+                    selected_wall_ns
+                    - provider_snapshot.generated_wall_ns
+                )
+                if selected_source_age < -_MAXIMUM_SOURCE_FUTURE_NS:
+                    raise trial_wire.SportradarWireContractError(
+                        "sportradar_source_time_ahead"
+                    )
+                if selected_source_age > _MAXIMUM_SOURCE_AGE_NS:
+                    raise trial_wire.SportradarWireContractError(
+                        "sportradar_source_stale"
+                    )
             except asyncio.CancelledError:
                 await _record_trial_terminal(
                     trial_ledger,
@@ -800,7 +823,7 @@ async def _run_choose(
                 raise
 
             resolution = ShadowResolutionEvidence(
-                selected_wall_ns=services.wall_ns(),
+                selected_wall_ns=selected_wall_ns,
                 provider_match_id=choice.provider_match_id,
                 provider_start_wall_ns=choice.provider_start_wall_ns,
                 event_ticker=choice.event_ticker,

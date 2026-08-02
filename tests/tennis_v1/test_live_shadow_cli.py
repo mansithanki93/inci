@@ -269,6 +269,7 @@ class LiveShadowCliTests(unittest.TestCase):
                 kalshi_transport_factory=kalshi_factory,
                 projector_factory=lambda _: object(),
                 collector_factory=collector_factory,
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
             ),
         )
 
@@ -564,6 +565,7 @@ class LiveShadowCliTests(unittest.TestCase):
                 catalog_transport_factory=lambda: _ChooserCatalog(),
                 evidence_store_factory=lambda: evidence,
                 kalshi_transport_factory=fail_kalshi,
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
             ),
         )
 
@@ -575,6 +577,181 @@ class LiveShadowCliTests(unittest.TestCase):
             {
                 "command": "shadow",
                 "provider_match_id": MATCH_ID,
+                "reason": "halted",
+                "code": "sportradar_shadow_discovery_halted",
+            },
+        )
+
+    def test_prompt_rechecks_stop_before_read_and_before_accepting_choice(self) -> None:
+        """Catches a signal race accepting a choice after stop was requested."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            ShadowChooserSnapshot,
+            ShadowMatchChoice,
+        )
+        from inci_tennis_runtime.live_shadow_cli import (
+            _StopState,
+            _prompt_choice,
+        )
+
+        snapshot = ShadowChooserSnapshot(
+            ready=(
+                ShadowMatchChoice(
+                    provider_match_id=MATCH_ID,
+                    provider_start_wall_ns=GENERATED_NS,
+                    event_ticker="KXTENNIS-MATCH",
+                    home_player_name="Player Home",
+                    away_player_name="Player Away",
+                    market_tickers=TICKERS,
+                ),
+            ),
+            unavailable=(),
+            provider_payload_sha256="a" * 64,
+            kalshi_catalog_sha256="b" * 64,
+            resolver_snapshot_sha256="c" * 64,
+        )
+
+        for phase in ("after_prompt_write", "after_read"):
+            with self.subTest(phase=phase):
+                stop = _StopState()
+
+                class Output(io.StringIO):
+                    def write(self, value: str) -> int:
+                        written = super().write(value)
+                        if phase == "after_prompt_write":
+                            stop.requested = True
+                        return written
+
+                class Input(io.StringIO):
+                    def readline(self, *values: object) -> str:
+                        result = super().readline(*values)
+                        if phase == "after_read":
+                            stop.requested = True
+                        return result
+
+                with self.assertRaises(KeyboardInterrupt):
+                    _prompt_choice(
+                        snapshot,
+                        stdin=Input("1\n"),
+                        stdout=Output(),
+                        stop=stop,
+                    )
+
+    def test_tty_ready_screen_retains_safety_claim_and_unavailable_rows(self) -> None:
+        """Catches the in-place refresh erasing the chooser's safety label."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        class Tty(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        material = SimpleNamespace(
+            sportradar_api_key="secret",
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        output = Tty()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={},
+            stdin=io.StringIO("q\n"),
+            stdout=output,
+            stderr=io.StringIO(),
+            dependencies=LiveShadowCliDependencies(
+                credential_loader=lambda _: material,
+                trial_ledger_factory=_ChooserLedger,
+                sportradar_transport_factory=lambda **_: _ChooserProvider(),
+                catalog_transport_factory=lambda: _ChooserCatalog(
+                    _games(include_second=False)
+                ),
+            ),
+        )
+
+        self.assertEqual(code, 0)
+        visible = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+        self.assertIn(
+            "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS", visible
+        )
+        self.assertIn("UNAVAILABLE", visible)
+        self.assertIn("Second Home v Second Away", visible)
+        self.assertNotIn("[2]", visible)
+
+    def test_selection_rechecks_discovery_freshness_after_operator_delay(self) -> None:
+        """Catches starting collection from a snapshot that aged at the prompt."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        material = SimpleNamespace(
+            sportradar_api_key="secret",
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        ledger = _ChooserLedger()
+        forbidden: list[str] = []
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={},
+            stdin=io.StringIO("1\n"),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            dependencies=LiveShadowCliDependencies(
+                credential_loader=lambda _: material,
+                trial_ledger_factory=lambda: ledger,
+                sportradar_transport_factory=lambda **_: _ChooserProvider(),
+                catalog_transport_factory=lambda: _ChooserCatalog(),
+                evidence_store_factory=lambda: forbidden.append("evidence"),
+                kalshi_transport_factory=lambda *_: forbidden.append("kalshi"),
+                wall_ns=lambda: GENERATED_NS + 67_000_000_000,
+            ),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(forbidden, [])
+        self.assertEqual(
+            ledger.terminals[-1],
+            {
+                "command": "shadow",
+                "provider_match_id": None,
+                "reason": "halted",
+                "code": "sportradar_source_stale",
+            },
+        )
+
+        def failed_clock() -> int:
+            raise ShadowCollectorError("shadow_clock_invalid")
+
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        failed_ledger = _ChooserLedger()
+        failed_code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={},
+            stdin=io.StringIO("1\n"),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            dependencies=LiveShadowCliDependencies(
+                credential_loader=lambda _: material,
+                trial_ledger_factory=lambda: failed_ledger,
+                sportradar_transport_factory=lambda **_: _ChooserProvider(),
+                catalog_transport_factory=lambda: _ChooserCatalog(),
+                evidence_store_factory=lambda: forbidden.append("evidence"),
+                wall_ns=failed_clock,
+            ),
+        )
+        self.assertEqual(failed_code, 1)
+        self.assertEqual(forbidden, [])
+        self.assertEqual(
+            failed_ledger.terminals[-1],
+            {
+                "command": "shadow",
+                "provider_match_id": None,
                 "reason": "halted",
                 "code": "sportradar_shadow_discovery_halted",
             },

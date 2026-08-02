@@ -201,17 +201,24 @@ _RESOLUTION_FIELDS = frozenset(
         "resolver_rule_version",
     }
 )
+_AUTO_TERMINAL_FIELDS = _TERMINAL_FIELDS | frozenset(
+    {"mapping_mode", "resolution_row_sha256"}
+)
 _FIELDS_BY_KIND = {
     "resolution": _RESOLUTION_FIELDS | _CHAIN_FIELDS,
     "kalshi_capture": _KALSHI_CAPTURE_FIELDS | _CHAIN_FIELDS,
     "observation": _OBSERVATION_FIELDS | _CHAIN_FIELDS,
     "terminal": _TERMINAL_FIELDS | _CHAIN_FIELDS,
+    "auto_terminal": _AUTO_TERMINAL_FIELDS | _CHAIN_FIELDS,
 }
 _SCHEMA_BY_KIND = {
     "resolution": "inci-tennis-unqualified-shadow-resolution-v1",
     "observation": "inci-tennis-unqualified-shadow-observation-v1",
     "kalshi_capture": "inci-tennis-unqualified-shadow-kalshi-capture-v1",
     "terminal": "inci-tennis-unqualified-shadow-terminal-v1",
+    "auto_terminal": (
+        "inci-tennis-unqualified-shadow-auto-terminal-v1"
+    ),
 }
 
 
@@ -948,6 +955,7 @@ class ShadowEvidenceStore:
         self._resolution_identity: (
             tuple[str, tuple[str, str], str, str] | None
         ) = None
+        self._resolution_row_sha256: str | None = None
         self._terminal_recorded = False
         self._lock_fd = _open_private_file(root / "shadow.lock", create=True)
         try:
@@ -1012,7 +1020,9 @@ class ShadowEvidenceStore:
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 _fail("shadow_evidence_prior_corrupt")
             terminal_indexes = [
-                index for index, row in enumerate(rows) if row.get("kind") == "terminal"
+                index
+                for index, row in enumerate(rows)
+                if row.get("kind") in {"terminal", "auto_terminal"}
             ]
             if terminal_indexes != [len(rows) - 1]:
                 _fail("shadow_evidence_unclean_session")
@@ -1021,6 +1031,7 @@ class ShadowEvidenceStore:
             capture_number = 0
             prior_sportradar_captures = 0
             resolution: ShadowResolutionEvidence | None = None
+            resolution_row_sha256: str | None = None
             for row_number, row in enumerate(rows, start=1):
                 kind = row.get("kind")
                 expected_fields = _FIELDS_BY_KIND.get(kind)
@@ -1048,6 +1059,7 @@ class ShadowEvidenceStore:
                     if row_number != 1 or resolution is not None:
                         _fail("shadow_evidence_prior_corrupt")
                     resolution = self._audit_resolution_row(row)
+                    resolution_row_sha256 = claimed_digest
                 elif kind == "kalshi_capture":
                     capture_number += 1
                     self._audit_capture_row(
@@ -1092,6 +1104,14 @@ class ShadowEvidenceStore:
                             or tuple(row["market_tickers"])
                             != resolution.market_tickers
                         )
+                        or kind == "auto_terminal"
+                        and (
+                            resolution is None
+                            or row.get("mapping_mode") != "auto_matched"
+                            or row.get("resolution_row_sha256")
+                            != resolution_row_sha256
+                        )
+                        or kind == "terminal" and resolution is not None
                     ):
                         _fail("shadow_evidence_prior_corrupt")
         try:
@@ -1340,6 +1360,7 @@ class ShadowEvidenceStore:
             }
         )
         self._resolution_identity = _resolution_identity(value)
+        self._resolution_row_sha256 = self._previous_row_sha256
 
     def _validate_reference(
         self,
@@ -1417,7 +1438,7 @@ class ShadowEvidenceStore:
             "shadow_evidence_write_failed",
         )
         self._previous_row_sha256 = current_digest
-        if kind == "terminal":
+        if kind in {"terminal", "auto_terminal"}:
             self._terminal_recorded = True
 
     def append_observation(self, record: ShadowEvidenceObservation) -> None:
@@ -1553,23 +1574,41 @@ class ShadowEvidenceStore:
                 market_tickers,
             )
             != self._resolution_identity[:2]
+            or self._resolution_identity is not None
+            and (
+                type(self._resolution_row_sha256) is not str
+                or _DIGEST_PATTERN.fullmatch(
+                    self._resolution_row_sha256
+                )
+                is None
+            )
         ):
             _fail("shadow_evidence_terminal_invalid")
-        self._append_record(
-            {
-                "schema": "inci-tennis-unqualified-shadow-terminal-v1",
-                "kind": "terminal",
-                "trust": "unqualified_shadow",
-                "reason": reason,
-                "code": code,
-                "ended_wall_ns": ended_wall_ns,
-                "ended_monotonic_ns": ended_monotonic_ns,
-                "provider_match_id": provider_match_id,
-                "market_tickers": list(market_tickers),
-                "sportradar_captures": sportradar_captures,
-                "kalshi_frames": kalshi_frames,
-            }
-        )
+        row: dict[str, object] = {
+            "schema": "inci-tennis-unqualified-shadow-terminal-v1",
+            "kind": "terminal",
+            "trust": "unqualified_shadow",
+            "reason": reason,
+            "code": code,
+            "ended_wall_ns": ended_wall_ns,
+            "ended_monotonic_ns": ended_monotonic_ns,
+            "provider_match_id": provider_match_id,
+            "market_tickers": list(market_tickers),
+            "sportradar_captures": sportradar_captures,
+            "kalshi_frames": kalshi_frames,
+        }
+        if self._resolution_identity is not None:
+            row.update(
+                {
+                    "schema": (
+                        "inci-tennis-unqualified-shadow-auto-terminal-v1"
+                    ),
+                    "kind": "auto_terminal",
+                    "mapping_mode": "auto_matched",
+                    "resolution_row_sha256": self._resolution_row_sha256,
+                }
+            )
+        self._append_record(row)
 
     def ensure_halted_terminal(
         self,

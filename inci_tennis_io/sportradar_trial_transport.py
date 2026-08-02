@@ -905,6 +905,8 @@ class TrialUsageLedger:
         commands_by_session: dict[str, set[str]] = {}
         providers_by_session: dict[str, set[str]] = {}
         dispositions_by_session: dict[str, list[dict[str, object]]] = {}
+        shadow_discovery_sessions: set[str] = set()
+        shadow_collection_sessions: set[str] = set()
         coordinates_by_session: dict[str, list[int]] = {}
         for coordinate, history in self._attempt_history.items():
             coordinates_by_session.setdefault(history[0], []).append(coordinate)
@@ -1079,6 +1081,17 @@ class TrialUsageLedger:
                 row["route"], expected_routes[command]
             ):
                 _fail("sportradar_audit_ledger_corrupt")
+            if command == "shadow":
+                session = row["session_id"]
+                if row["route"] == "live_summaries":
+                    if (
+                        session in shadow_discovery_sessions
+                        or session in shadow_collection_sessions
+                    ):
+                        _fail("sportradar_audit_ledger_corrupt")
+                    shadow_discovery_sessions.add(session)
+                else:
+                    shadow_collection_sessions.add(session)
             commands_by_session.setdefault(row["session_id"], set()).add(
                 command
             )

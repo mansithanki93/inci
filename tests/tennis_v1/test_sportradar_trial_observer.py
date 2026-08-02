@@ -776,6 +776,82 @@ class SportradarTrialLedgerTests(unittest.TestCase):
             with TrialUsageLedger(root) as reopened:
                 self.assertEqual(reopened.recovered_unclean_sessions, 0)
 
+    def test_shadow_discovery_must_be_unique_and_precede_collection(self) -> None:
+        """Catches replacing the immutable chooser snapshot inside one session."""
+
+        from hashlib import sha256
+        from inci_tennis_io.sportradar_trial_transport import (
+            SportradarTrialObserverError,
+            TrialObservationRecord,
+            TrialUsageLedger,
+        )
+
+        for mutation in ("duplicate", "after_summary"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                captured = 1_785_607_205_000_000_000
+                live = _live_summaries_payload()
+                summary = _summary_payload()
+                routes = (
+                    ("live_summaries", live, None, "listed", None, "discovery"),
+                    (
+                        "live_summaries" if mutation == "duplicate" else "summary",
+                        live if mutation == "duplicate" else summary,
+                        None if mutation == "duplicate" else "sr:sport_event:123456",
+                        "listed" if mutation == "duplicate" else "live",
+                        None if mutation == "duplicate" else "1st_set",
+                        "discovery" if mutation == "duplicate" else "initial",
+                    ),
+                )
+                if mutation == "after_summary":
+                    routes = (routes[1], routes[0])
+                with TrialUsageLedger(root) as ledger:
+                    for route, payload, provider_id, status, match_status, progression in routes:
+                        reservation = ledger.reserve(route)
+                        raw_path = ledger.persist_raw(
+                            reservation, payload, captured_wall_ns=captured
+                        )
+                        ledger.record_attempt_outcome(
+                            reservation,
+                            outcome="captured",
+                            code="sportradar_capture_persisted",
+                        )
+                        ledger.record_observation(
+                            TrialObservationRecord(
+                                command="shadow",
+                                reservation=reservation,
+                                provider_match_id=provider_id,
+                                generated_wall_ns=1_785_607_202_000_000_000,
+                                captured_wall_ns=captured,
+                                status=status,
+                                match_status=match_status,
+                                payload_sha256=sha256(payload).hexdigest(),
+                                raw_path=raw_path,
+                                progression=progression,
+                                last_event_id=None,
+                                terminal_reason=None,
+                            )
+                        )
+                    ledger.record_session_terminal(
+                        command="shadow",
+                        provider_match_id=(
+                            None
+                            if mutation == "duplicate"
+                            else "sr:sport_event:123456"
+                        ),
+                        reason=(
+                            "list_complete"
+                            if mutation == "duplicate"
+                            else "duration_elapsed"
+                        ),
+                    )
+
+                with self.assertRaisesRegex(
+                    SportradarTrialObserverError,
+                    "sportradar_audit_ledger_corrupt",
+                ):
+                    TrialUsageLedger(root)
+
     def test_existing_check_audit_still_reopens(self) -> None:
         from hashlib import sha256
         from inci_tennis_io.sportradar_trial_transport import (

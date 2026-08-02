@@ -270,6 +270,18 @@ class ShadowEvidenceIntegrityTests(unittest.TestCase):
 
                 self._assert_reopen_rejected(root)
 
+    def test_resolution_row_cannot_be_deleted_to_downgrade_auto_to_manual(self) -> None:
+        """Catches prefix deletion bypassing the automatic-binding audit."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            ledger, _ = _complete_resolved_session(root)
+            rows = _read_rows(ledger)
+            self.assertEqual(rows[0]["kind"], "resolution")
+            _rewrite_rows_with_valid_chain(ledger, rows[1:])
+
+            self._assert_reopen_rejected(root)
+
     def test_manual_session_without_resolution_remains_compatible(self) -> None:
         """Catches requiring new chooser evidence for explicit diagnostic mode."""
 
