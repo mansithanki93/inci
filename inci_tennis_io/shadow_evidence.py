@@ -651,39 +651,192 @@ class AuditedShadowSettlementSource:
     terminal_row_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class _StableAuditFile:
+    path: Path
+    descriptor: int
+    identity: tuple[int, int]
+    digest: str
+    maximum_bytes: int
+    directory_fd: int | None = None
+    entry_name: str | None = None
+
+
 class _ShadowSettlementSourceAuditLease:
-    """Keep the source root shared-locked while its audit result is used."""
+    """Hold and verify the exact root inventory used to audit a source."""
 
     def __init__(
-        self, source: AuditedShadowSettlementSource, lock_fd: int
+        self,
+        source: AuditedShadowSettlementSource,
+        lock_fd: int,
+        *,
+        parent_path: Path,
+        parent_fd: int,
+        root_path: Path,
+        root_name: str,
+        root_fd: int,
+        raw_fd: int,
+        lock_identity: tuple[int, int],
+        lock_digest: str,
+        files: tuple[_StableAuditFile, ...],
     ) -> None:
-        self.source = source
+        self._source = source
         self._lock_fd: int | None = lock_fd
+        self._parent_path = parent_path
+        self._parent_fd: int | None = parent_fd
+        self._root_path = root_path
+        self._root_name = root_name
+        self._root_fd: int | None = root_fd
+        self._raw_fd: int | None = raw_fd
+        self._lock_identity = lock_identity
+        self._lock_digest = lock_digest
+        self._files = files
+
+    def _require_open(self) -> None:
+        if self._lock_fd is None:
+            _fail("shadow_evidence_closed")
+
+    @property
+    def source(self) -> AuditedShadowSettlementSource:
+        self._require_open()
+        return self._source
+
+    @property
+    def session_path(self) -> Path:
+        return self.source.session_path
+
+    @property
+    def ledger_sha256(self) -> str:
+        return self.source.ledger_sha256
+
+    @property
+    def session_id(self) -> str:
+        return self.source.session_id
+
+    @property
+    def mode(self) -> str:
+        return self.source.mode
+
+    @property
+    def event_ticker(self) -> str:
+        return self.source.event_ticker
+
+    @property
+    def market_tickers(self) -> tuple[str, str]:
+        return self.source.market_tickers
+
+    @property
+    def player_names(self) -> tuple[str, str]:
+        return self.source.player_names
+
+    @property
+    def first_row_sha256(self) -> str:
+        return self.source.first_row_sha256
+
+    @property
+    def terminal_row_sha256(self) -> str:
+        return self.source.terminal_row_sha256
+
+    def verify_unchanged(self) -> None:
+        """Prove the held source inventory still names the audited bytes."""
+
+        self._require_open()
+        parent_fd = self._parent_fd
+        root_fd = self._root_fd
+        raw_fd = self._raw_fd
+        if parent_fd is None or root_fd is None or raw_fd is None:
+            _fail("shadow_evidence_closed")
+        try:
+            _verify_directory_identity(self._parent_path, parent_fd)
+            _verify_directory_identity(self._root_path, root_fd)
+            _verify_directory_entry(
+                parent_fd, self._root_name, root_fd, expected_mode=0o700
+            )
+            _verify_directory_entry(root_fd, "raw", raw_fd, expected_mode=0o700)
+            try:
+                named_lock = os.stat(
+                    "shadow.lock", dir_fd=root_fd, follow_symlinks=False
+                )
+                held_lock = os.fstat(self._lock_fd)
+            except OSError:
+                _fail("shadow_evidence_source_changed")
+            if (
+                not stat.S_ISREG(named_lock.st_mode)
+                or stat.S_ISLNK(named_lock.st_mode)
+                or stat.S_IMODE(named_lock.st_mode) != 0o600
+                or _file_identity(named_lock) != self._lock_identity
+                or _file_identity(held_lock) != self._lock_identity
+                or _descriptor_digest(self._lock_fd, 67_108_864)
+                != self._lock_digest
+            ):
+                _fail("shadow_evidence_source_changed")
+            root_names = frozenset(os.listdir(root_fd))
+            raw_names = frozenset(os.listdir(raw_fd))
+            expected_root_names = frozenset(
+                entry.entry_name
+                for entry in self._files
+                if entry.directory_fd == root_fd
+            ) | {"raw", "shadow.lock"}
+            expected_raw_names = frozenset(
+                entry.entry_name
+                for entry in self._files
+                if entry.directory_fd == raw_fd
+            )
+            if root_names != expected_root_names or raw_names != expected_raw_names:
+                _fail("shadow_evidence_source_changed")
+            for entry in self._files:
+                _verify_stable_audit_file(entry)
+        except ShadowEvidenceError:
+            self._close_suppressing_errors()
+            raise
+        except BaseException:
+            self._close_suppressing_errors()
+            raise
+
+    def _close_suppressing_errors(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def close(self) -> None:
         """Release the audit lock exactly once."""
 
-        descriptor = self._lock_fd
-        if descriptor is None:
+        lock_fd = self._lock_fd
+        if lock_fd is None:
             return
         self._lock_fd = None
         primary: BaseException | None = None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
         except BaseException as error:
             primary = error
+        for descriptor_name in ("_parent_fd", "_root_fd", "_raw_fd"):
+            descriptor = getattr(self, descriptor_name)
+            setattr(self, descriptor_name, None)
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
+        for entry in self._files:
+            try:
+                os.close(entry.descriptor)
+            except BaseException as error:
+                if primary is None:
+                    primary = error
         try:
-            os.close(descriptor)
+            os.close(lock_fd)
         except BaseException as error:
             if primary is None:
                 primary = error
         if primary is not None:
             raise primary
 
-    def __enter__(self) -> AuditedShadowSettlementSource:
-        if self._lock_fd is None:
-            _fail("shadow_evidence_closed")
-        return self.source
+    def __enter__(self) -> _ShadowSettlementSourceAuditLease:
+        self._require_open()
+        return self
 
     def __exit__(self, exc_type: object, *_: object) -> None:
         if exc_type is None:
@@ -806,6 +959,157 @@ def _open_existing_private_readonly_file(path: Path, *, code: str) -> int:
         os.close(descriptor)
         raise
     return descriptor
+
+
+def _open_existing_private_readonly_file_at(
+    directory_fd: int, name: str, *, code: str
+) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | nofollow | cloexec,
+            dir_fd=directory_fd,
+        )
+    except OSError:
+        _fail(code)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            _fail(code)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_existing_private_directory(path: Path, *, code: str) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | nofollow | cloexec | directory
+        )
+    except OSError:
+        _fail(code)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+        ):
+            _fail(code)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _descriptor_digest(descriptor: int, maximum_bytes: int) -> str:
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size < 0 or before.st_size > maximum_bytes:
+            _fail("shadow_evidence_source_changed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = sha256()
+        remaining = maximum_bytes + 1
+        while True:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+            if remaining <= 0:
+                _fail("shadow_evidence_source_changed")
+        after = os.fstat(descriptor)
+    except ShadowEvidenceError:
+        raise
+    except OSError:
+        _fail("shadow_evidence_source_changed")
+    if (
+        _file_identity(before) != _file_identity(after)
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+    ):
+        _fail("shadow_evidence_source_changed")
+    return digest.hexdigest()
+
+
+def _verify_directory_identity(path: Path, descriptor: int) -> None:
+    try:
+        named = path.lstat()
+        held = os.fstat(descriptor)
+    except OSError:
+        _fail("shadow_evidence_source_changed")
+    if (
+        not stat.S_ISDIR(named.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or _file_identity(named) != _file_identity(held)
+    ):
+        _fail("shadow_evidence_source_changed")
+
+
+def _verify_directory_entry(
+    directory_fd: int,
+    name: str,
+    descriptor: int,
+    *,
+    expected_mode: int,
+) -> None:
+    try:
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        held = os.fstat(descriptor)
+    except OSError:
+        _fail("shadow_evidence_source_changed")
+    if (
+        not stat.S_ISDIR(named.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or stat.S_IMODE(named.st_mode) != expected_mode
+        or _file_identity(named) != _file_identity(held)
+    ):
+        _fail("shadow_evidence_source_changed")
+
+
+def _verify_stable_audit_file(entry: _StableAuditFile) -> None:
+    try:
+        if entry.directory_fd is None:
+            named = entry.path.lstat()
+        else:
+            if entry.entry_name is None:
+                _fail("shadow_evidence_source_changed")
+            named = os.stat(
+                entry.entry_name,
+                dir_fd=entry.directory_fd,
+                follow_symlinks=False,
+            )
+        held = os.fstat(entry.descriptor)
+    except ShadowEvidenceError:
+        raise
+    except OSError:
+        _fail("shadow_evidence_source_changed")
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or named.st_uid != os.geteuid()
+        or named.st_nlink != 1
+        or stat.S_IMODE(named.st_mode) != 0o600
+        or _file_identity(named) != entry.identity
+        or _file_identity(held) != entry.identity
+        or _descriptor_digest(entry.descriptor, entry.maximum_bytes)
+        != entry.digest
+    ):
+        _fail("shadow_evidence_source_changed")
 
 
 def _write_all(descriptor: int, payload: bytes, code: str) -> None:
@@ -1658,6 +1962,7 @@ class ShadowEvidenceStore:
         self._audited_settlement_sources: dict[
             str, AuditedShadowSettlementSource
         ] = {}
+        self._audited_raw_references: dict[Path, str] = {}
         self._mode: str | None = None
         self._resolution_identity: (
             tuple[str, tuple[str, str], str, str] | None
@@ -2356,6 +2661,7 @@ class ShadowEvidenceStore:
             or sha256(payload).hexdigest() != raw_digest
         ):
             _fail("shadow_evidence_prior_corrupt")
+        self._audited_raw_references[path] = raw_digest
 
     def _audit_resolution_row(
         self, row: dict[str, object]
@@ -3117,6 +3423,162 @@ class ShadowEvidenceStore:
         self.close()
 
 
+def _snapshot_audit_file(
+    path: Path,
+    descriptor: int,
+    *,
+    maximum_bytes: int,
+    directory_fd: int | None = None,
+    entry_name: str | None = None,
+) -> _StableAuditFile:
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            _fail("shadow_evidence_source_changed")
+        return _StableAuditFile(
+            path=path,
+            descriptor=descriptor,
+            identity=_file_identity(info),
+            digest=_descriptor_digest(descriptor, maximum_bytes),
+            maximum_bytes=maximum_bytes,
+            directory_fd=directory_fd,
+            entry_name=entry_name,
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _snapshot_audit_inventory(
+    *,
+    state_root: Path,
+    raw_root: Path,
+    lock_fd: int,
+    raw_references: Mapping[Path, str],
+) -> tuple[int, int, int, tuple[int, int], str, tuple[_StableAuditFile, ...]]:
+    parent_fd: int | None = None
+    root_fd: int | None = None
+    raw_fd: int | None = None
+    files: list[_StableAuditFile] = []
+    try:
+        parent_fd = _open_existing_private_directory(
+            state_root.parent, code="shadow_evidence_source_changed"
+        )
+        root_fd = _open_existing_private_directory(
+            state_root, code="shadow_evidence_source_changed"
+        )
+        raw_fd = _open_existing_private_directory(
+            raw_root, code="shadow_evidence_source_changed"
+        )
+        _verify_directory_entry(
+            parent_fd, state_root.name, root_fd, expected_mode=0o700
+        )
+        _verify_directory_entry(root_fd, "raw", raw_fd, expected_mode=0o700)
+        lock_info = os.fstat(lock_fd)
+        if (
+            not stat.S_ISREG(lock_info.st_mode)
+            or lock_info.st_uid != os.geteuid()
+            or lock_info.st_nlink != 1
+            or stat.S_IMODE(lock_info.st_mode) != 0o600
+        ):
+            _fail("shadow_evidence_source_changed")
+        lock_identity = _file_identity(lock_info)
+        lock_digest = _descriptor_digest(lock_fd, 67_108_864)
+        root_names = sorted(os.listdir(root_fd))
+        if "raw" not in root_names:
+            _fail("shadow_evidence_source_changed")
+        for name in root_names:
+            if name == "raw":
+                continue
+            if name == "shadow.lock":
+                continue
+            descriptor = _open_existing_private_readonly_file_at(
+                root_fd, name, code="shadow_evidence_source_changed"
+            )
+            files.append(
+                _snapshot_audit_file(
+                    state_root / name,
+                    descriptor,
+                    maximum_bytes=67_108_864,
+                    directory_fd=root_fd,
+                    entry_name=name,
+                )
+            )
+        for name in sorted(os.listdir(raw_fd)):
+            descriptor = _open_existing_private_readonly_file_at(
+                raw_fd, name, code="shadow_evidence_source_changed"
+            )
+            files.append(
+                _snapshot_audit_file(
+                    raw_root / name,
+                    descriptor,
+                    maximum_bytes=_MAXIMUM_KALSHI_FRAME_BYTES,
+                    directory_fd=raw_fd,
+                    entry_name=name,
+                )
+            )
+        root_raw_paths = {entry.path for entry in files}
+        for path, expected_digest in raw_references.items():
+            if path in root_raw_paths:
+                continue
+            descriptor = _open_existing_private_readonly_file(
+                path, code="shadow_evidence_source_changed"
+            )
+            entry = _snapshot_audit_file(
+                path,
+                descriptor,
+                maximum_bytes=_MAXIMUM_SPORTRADAR_CAPTURE_BYTES,
+            )
+            if entry.digest != expected_digest:
+                os.close(entry.descriptor)
+                _fail("shadow_evidence_source_changed")
+            files.append(entry)
+        return (
+            parent_fd,
+            root_fd,
+            raw_fd,
+            lock_identity,
+            lock_digest,
+            tuple(files),
+        )
+    except BaseException:
+        for entry in files:
+            try:
+                os.close(entry.descriptor)
+            except BaseException:
+                pass
+        for descriptor in (parent_fd, root_fd, raw_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    pass
+        raise
+
+
+def _close_audit_snapshot(
+    parent_fd: int,
+    root_fd: int,
+    raw_fd: int,
+    files: tuple[_StableAuditFile, ...],
+) -> None:
+    for entry in files:
+        try:
+            os.close(entry.descriptor)
+        except BaseException:
+            pass
+    for descriptor in (parent_fd, root_fd, raw_fd):
+        try:
+            os.close(descriptor)
+        except BaseException:
+            pass
+
+
 def audit_shadow_settlement_source(
     session_path: Path,
 ) -> _ShadowSettlementSourceAuditLease:
@@ -3169,11 +3631,43 @@ def audit_shadow_settlement_source(
         adapter._eligible_predecessor_terminals = {}
         adapter._audited_price_predecessors = []
         adapter._audited_settlement_sources = {}
+        adapter._audited_raw_references = {}
         adapter._audit_prior_sessions()
         source = adapter._audited_settlement_sources.get(session_id)
         if source is None or source.session_path != canonical_path:
             _fail("shadow_evidence_state_invalid")
-        return _ShadowSettlementSourceAuditLease(source, lock_fd)
+        (
+            parent_fd,
+            root_fd,
+            raw_fd,
+            lock_identity,
+            lock_digest,
+            files,
+        ) = _snapshot_audit_inventory(
+            state_root=state_root,
+            raw_root=raw_root,
+            lock_fd=lock_fd,
+            raw_references=adapter._audited_raw_references,
+        )
+        source_files = [
+            entry for entry in files if entry.path == canonical_path
+        ]
+        if len(source_files) != 1 or source_files[0].digest != source.ledger_sha256:
+            _close_audit_snapshot(parent_fd, root_fd, raw_fd, files)
+            _fail("shadow_evidence_source_changed")
+        return _ShadowSettlementSourceAuditLease(
+            source,
+            lock_fd,
+            parent_path=state_root.parent,
+            parent_fd=parent_fd,
+            root_path=state_root,
+            root_name=state_root.name,
+            root_fd=root_fd,
+            raw_fd=raw_fd,
+            lock_identity=lock_identity,
+            lock_digest=lock_digest,
+            files=files,
+        )
     except BaseException:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)

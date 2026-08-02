@@ -149,6 +149,92 @@ def _price_only_store(root: Path) -> Path:
 
 
 class ShadowSettlementSourceAuditTests(unittest.TestCase):
+    def test_lease_detects_selected_ledger_replacement_and_closes(self) -> None:
+        """Catches committing labels from a replaced source after its audit."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            audit_shadow_settlement_source,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            ledger = _resolved_store(root).resolve()
+            lease = audit_shadow_settlement_source(ledger)
+            replacement = root / "replacement.jsonl"
+            _private_payload(replacement, ledger.read_bytes())
+            os.replace(replacement, ledger)
+            with self.assertRaises(ShadowEvidenceError):
+                lease.verify_unchanged()
+            with self.assertRaisesRegex(ShadowEvidenceError, "shadow_evidence_closed"):
+                _ = lease.source
+            descriptor = os.open(root / "shadow.lock", os.O_RDONLY)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def test_lease_detects_bytes_lock_and_root_replacement_after_audit(self) -> None:
+        """Catches post-audit source changes between either label boundary."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            audit_shadow_settlement_source,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = (base / "bytes-shadow").resolve()
+            ledger = _resolved_store(root).resolve()
+            lease = audit_shadow_settlement_source(ledger)
+            lease.verify_unchanged()
+            ledger.write_bytes(
+                ledger.read_bytes().replace(b"Player Home", b"Player H0me", 1)
+            )
+            ledger.chmod(0o600)
+            with self.assertRaises(ShadowEvidenceError):
+                lease.verify_unchanged()
+
+            root = (base / "lock-shadow").resolve()
+            ledger = _resolved_store(root).resolve()
+            lease = audit_shadow_settlement_source(ledger)
+            replacement_lock = root / "replacement.lock"
+            _private_payload(replacement_lock, b"")
+            os.replace(replacement_lock, root / "shadow.lock")
+            with self.assertRaises(ShadowEvidenceError):
+                lease.verify_unchanged()
+
+            root = (base / "root-shadow").resolve()
+            ledger = _resolved_store(root).resolve()
+            replacement_root = (base / "replacement-shadow").resolve()
+            _resolved_store(replacement_root)
+            lease = audit_shadow_settlement_source(ledger)
+            os.rename(root, base / "original-shadow")
+            os.rename(replacement_root, root)
+            with self.assertRaises(ShadowEvidenceError):
+                lease.verify_unchanged()
+
+    def test_closed_lease_refuses_source_and_verification(self) -> None:
+        """Catches source use after the descriptor and lock lifetime ends."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            audit_shadow_settlement_source,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = _resolved_store(Path(directory) / "shadow").resolve()
+            lease = audit_shadow_settlement_source(ledger)
+            self.assertEqual(lease.source.session_path, ledger)
+            lease.verify_unchanged()
+            lease.close()
+            lease.close()
+            with self.assertRaisesRegex(ShadowEvidenceError, "shadow_evidence_closed"):
+                _ = lease.source
+            with self.assertRaisesRegex(ShadowEvidenceError, "shadow_evidence_closed"):
+                lease.verify_unchanged()
+
     def test_audits_exact_verified_source_without_writing(self) -> None:
         """Catches accepting a source without retaining its verified identity."""
 
@@ -189,7 +275,8 @@ class ShadowSettlementSourceAuditTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             ledger = _price_only_store(Path(directory) / "shadow").resolve()
-            with audit_shadow_settlement_source(ledger) as source:
+            with audit_shadow_settlement_source(ledger) as lease:
+                source = lease.source
                 self.assertEqual(source.mode, "PRICE_ONLY")
                 self.assertEqual(source.event_ticker, "KXTENNIS-MATCH")
                 self.assertEqual(source.market_tickers, _TICKERS)
