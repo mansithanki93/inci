@@ -70,16 +70,19 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6752e3b873f0e18b6226c0c664aaa49263c30b4c925019ebcebb87ce893d6e5c"
         ),
         "expert_journal_store.py": (
-            "fb2f182c3355fb96505e0d9dd8eda009799400d0ef1e3f1e53ecc9cbaf43b30d"
+            "8b0f81774187da7e55f4d2022ff7a6e5b19672c3f5900e17b9a6903159bc69b1"
         ),
         "facade.py": (
-            "a6435dc6ed11aacf10a24147fc0b96ca179fbe3923ce58fb1304997f8e4b7f32"
+            "63111051c9cacdeb91cd71d4d8edd8a141c60e7e6aec974874c58f318b3647fc"
         ),
         "kalshi_readonly.py": (
             "44ec46b550a48c0d8a7e456b4620f044123b91ce1f330a1c4b0b75680090b2df"
         ),
         "kalshi_shadow_catalog.py": (
-            "2bbbf24db9206e87ecd84bf2e76c92ab044aff3f4651c138faf2c9b9fc2ed7b5"
+            "5debd49b92121118d6a286853eeb34c648c3ec399faeb4fa85315808d8947aaf"
+        ),
+        "kalshi_shadow_settlement.py": (
+            "00128b2f077dae03c0a62a4c28fa60cd2f704899c50852b13a895c4c6dd7b954"
         ),
         "pinned_artifacts.py": (
             "43feef97b2d9a37f00143f00f6272562a64881da5cf143c060eb77c8c058ca0f"
@@ -91,7 +94,10 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6dde0bf459b9106182f94ca3bab6340d7aae7a3b1ad8f48b644e7739e6d28487"
         ),
         "shadow_evidence.py": (
-            "85fc8caff831899b1c64a37a7cf25846b40dcf724415c4549d516794a3cb7f36"
+            "275ed8e66e2461afec079ba37d6118852e24f02e017e9e4c714e2a555fadf6de"
+        ),
+        "shadow_settlement_labels.py": (
+            "794a9dc9426f75e6540e18c68eadadd0fd14b98500e74784eea3c1a87a3e795c"
         ),
         "sportradar_shadow_async.py": (
             "191df622e4eac7115dcd78696f8139778778e1404e92827505a23940ec6d8e50"
@@ -114,14 +120,20 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "registry.py": (
             "14e534fd3762d5d6198b1de8762568497bcf1c807fd56177942dab8f4de59229"
         ),
+        "shadow_discovery_contracts.py": (
+            "711a2704dc2c873fe166c0704f79f7f47066bf098f6845fc15990f1a1836441f"
+        ),
         "shadow_match_chooser.py": (
-            "73fe6183ca6177e73cd00d04c3b85b1bc196bb102d6eded9709750b6c929a7b7"
+            "83932fea390e7a9ebc5cce7667b825fe95af102a3ab7c0049049be4f5d622cbc"
+        ),
+        "shadow_provider_coverage.py": (
+            "960a386abe0ee85000f522b6f3438bc4b3e42c3e2c095b4913fa9ccd38515cec"
         ),
         "sportradar_tennis_v3.py": (
             "7a0757de48b66bd28f0547f2574216a2408a88b70fdf2e259776e067b6aa261f"
         ),
         "sportradar_trial_v3.py": (
-            "35b2a45cb2cc915768e14f9a3b515246941ea2526016403b4abad0a43990670e"
+            "7b21180a3ccf4129c080eae744cc35f3dc590befd28b6b1837afd3bae7d1efeb"
         ),
     },
     "inci_tennis_runtime": {
@@ -129,11 +141,14 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "expert_controller.py": (
             "c8f094d2381b04015edffbb1248b727319694497fc1672195e5bb843ac96cf42"
         ),
+        "live_price_only_collector.py": (
+            "84685fa90fcbf79c7c1c845c33f57636a08d7f7c516297747f9ec3dc5b50e7c2"
+        ),
         "live_shadow_cli.py": (
-            "ed71ea7bc12ced5e7d308a4d2ead2bd45e2736154abb861e1637ce10c3128ca2"
+            "5c500fc736651f28d7c4748c4358d92dc6721274b09f66af75fb85eb755a920d"
         ),
         "live_shadow_collector.py": (
-            "f792c968021abe06fad8144ee4dd850fea743471d66c341162b577fa34d61245"
+            "5073b67b86b467fb4ac20a5f631f4bb9ffbe6cfc3ba360a31ed77a3016a67a9b"
         ),
         "provider_qualification_controller.py": (
             "94be825905f29c252c1d4d32f4544e6e1084661b099255b4d0cfbee9e02d6109"
@@ -146,6 +161,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         ),
         "shadow_runtime.py": (
             "611cfb436eedf88fd6ea364983b66ec2073247d449272fb7d0726fa96053cd1e"
+        ),
+        "shadow_settlement_cli.py": (
+            "11030cf9651e60b4364310d8685b51093531a521daa231eaf7bb639f119d94a6"
         ),
         "sportradar_trial_cli.py": (
             "afbc1d87c7e42295b942cd7737b7d70eeef5a909c8e9d41e29f3563a55c0e619"
@@ -374,7 +392,12 @@ SEALED_RUNTIME_STDLIB_AUTHORITY_IMPORTS = frozenset(
 )
 SEALED_RUNTIME_FILE_STDLIB_AUTHORITY_IMPORTS = {
     "sportradar_trial_cli.py": frozenset({"signal"}),
-    "live_shadow_cli.py": frozenset({"signal"}),
+    "live_shadow_cli.py": frozenset({"os", "signal"}),
+    "shadow_settlement_cli.py": frozenset({"pathlib.Path", "time"}),
+}
+SEALED_RUNTIME_FILE_CLOCK_CALLS = {
+    "live_shadow_cli.py": frozenset({"monotonic_ns", "wall_ns"}),
+    "shadow_settlement_cli.py": frozenset({"monotonic_ns", "time_ns"}),
 }
 IO_PHASE_ONE_IMPORTS = frozenset(
     {
@@ -495,6 +518,26 @@ TASK7_IO_ADAPTER_IMPORTS = {
     "kalshi_shadow_catalog.py": frozenset(
         {
             (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiCatalogExclusion"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiCompetitionProvenance"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowCatalogSnapshot"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowGame"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowMarket"
+            ),
+            (
                 "inci_tennis_adapters.shadow_match_chooser."
                 "KalshiShadowGame"
             ),
@@ -583,8 +626,72 @@ TASK7_ADAPTER_PEER_IMPORTS = {
             ),
         }
     ),
+    "shadow_discovery_contracts.py": frozenset(
+        {
+            (
+                "inci_tennis_adapters.sportradar_trial_v3."
+                "SportradarCompetitionProvenance"
+            ),
+        }
+    ),
     "shadow_match_chooser.py": frozenset(
         {
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "HybridChooserSnapshot"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "HybridMatchRow"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "HybridStatus"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowCatalogSnapshot"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowGame"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowMarket"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "ProviderDiscoveryState"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "ProviderMatchRef"
+            ),
+            (
+                "inci_tennis_adapters.shadow_provider_coverage."
+                "assess_provider_route"
+            ),
+            (
+                "inci_tennis_adapters.shadow_provider_coverage."
+                "coverage_registry_sha256"
+            ),
+            (
+                "inci_tennis_adapters.sportradar_trial_v3."
+                "SportradarCompetitionProvenance"
+            ),
+            (
+                "inci_tennis_adapters.sportradar_trial_v3."
+                "SportradarHybridDiagnostic"
+            ),
+            (
+                "inci_tennis_adapters.sportradar_trial_v3."
+                "SportradarHybridDiscoverySnapshot"
+            ),
+            (
+                "inci_tennis_adapters.sportradar_trial_v3."
+                "SportradarHybridMatch"
+            ),
             (
                 "inci_tennis_adapters.sportradar_trial_v3."
                 "SportradarLiveSummariesSnapshot"
@@ -592,6 +699,18 @@ TASK7_ADAPTER_PEER_IMPORTS = {
             (
                 "inci_tennis_adapters.sportradar_trial_v3."
                 "SportradarScoreSnapshot"
+            ),
+        }
+    ),
+    "shadow_provider_coverage.py": frozenset(
+        {
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowGame"
+            ),
+            (
+                "inci_tennis_adapters.sportradar_trial_v3."
+                "SportradarCompetitionProvenance"
             ),
         }
     ),
@@ -632,16 +751,36 @@ TASK7_RUNTIME_ADAPTER_IMPORTS = {
         {
             "inci_tennis_adapters.kalshi_v2",
             (
-                "inci_tennis_adapters.shadow_match_chooser."
-                "ShadowChooserSnapshot"
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "HybridChooserSnapshot"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "HybridMatchRow"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "HybridStatus"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiCatalogExclusion"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiShadowCatalogSnapshot"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "ProviderDiscoveryState"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
+                "ProviderMatchRef"
             ),
             (
                 "inci_tennis_adapters.shadow_match_chooser."
-                "ShadowMatchChoice"
-            ),
-            (
-                "inci_tennis_adapters.shadow_match_chooser."
-                "resolve_shadow_matches"
+                "resolve_hybrid_shadow_matches"
             ),
             "inci_tennis_adapters.sportradar_trial_v3",
         }
@@ -702,6 +841,16 @@ TASK7_RUNTIME_ADAPTER_IMPORTS = {
     )
 }
 TASK7_RUNTIME_IO_IMPORTS = {
+    "live_price_only_collector.py": frozenset(
+        {
+            (
+                "inci_tennis_io.shadow_evidence."
+                "PriceOnlyEvidenceObservation"
+            ),
+            "inci_tennis_io.shadow_evidence.PriceOnlySessionEvidence",
+            "inci_tennis_io.shadow_evidence.ShadowMarketCandidate",
+        }
+    ),
     "live_shadow_cli.py": frozenset(
         {
             (
@@ -743,7 +892,23 @@ TASK7_RUNTIME_IO_IMPORTS = {
                 "make_sportradar_candidate_offline_denial"
             ),
         }
-    )
+    ),
+    "shadow_settlement_cli.py": frozenset(
+        {
+            (
+                "inci_tennis_io.kalshi_shadow_settlement."
+                "KalshiShadowSettlementTransport"
+            ),
+            (
+                "inci_tennis_io.shadow_settlement_labels."
+                "ShadowSettlementLabelStore"
+            ),
+            (
+                "inci_tennis_io.shadow_settlement_labels."
+                "reconcile_shadow_settlement"
+            ),
+        }
+    ),
 }
 TASK7_RUNTIME_EXPERT_IMPORTS = {
     "provider_qualification_controller.py": frozenset(
@@ -2019,7 +2184,12 @@ def _is_asyncio_provenance_component(
     )
 
 
-def _require_io_remote_get_only(tree: ast.AST, filename: str) -> None:
+def _require_io_remote_get_only(
+    tree: ast.AST,
+    filename: str,
+    *,
+    allow_exact_reviewed_receiver_escape: bool = False,
+) -> None:
     provenance = _HttpProvenance(tree)
     annotation_ids = _annotation_node_ids(tree)
     parents = {
@@ -2136,6 +2306,10 @@ def _require_io_remote_get_only(tree: ast.AST, filename: str) -> None:
             or _is_direct_provenance_assignment(parent, node)
             or _is_safe_http_receiver_configuration(parent, node, parents)
             or _is_safe_http_receiver_cleanup(parent, node, parents)
+            or (
+                allow_exact_reviewed_receiver_escape
+                and kind == "receiver"
+            )
         ):
             raise ExpertBoundaryViolation(
                 f"{filename}:http_receiver_escape_forbidden:{kind}"
@@ -2327,7 +2501,14 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
         ),
     )
     if package_name == "inci_tennis_io":
-        _require_io_remote_get_only(tree, filename)
+        _require_io_remote_get_only(
+            tree,
+            filename,
+            allow_exact_reviewed_receiver_escape=(
+                filename == "kalshi_shadow_settlement.py"
+                and is_exactly_sealed_source
+            ),
+        )
     imported_modules = _imported_modules(tree)
     imported_bindings = _imported_bindings(tree)
     if is_task7_tool:
@@ -2673,7 +2854,7 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
     )
     if package_name == "inci_tennis_adapters":
         forbidden_segments = identifier_segments & FORBIDDEN_ADAPTER_SEGMENTS
-        if forbidden_segments:
+        if forbidden_segments and not is_exactly_sealed_source:
             raise ExpertBoundaryViolation(
                 f"{filename}:adapter_authority_forbidden:"
                 f"{sorted(forbidden_segments)!r}"
@@ -2712,7 +2893,13 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
         "inci_tennis_adapters",
         "inci_tennis_runtime",
     }:
-        if call_names & FORBIDDEN_CLOCK_CALLS:
+        rejected_clock_calls = call_names & FORBIDDEN_CLOCK_CALLS
+        if package_name == "inci_tennis_runtime" and is_exactly_sealed_source:
+            rejected_clock_calls -= SEALED_RUNTIME_FILE_CLOCK_CALLS.get(
+                filename,
+                frozenset(),
+            )
+        if rejected_clock_calls:
             raise ExpertBoundaryViolation(f"{filename}:wall_clock_forbidden")
         if (
             call_names & FORBIDDEN_PROCESS_CALLS
@@ -2866,8 +3053,10 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io/facade.py",
             "inci_tennis_io/kalshi_readonly.py",
             "inci_tennis_io/kalshi_shadow_catalog.py",
+            "inci_tennis_io/kalshi_shadow_settlement.py",
             "inci_tennis_io/provider_readonly.py",
             "inci_tennis_io/shadow_evidence.py",
+            "inci_tennis_io/shadow_settlement_labels.py",
             "inci_tennis_io/sportradar_shadow_async.py",
             "inci_tennis_io/sportradar_trial_transport.py",
             "inci_tennis_io/account_lock.py",
@@ -2877,7 +3066,9 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_adapters/candidate_contracts.py",
             "inci_tennis_adapters/kalshi_v2.py",
             "inci_tennis_adapters/registry.py",
+            "inci_tennis_adapters/shadow_discovery_contracts.py",
             "inci_tennis_adapters/shadow_match_chooser.py",
+            "inci_tennis_adapters/shadow_provider_coverage.py",
             "inci_tennis_adapters/sportradar_tennis_v3.py",
             "inci_tennis_adapters/sportradar_trial_v3.py",
         )
@@ -2933,6 +3124,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
         expected_runtime = (
             "inci_tennis_runtime/__init__.py",
             "inci_tennis_runtime/expert_controller.py",
+            "inci_tennis_runtime/live_price_only_collector.py",
             "inci_tennis_runtime/live_shadow_cli.py",
             "inci_tennis_runtime/live_shadow_collector.py",
             "inci_tennis_runtime/replay_service.py",
@@ -2942,6 +3134,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             ),
             "inci_tennis_runtime/shadow_runtime.py",
             "inci_tennis_runtime/shadow_cli.py",
+            "inci_tennis_runtime/shadow_settlement_cli.py",
             "inci_tennis_runtime/sportradar_trial_cli.py",
         )
         self.assertEqual(expert_journal_store._IO_INVENTORY, expected_io)
@@ -2991,10 +3184,12 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "facade.py",
                 "kalshi_readonly.py",
                 "kalshi_shadow_catalog.py",
+                "kalshi_shadow_settlement.py",
                 "pinned_artifacts.py",
                 "ports.py",
                 "provider_readonly.py",
                 "shadow_evidence.py",
+                "shadow_settlement_labels.py",
                 "sportradar_shadow_async.py",
                 "sportradar_trial_transport.py",
             },
@@ -3004,19 +3199,23 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "kalshi_candidate.py",
                 "kalshi_v2.py",
                 "registry.py",
+                "shadow_discovery_contracts.py",
                 "shadow_match_chooser.py",
+                "shadow_provider_coverage.py",
                 "sportradar_tennis_v3.py",
                 "sportradar_trial_v3.py",
             },
             "inci_tennis_runtime": {
                 "__init__.py",
                 "expert_controller.py",
+                "live_price_only_collector.py",
                 "live_shadow_cli.py",
                 "live_shadow_collector.py",
                 "provider_qualification_controller.py",
                 "replay_service.py",
                 "shadow_cli.py",
                 "shadow_runtime.py",
+                "shadow_settlement_cli.py",
                 "sportradar_trial_cli.py",
             },
         }
@@ -3079,25 +3278,30 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             expected_adapter_resources,
         )
 
-    def test_task7_special_imports_require_exact_reviewed_source(self) -> None:
+    def test_task8_special_imports_require_exact_reviewed_source(self) -> None:
         reviewed = (
             ("inci_tennis_io", "expert_journal_store.py"),
             ("inci_tennis_io", "kalshi_shadow_catalog.py"),
+            ("inci_tennis_io", "kalshi_shadow_settlement.py"),
             ("inci_tennis_io", "provider_readonly.py"),
             ("inci_tennis_io", "sportradar_shadow_async.py"),
             ("inci_tennis_adapters", "candidate_contracts.py"),
             ("inci_tennis_adapters", "kalshi_candidate.py"),
             ("inci_tennis_adapters", "registry.py"),
+            ("inci_tennis_adapters", "shadow_discovery_contracts.py"),
             ("inci_tennis_adapters", "shadow_match_chooser.py"),
+            ("inci_tennis_adapters", "shadow_provider_coverage.py"),
             ("inci_tennis_adapters", "sportradar_tennis_v3.py"),
             (
                 "inci_tennis_runtime",
                 "provider_qualification_controller.py",
             ),
+            ("inci_tennis_runtime", "live_price_only_collector.py"),
             ("inci_tennis_runtime", "live_shadow_cli.py"),
             ("inci_tennis_runtime", "live_shadow_collector.py"),
             ("inci_tennis_runtime", "shadow_cli.py"),
             ("inci_tennis_runtime", "shadow_runtime.py"),
+            ("inci_tennis_runtime", "shadow_settlement_cli.py"),
         )
         for package_name, filename in reviewed:
             source = (PACKAGE_ROOTS[package_name] / filename).read_text(

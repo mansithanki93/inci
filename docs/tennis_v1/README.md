@@ -38,47 +38,94 @@ The sealed `tennis_v1` event core still has no provider network runtime, live
 trading runtime, demo order runtime, exchange client, or order mutation path.
 Provider artifacts admitted to that core remain local, pinned evidence only.
 
-The repository now also contains an explicitly separate outer command,
-`inci_tennis_runtime.live_shadow_cli`. Its primary interface is:
+The explicitly separate outer command starts with the complete current-day
+Kalshi `Tennis` / `Games` census:
 
 ```bash
 python -m inci_tennis_runtime.live_shadow_cli --choose
 ```
 
-The chooser discovers live Sportradar rows, scans the complete current-day
-official Kalshi `Tennis` / `Games` inventory, lists numbered `READY TO COLLECT`
-rows and unnumbered `UNAVAILABLE` reasons, and starts the existing collector
-only after a valid number is selected. Its duration and poll defaults are 600
-and 10 seconds. The Sportradar quota reservation is the one discovery call
-plus `1 + (duration_seconds - 1) // poll_seconds` collection calls: 61 calls at
-the defaults. Invalid input reprompts without rediscovery; `Q`, EOF, Ctrl-C, or
-zero ready rows exit without opening the Kalshi WebSocket or creating a
-collection evidence session.
+Chooser mode needs the read-only Kalshi credentials but not a Sportradar key.
+If `SPORTRADAR_API_KEY` and trial quota are available, one closed-ledger live
+summary attempt may annotate the immutable Kalshi census. Missing/invalid
+credentials, zero quota, 429, transport failure, malformed/stale/empty
+provider data, unsupported coverage, or no exact match downgrades a valid game
+to `PRICE_ONLY`; none may fabricate `VERIFIED`. Kalshi catalog incompleteness
+or schema failure halts because Kalshi is the primary census.
 
-A selectable row requires exactly two supported active binary $1 non-MVE
-match-winner contracts, distinct non-placeholder player names, an exact
-unordered player-pair match after only Unicode NFKC, whitespace collapse, and
-case folding, an inclusive 900-second start tolerance, and degree one on both
-sides of the match graph. No fuzzy matching, ticker parsing, event-title
-parsing, nickname inference, or token dropping is permitted. Only provider
-rows whose lifecycle is `live` are selectable.
+Each eligible game has one state:
 
-Automatic mode is visibly **READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO
-ORDERS**. The retained explicit-ID diagnostic mode is visibly
-`OPERATOR-SUPPLIED / UNVERIFIED`; the modes are mutually exclusive. Selection
-evidence binds the chosen identities to the raw Sportradar discovery capture,
-its hash, the resolver version, the canonical chooser snapshot digest, and the
-canonical normalized Kalshi catalog digest. The Kalshi digest is not a raw
-response archive, so the original Kalshi response bytes cannot be reconstructed
-from it. Display-name/start-time correlation therefore remains an unqualified
-outer-layer observation, not a trusted cross-provider identity.
+- `VERIFIED` is selectable and means only one fresh, exact, live
+  observation-source correlation with degree one on both graph sides.
+- `PRICE_ONLY` is selectable and has no provider/score observation stream.
+- `CONFLICT` is visible, unnumbered, and non-selectable because identity is
+  contradictory or ambiguous.
 
-Neither mode admits observations into the sealed event core, upgrades them
-into qualified evidence, grants execution authority, or exposes an order
-route. See the [live shadow collector design and operations
-record](../superpowers/specs/2026-08-01-live-tennis-shadow-collector-design.md)
-and the [interactive chooser
-design](../superpowers/specs/2026-08-01-interactive-shadow-match-chooser-design.md).
+Both Markets must be structurally valid active binary $1 non-MVE siblings with
+distinct player subtitles, but zero depth and one-sided depth remain valid.
+The chooser prints `book=empty` or `book=one_sided`. An empty-book price
+dashboard can remain quiet while the collector still receives and durably
+processes frames; candidate prices appear only after the aggregate two-ticker
+snapshot barrier. Quiet output alone does not prove a frozen collector.
+
+The exact collection banners are:
+
+```text
+READ ONLY / VERIFIED SOURCE LINK / UNQUALIFIED / NO SIGNALS / NO P&L / NO ORDERS
+READ ONLY / PRICE ONLY / NO SCORE FEED / NO SIGNALS / NO P&L / NO ORDERS
+```
+
+Invalid choices reprompt without another network call. `Q` or EOF closes any
+provider-discovery ledger and opens no collection socket or evidence session.
+An interrupt at the prompt has the same no-start behavior. During collection,
+Ctrl-C, SIGTERM, and SIGHUP converge on the durable terminal path before the
+command reports stop; an unclean/missing terminal causes later audit to fail
+closed.
+
+Only an allowlisted provider transport/parser failure, attested by the
+verified collector after durable close, may create a fresh linked price-only
+session for the remaining duration. No provider score, reducer, book, or
+generation state is carried forward, and earlier verified rows are not
+relabeled. Kalshi, catalog, projection, identity, evidence, terminal, cleanup,
+unknown, or falsely provider-coded failures halt without failover.
+
+Provider quota is staged. Discovery reserves at most one call. A selected
+`PRICE_ONLY` row reserves no collection-provider calls. A selected `VERIFIED`
+row performs a second preflight for the planned summary/timeline collection
+calls before either provider collection or the Kalshi WebSocket starts.
+
+Collection ledgers named `session-<uuid>.jsonl` and private raw Kalshi frames
+live under `~/.local/state/inci/tennis-shadow/`; provider trial ledgers and raw
+discovery captures live under `~/.local/state/inci/sportradar-trial/`. Both
+locations are derived from the OS account rather than repository settings.
+The append-only chains bind session/terminal rows and referenced raw bytes.
+They do not detect coherent deletion or rollback of the whole state root, so
+immutable external archival is required for that threat.
+
+Post-match settlement is separate and accepts an absolute completed session
+ledger path:
+
+```bash
+python -m inci_tennis_runtime.shadow_settlement_cli \
+  /absolute/path/to/session-<uuid>.jsonl
+```
+
+The command uses only fixed public Kalshi Market GETs and prints `pending`,
+`final`, or `conflict`. Nonfinal, disputed, amended, void, or incomplete
+evidence stays pending and writes nothing. Only finalized Kalshi evidence is
+eligible for an append: complementary binary results yield `final`, while
+contradictory finalized results yield `conflict`. Raw Market responses and
+the label row are append-only. Changed evidence after a durable final is a
+permanent conflict; it cannot supersede that final. The exact sidecar root is
+`Path(pwd.getpwuid(os.getuid()).pw_dir) / '.local/state/inci/tennis-shadow-settlement'`,
+shown to operators as `~/.local/state/inci/tennis-shadow-settlement`. It is
+explicitly not `HOME`-configurable.
+
+The hybrid and settlement packages have no signal, strategy, fee, P&L,
+executor, order, portfolio, or expert-synchronization authority. `VERIFIED`
+does not qualify a provider/product, establish trusted synchronization, or
+authorize execution. See the [Kalshi-first hybrid
+design](../superpowers/specs/2026-08-01-kalshi-first-tennis-hybrid-design.md).
 
 ## Reviewed Canonical AST Closure
 

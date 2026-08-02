@@ -40,17 +40,16 @@ export KALSHI_PRIVATE_KEY_PATH="/absolute/path/outside-the-repo/key.pem"
 
 ## Interactive live tennis shadow collector
 
-The separate live shadow command discovers a live Sportradar tennis match,
-correlates it to exactly two Kalshi match-winner order books, and captures the
-three streams together. It is a synchronized evidence collector only: **READ
-ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS**. It does not generate signals,
-P&L, recommendations, qualification, paper trades, demo trades, or live
-trades.
+The separate shadow command starts from the complete current-day Kalshi
+`Tennis` / `Games` census and then optionally correlates Sportradar. Chooser
+mode requires only the two Kalshi credentials above; `SPORTRADAR_API_KEY` is
+optional.
 
 ```bash
-export SPORTRADAR_API_KEY="your-trial-key"
 export KALSHI_API_KEY_ID="your-read-only-key-id"
 export KALSHI_PRIVATE_KEY_PATH="/absolute/path/outside-the-repo/key.pem"
+# Optional: enables one quota-ledger-backed provider discovery attempt.
+export SPORTRADAR_API_KEY="your-trial-key"
 
 python -m inci_tennis_runtime.live_shadow_cli \
   --choose \
@@ -58,28 +57,42 @@ python -m inci_tennis_runtime.live_shadow_cli \
   --poll-seconds 10
 ```
 
-`--duration-seconds` defaults to 600 and `--poll-seconds` defaults to 10. The
-chooser reserves one Sportradar live-summary discovery call plus
-`1 + (duration_seconds - 1) // poll_seconds` collection calls, so the default
-budget is 61 calls. It refuses before discovery if the durable trial ledger
-cannot cover that total.
+The chooser labels every structurally eligible two-Market Kalshi game exactly
+once. `VERIFIED` means only one fresh, live, exact observation-source match;
+it is selectable but remains unqualified and grants no execution authority.
+`PRICE_ONLY` is also selectable and has no score feed. `CONFLICT` is displayed
+under `CONFLICT / EXCLUDED`, unnumbered, and cannot be selected. Missing or
+invalid provider credentials, unavailable quota, 429, transport or schema
+failure, stale or empty provider data, unsupported coverage, and no exact
+match all downgrade otherwise valid games to `PRICE_ONLY`. A partial or
+malformed Kalshi census halts instead of downgrading because Kalshi is the
+primary inventory.
 
-`READY TO COLLECT` contains the numbered matches that may be selected.
-`UNAVAILABLE` is informational and shows non-selectable rows with reasons such
-as pre-start, terminal, missing coverage, incomplete Kalshi pair, or ambiguous
-identity. Invalid input reprompts against the same immutable snapshot without
-another discovery call. `Q`, EOF, or Ctrl-C exits cleanly without opening the
-Kalshi WebSocket or creating a collection evidence session.
+Empty and one-sided books remain valid census members and print their initial
+book state. They can stay quiet until an aggregate snapshot supplies usable
+two-sided books; a quiet price dashboard is therefore not evidence that the
+collector is frozen. The exact dashboard banners are:
 
-Automatic correlation is deliberately strict. A Kalshi Event must be proven
-as current-day official `Tennis` / `Games`, open, non-MVE, binary $1 product
-inventory with exactly two supported active Markets and two distinct,
-non-placeholder `yes_sub_title` player names. Sportradar must report the match
-as `live`. Player pairs must agree exactly after only Unicode NFKC, whitespace
-collapse, and case folding; scheduled starts may differ by at most 900 seconds,
-inclusive; and both sides of the match graph must have degree one. There is no
-fuzzy matching, nickname inference, ticker parsing, event-title parsing, token
-dropping, or liquidity ranking.
+```text
+READ ONLY / VERIFIED SOURCE LINK / UNQUALIFIED / NO SIGNALS / NO P&L / NO ORDERS
+READ ONLY / PRICE ONLY / NO SCORE FEED / NO SIGNALS / NO P&L / NO ORDERS
+```
+
+Invalid input reprompts locally without rediscovery. `Q` or EOF closes any
+provider-discovery ledger and exits before constructing a collection
+WebSocket or evidence session. During collection, Ctrl-C, SIGTERM, and SIGHUP
+request the same durable terminal path; an interrupt at the prompt likewise
+opens no collection socket or evidence. A verified collector may start one
+new linked price-only session only after an allowlisted, source-attested
+provider transport/parser failure. It carries no score or book state and does
+not relabel earlier evidence. Kalshi transport, catalog, projection, identity,
+evidence-integrity, terminal, cleanup, and unknown failures halt without
+failover.
+
+Provider quota is staged: discovery reserves at most one call; choosing
+`PRICE_ONLY` reserves no collection-provider calls; choosing `VERIFIED`
+performs a second preflight for the planned summary/timeline collection calls
+before a provider collection context or Kalshi WebSocket is opened.
 
 The original explicit mode remains available for diagnostics:
 
@@ -92,41 +105,54 @@ python -m inci_tennis_runtime.live_shadow_cli \
   --poll-seconds 10
 ```
 
-The modes are mutually exclusive. The automatic chooser displays
-`AUTO-MATCHED / UNQUALIFIED`; explicit mode displays
-`OPERATOR-SUPPLIED / UNVERIFIED`. Explicit mode reserves only the collection
-formula above, which is 60 calls with the defaults. The terminal dashboard
-overwrites in place on a TTY. A `candidate` book means only that both books
-passed the current sequence/snapshot barrier; it is not a candidate trade.
+The modes are mutually exclusive. Explicit mode still requires Sportradar and
+is diagnostic `OPERATOR-SUPPLIED / UNVERIFIED` collection. In either mode,
+`candidate` means only that both books passed the sequence/snapshot barrier;
+it is not a trade candidate.
 
 The Kalshi key must have exactly the `read` scope. Startup verifies it with the
 read-only `GET /api_keys` endpoint and refuses full-access or write-scoped keys
 before opening the WebSocket.
 
-Evidence is stored outside the repository under
-`~/.local/state/inci/tennis-shadow/`, while the Sportradar trial usage ledger
-and raw captures are under `~/.local/state/inci/sportradar-trial/`. Ctrl-C,
-SIGTERM, and SIGHUP request a graceful stop and durable terminal records. A
-hard crash that leaves the shadow ledger without its final terminal causes
-the next start to refuse rather than silently accept incomplete evidence.
-Rows are SHA-256 chained, and startup re-audits raw-file references, hashes,
-ownership, permissions, row order, and terminal completeness.
-The chooser preserves the raw Sportradar discovery capture and its digest. Its
-Kalshi source reference is a digest of the canonical normalized catalog, not a
-second raw-response archive, so it cannot independently reconstruct the
-original Kalshi response bytes. Display-name/start-time agreement therefore
-remains an unqualified outer-layer correlation and never becomes a trusted
-event-core binding or execution authority.
-That local chain is not an external rollback anchor; deleting the entire state
-root cannot be detected locally, so archive completed evidence separately when
-that threat matters.
+Collection ledgers and raw Kalshi captures are under
+`~/.local/state/inci/tennis-shadow/`; provider trial usage and raw discovery
+captures are under `~/.local/state/inci/sportradar-trial/`. These roots use the
+OS account directory, not repository configuration. A missing durable terminal
+fails the next audit closed. Hash chains detect row and referenced-raw
+tampering, but cannot detect coherent deletion or rollback of the entire root;
+archive completed evidence externally when that threat matters.
+
+Settlement is a separate public-Kalshi-GET-only command and requires the
+absolute completed session-ledger path:
+
+```bash
+python -m inci_tennis_runtime.shadow_settlement_cli \
+  /absolute/path/to/session-<uuid>.jsonl
+```
+
+It prints `pending`, `final`, or `conflict`. `pending` writes nothing. Only two
+finalized Kalshi Markets with complementary binary results can produce
+`final`; contradictory finalized evidence produces `conflict`. Final and
+conflict rows plus their raw responses are append-only under
+`~/.local/state/inci/tennis-shadow-settlement/`. The exact production root is
+`Path(pwd.getpwuid(os.getuid()).pw_dir) / '.local/state/inci/tennis-shadow-settlement'`:
+the `~` above denotes the OS account home and is explicitly not configurable
+through `HOME`.
+Once a durable final exists, later changed Kalshi evidence is a permanent
+conflict rather than a replacement of the prior final.
+
+This workflow is observation-only. It has no signal, strategy, fee, P&L,
+executor, order, portfolio, or expert-synchronization call path. `VERIFIED`
+does not mean provider qualification, product qualification, trusted
+synchronization, or permission to trade.
 
 See the
 [live tennis shadow collector design and operations record](docs/superpowers/specs/2026-08-01-live-tennis-shadow-collector-design.md)
 and the
 [interactive chooser design](docs/superpowers/specs/2026-08-01-interactive-shadow-match-chooser-design.md)
-for the complete operator and evidence contracts. Automated tests inject fake
-HTTP/WebSocket sessions and make no production network calls.
+and the [Kalshi-first hybrid design](docs/superpowers/specs/2026-08-01-kalshi-first-tennis-hybrid-design.md)
+for the complete operator and evidence contracts. Automated tests run beneath
+an explicit socket/HTTP/WebSocket denial sentinel and make no live calls.
 
 ## Sports discovery
 

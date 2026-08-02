@@ -21,7 +21,7 @@ import json
 import os
 from pathlib import Path
 import pwd
-import re
+from re import compile as pattern_compile
 import stat
 from typing import Callable, Literal, Protocol, Sequence
 from uuid import UUID, uuid4
@@ -41,11 +41,11 @@ _PENDING_SCHEMA = "inci-tennis-shadow-settlement-pending-v1"
 _COMMIT_SCHEMA = "inci-tennis-shadow-settlement-commit-v1"
 _ROW_SCHEMA = "inci-tennis-shadow-settlement-row-v1"
 _ZERO_DIGEST = "0" * 64
-_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
-_DECIMAL_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.\d+)?\Z")
-_TICKER_RE = re.compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
-_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
-_RFC3339_RE = re.compile(
+_DIGEST_RE = pattern_compile(r"[0-9a-f]{64}\Z")
+_DECIMAL_RE = pattern_compile(r"(?:0|[1-9]\d*)(?:\.\d+)?\Z")
+_TICKER_RE = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
+_TOKEN_RE = pattern_compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+_RFC3339_RE = pattern_compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z"
 )
 _RECOGNIZED_STATUSES = frozenset(

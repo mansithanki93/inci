@@ -289,7 +289,13 @@ class ExpertFacadeBoundaryTests(unittest.TestCase):
 
     def test_package_root_remains_empty_and_store_has_static_io_boundary(self) -> None:
         package_root = Path(store_module.__file__).with_name("__init__.py")
-        self.assertEqual(package_root.read_bytes(), b"\n")
+        self.assertEqual(
+            package_root.read_bytes(),
+            (
+                b"# Sealed package root; use inci_tennis_io.facade for "
+                b"public interfaces.\n"
+            ),
+        )
         tree = ast.parse(Path(store_module.__file__).read_text("utf-8"))
         imports = {
             alias.name
@@ -5827,7 +5833,7 @@ class ExpertReplayAuthorityStoreTests(unittest.TestCase):
 
         self.assertEqual(observed, expected)
         pread.assert_not_called()
-        self.assertEqual(gate_count, 87)
+        self.assertEqual(gate_count, 104)
 
     def test_cold_environment_inventory_gates_each_pread_immediately(
         self,
@@ -5881,9 +5887,9 @@ class ExpertReplayAuthorityStoreTests(unittest.TestCase):
             )
         self.assertEqual(
             events.count("gate"),
-            87 + 2 * len(pread_indexes),
+            104 + 2 * len(pread_indexes),
         )
-        self.assertEqual(events.count("gate"), 229)
+        self.assertEqual(events.count("gate"), 280)
 
     def test_cached_source_file_uses_one_logical_gate_and_no_pread(
         self,
