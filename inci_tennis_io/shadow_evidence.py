@@ -3561,6 +3561,38 @@ def _snapshot_audit_inventory(
         raise
 
 
+def _snapshot_external_audit_references(
+    raw_references: Mapping[Path, str],
+    root_files: tuple[_StableAuditFile, ...],
+) -> tuple[_StableAuditFile, ...]:
+    root_paths = {entry.path for entry in root_files}
+    external: list[_StableAuditFile] = []
+    try:
+        for path, expected_digest in raw_references.items():
+            if path in root_paths:
+                continue
+            descriptor = _open_existing_private_readonly_file(
+                path, code="shadow_evidence_source_changed"
+            )
+            entry = _snapshot_audit_file(
+                path,
+                descriptor,
+                maximum_bytes=_MAXIMUM_SPORTRADAR_CAPTURE_BYTES,
+            )
+            if entry.digest != expected_digest:
+                os.close(entry.descriptor)
+                _fail("shadow_evidence_source_changed")
+            external.append(entry)
+        return tuple(external)
+    except BaseException:
+        for entry in external:
+            try:
+                os.close(entry.descriptor)
+            except BaseException:
+                pass
+        raise
+
+
 def _close_audit_snapshot(
     parent_fd: int,
     root_fd: int,
@@ -3618,6 +3650,15 @@ def audit_shadow_settlement_source(
     lock_fd = _open_existing_private_readonly_file(
         state_root / "shadow.lock", code="shadow_evidence_state_unsafe"
     )
+    snapshot: tuple[
+        int,
+        int,
+        int,
+        tuple[int, int],
+        str,
+        tuple[_StableAuditFile, ...],
+    ] | None = None
+    lock_owned = True
     try:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
@@ -3625,6 +3666,12 @@ def audit_shadow_settlement_source(
             if error.errno in {errno.EACCES, errno.EAGAIN}:
                 _fail("shadow_evidence_locked")
             _fail("shadow_evidence_state_unavailable")
+        snapshot = _snapshot_audit_inventory(
+            state_root=state_root,
+            raw_root=raw_root,
+            lock_fd=lock_fd,
+            raw_references={},
+        )
         adapter = object.__new__(ShadowEvidenceStore)
         adapter.state_root = state_root
         adapter.raw_root = raw_root
@@ -3643,19 +3690,25 @@ def audit_shadow_settlement_source(
             lock_identity,
             lock_digest,
             files,
-        ) = _snapshot_audit_inventory(
-            state_root=state_root,
-            raw_root=raw_root,
-            lock_fd=lock_fd,
-            raw_references=adapter._audited_raw_references,
+        ) = snapshot
+        external_files = _snapshot_external_audit_references(
+            adapter._audited_raw_references, files
+        )
+        files = files + external_files
+        snapshot = (
+            parent_fd,
+            root_fd,
+            raw_fd,
+            lock_identity,
+            lock_digest,
+            files,
         )
         source_files = [
             entry for entry in files if entry.path == canonical_path
         ]
         if len(source_files) != 1 or source_files[0].digest != source.ledger_sha256:
-            _close_audit_snapshot(parent_fd, root_fd, raw_fd, files)
             _fail("shadow_evidence_source_changed")
-        return _ShadowSettlementSourceAuditLease(
+        lease = _ShadowSettlementSourceAuditLease(
             source,
             lock_fd,
             parent_path=state_root.parent,
@@ -3668,15 +3721,24 @@ def audit_shadow_settlement_source(
             lock_digest=lock_digest,
             files=files,
         )
+        snapshot = None
+        lock_owned = False
+        lease.verify_unchanged()
+        return lease
     except BaseException:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except BaseException:
-            pass
-        try:
-            os.close(lock_fd)
-        except BaseException:
-            pass
+        if snapshot is not None:
+            _close_audit_snapshot(
+                snapshot[0], snapshot[1], snapshot[2], snapshot[5]
+            )
+        if lock_owned:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except BaseException:
+                pass
+            try:
+                os.close(lock_fd)
+            except BaseException:
+                pass
         raise
 
 

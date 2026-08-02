@@ -149,6 +149,84 @@ def _price_only_store(root: Path) -> Path:
 
 
 class ShadowSettlementSourceAuditTests(unittest.TestCase):
+    def test_audit_rejects_commit_marker_mutation_at_snapshot_boundary(self) -> None:
+        """Catches a marker changing after semantic audit becoming the baseline."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            ledger = _price_only_store(root).resolve()
+            marker = ledger.with_suffix(".commit")
+            original_snapshot = shadow_evidence._snapshot_audit_inventory
+
+            def mutate_then_snapshot(**kwargs: object) -> object:
+                snapshot = original_snapshot(**kwargs)
+                marker.write_bytes(b"{}\n")
+                marker.chmod(0o600)
+                return snapshot
+
+            descriptors_before = len(os.listdir("/dev/fd"))
+
+            def audit_and_close() -> None:
+                lease = shadow_evidence.audit_shadow_settlement_source(ledger)
+                lease.close()
+
+            with patch.object(
+                shadow_evidence,
+                "_snapshot_audit_inventory",
+                side_effect=mutate_then_snapshot,
+            ):
+                with self.assertRaises(ShadowEvidenceError):
+                    audit_and_close()
+            self.assertEqual(len(os.listdir("/dev/fd")), descriptors_before)
+            lock_fd = os.open(root / "shadow.lock", os.O_RDONLY)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+
+    def test_audit_rejects_raw_mutation_after_inventory_snapshot(self) -> None:
+        """Catches an in-root raw capture changing before semantic audit."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            ledger = _price_only_store(root).resolve()
+            raw = next((root / "raw").iterdir())
+            original_snapshot = shadow_evidence._snapshot_audit_inventory
+
+            def snapshot_then_mutate(**kwargs: object) -> object:
+                snapshot = original_snapshot(**kwargs)
+                raw.write_bytes(b"tampered-after-snapshot")
+                raw.chmod(0o600)
+                return snapshot
+
+            descriptors_before = len(os.listdir("/dev/fd"))
+
+            def audit_and_close() -> None:
+                lease = shadow_evidence.audit_shadow_settlement_source(ledger)
+                lease.close()
+
+            with patch.object(
+                shadow_evidence,
+                "_snapshot_audit_inventory",
+                side_effect=snapshot_then_mutate,
+            ):
+                with self.assertRaises(ShadowEvidenceError):
+                    audit_and_close()
+            self.assertEqual(len(os.listdir("/dev/fd")), descriptors_before)
+            lock_fd = os.open(root / "shadow.lock", os.O_RDONLY)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+
     def test_lease_detects_selected_ledger_replacement_and_closes(self) -> None:
         """Catches committing labels from a replaced source after its audit."""
 
