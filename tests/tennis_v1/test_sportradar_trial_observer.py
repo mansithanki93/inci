@@ -123,6 +123,31 @@ def _live_summaries_payload() -> bytes:
     ).encode("utf-8")
 
 
+def _hybrid_live_summaries_payload(*, include_bad_row: bool = False) -> bytes:
+    document = json.loads(_live_summaries_payload())
+    document["summaries"] = [document["summaries"][0]]
+    document["summaries"][0]["sport_event"]["sport_event_context"] = {
+        "sport": {"id": "sr:sport:5", "name": "Tennis"},
+        "category": {"id": "sr:category:3", "name": "ATP"},
+        "competition": {
+            "id": "sr:competition:1",
+            "name": "Washington",
+            "type": "singles",
+            "gender": "men",
+            "level": "professional",
+        },
+        "mode": {"best_of": 3},
+    }
+    if include_bad_row:
+        document["summaries"].append(
+            {
+                "sport_event": {"id": "not-a-provider-id"},
+                "sport_event_status": {"status": "live"},
+            }
+        )
+    return json.dumps(document, separators=(",", ":")).encode("utf-8")
+
+
 class SportradarWireContractTests(unittest.TestCase):
     def test_wire_contract_module_exists(self) -> None:
         self.assertIsNotNone(
@@ -403,6 +428,40 @@ class SportradarWireContractTests(unittest.TestCase):
         duplicate["summaries"].append(duplicate["summaries"][0])
         with self.assertRaises(wire.SportradarWireContractError):
             wire.parse_live_summaries(json.dumps(duplicate).encode("utf-8"))
+
+    def test_hybrid_parser_isolates_one_bad_row_but_rejects_bad_envelope(self) -> None:
+        """Catches hybrid discovery turning one malformed row into a full outage."""
+
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            SportradarWireContractError,
+            parse_live_summaries_for_hybrid,
+        )
+
+        snapshot = parse_live_summaries_for_hybrid(
+            _hybrid_live_summaries_payload(include_bad_row=True)
+        )
+        self.assertEqual(len(snapshot.matches), 1)
+        self.assertEqual(
+            (
+                snapshot.matches[0].competition.category_id,
+                len(snapshot.diagnostics),
+                snapshot.diagnostics[0].index,
+                snapshot.diagnostics[0].code,
+            ),
+            ("sr:category:3", 1, 1, "sportradar_wire_contract_invalid"),
+        )
+        for invalid in (
+            b"{",
+            json.dumps([]).encode(),
+            json.dumps({"generated_at": "not-a-time", "summaries": []}).encode(),
+            json.dumps(
+                {"generated_at": "2026-08-01T18:00:02+00:00", "summaries": {}}
+            ).encode(),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                SportradarWireContractError
+            ):
+                parse_live_summaries_for_hybrid(invalid)
 
 
 class _FakeClock:

@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 
 _MATCH_ID = r"sr:sport_event:[1-9][0-9]*\Z"
 _COMPETITOR_ID = r"sr:competitor:[1-9][0-9]*\Z"
+_SPORT_ID = r"sr:sport:[1-9][0-9]*\Z"
+_CATEGORY_ID = r"sr:category:[1-9][0-9]*\Z"
+_COMPETITION_ID = r"sr:competition:[1-9][0-9]*\Z"
 _STATUSES = frozenset(
     {
         "not_started",
@@ -274,6 +277,41 @@ class SportradarLiveSummariesSnapshot:
     payload_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class SportradarCompetitionProvenance:
+    """Structured source metadata retained only for discovery routing."""
+
+    sport_id: str
+    sport_name: str
+    category_id: str
+    category_name: str
+    competition_id: str
+    competition_name: str
+    competition_type: str
+    gender: str
+    level: str
+
+
+@dataclass(frozen=True, slots=True)
+class SportradarHybridMatch:
+    score: SportradarScoreSnapshot
+    competition: SportradarCompetitionProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class SportradarHybridDiagnostic:
+    index: int
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
+class SportradarHybridDiscoverySnapshot:
+    generated_wall_ns: int
+    matches: tuple[SportradarHybridMatch, ...]
+    diagnostics: tuple[SportradarHybridDiagnostic, ...]
+    payload_sha256: str
+
+
 def _competitors(
     sport_event: dict[str, object],
 ) -> tuple[str, str, str, str]:
@@ -492,6 +530,81 @@ def parse_live_summaries(payload: bytes) -> tuple[SportradarScoreSnapshot, ...]:
     return parse_live_summaries_envelope(payload).snapshots
 
 
+def _hybrid_competition(
+    sport_event: dict[str, object],
+) -> SportradarCompetitionProvenance:
+    context = _object(sport_event.get("sport_event_context"))
+    sport = _object(context.get("sport"))
+    category = _object(context.get("category"))
+    competition = _object(context.get("competition"))
+    return SportradarCompetitionProvenance(
+        sport_id=_provider_id(sport.get("id"), _SPORT_ID),
+        sport_name=_text(sport.get("name")),
+        category_id=_provider_id(category.get("id"), _CATEGORY_ID),
+        category_name=_text(category.get("name")),
+        competition_id=_provider_id(
+            competition.get("id"), _COMPETITION_ID
+        ),
+        competition_name=_text(competition.get("name")),
+        competition_type=_text(competition.get("type"), maximum=32),
+        gender=_text(competition.get("gender"), maximum=32),
+        level=_text(competition.get("level"), maximum=64),
+    )
+
+
+def parse_live_summaries_for_hybrid(
+    payload: bytes,
+) -> SportradarHybridDiscoverySnapshot:
+    """Project a strict live envelope while isolating malformed summaries.
+
+    This is deliberately separate from ``parse_live_summaries``: legacy callers
+    retain their all-or-nothing strict parser, while hybrid discovery can keep
+    independent valid rows visible to the Kalshi-anchored chooser.
+    """
+
+    document = _decode(payload)
+    if set(document) != _TOP_LEVEL_LIVE_SUMMARIES_KEYS:
+        _fail("sportradar_live_summaries_schema_unknown")
+    generated_at = document["generated_at"]
+    generated_wall_ns = _utc_ns(generated_at)
+    summaries = _array(document["summaries"], maximum=1_000)
+    digest = sha256(payload).hexdigest()
+    matches: list[SportradarHybridMatch] = []
+    diagnostics: list[SportradarHybridDiagnostic] = []
+    for index, raw in enumerate(summaries):
+        try:
+            summary = _object(raw)
+            if not set(summary).issubset(_LIVE_SUMMARY_KEYS):
+                _fail("sportradar_live_summary_schema_unknown")
+            score = _parse_summary_document(
+                {"generated_at": generated_at, **summary},
+                expected_match_id=None,
+                payload_sha256=digest,
+            )
+            if score.generated_wall_ns != generated_wall_ns:
+                _fail("sportradar_generated_time_mismatch")
+            sport_event = _object(summary.get("sport_event"))
+            matches.append(
+                SportradarHybridMatch(
+                    score=score,
+                    competition=_hybrid_competition(sport_event),
+                )
+            )
+        except SportradarWireContractError:
+            diagnostics.append(
+                SportradarHybridDiagnostic(
+                    index=index,
+                    code="sportradar_wire_contract_invalid",
+                )
+            )
+    return SportradarHybridDiscoverySnapshot(
+        generated_wall_ns=generated_wall_ns,
+        matches=tuple(matches),
+        diagnostics=tuple(diagnostics),
+        payload_sha256=digest,
+    )
+
+
 def _timeline_event(raw: object) -> SportradarTimelineEvent:
     value = _object(raw)
     if not set(value).issubset(_EVENT_KEYS):
@@ -688,6 +801,10 @@ def validate_timeline_after_summary(
 
 
 __all__ = (
+    "SportradarCompetitionProvenance",
+    "SportradarHybridDiagnostic",
+    "SportradarHybridDiscoverySnapshot",
+    "SportradarHybridMatch",
     "SportradarScoreSnapshot",
     "SportradarLiveSummariesSnapshot",
     "SportradarTimelineEvent",
@@ -697,6 +814,7 @@ __all__ = (
     "parse_sport_event_timeline",
     "parse_live_summaries",
     "parse_live_summaries_envelope",
+    "parse_live_summaries_for_hybrid",
     "validate_timeline_after_summary",
     "validate_timeline_progression",
 )
