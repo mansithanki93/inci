@@ -576,6 +576,7 @@ class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
         from inci_tennis_runtime.live_shadow_collector import (
             LiveShadowCollector,
             ShadowCollectorError,
+            _provider_failure_attestation,
         )
 
         class FailingProvider(_SportradarTransport):
@@ -628,20 +629,29 @@ class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
                 await collector.run(duration_seconds=10, poll_seconds=10)
 
         self.assertEqual(transport.close_calls, 1)
-        self.assertFalse(raised.exception.failover_eligible)
+        self.assertIsNone(_provider_failure_attestation(raised.exception))
         self.assertEqual(
             evidence.terminals[0]["code"], "sportradar_primary_failure"
         )
 
-    async def test_only_allowlisted_provider_failure_after_clean_close_is_failover_eligible(
+    async def test_clean_provider_failure_attestation_is_source_bound_and_not_publicly_forgeable(
         self,
     ) -> None:
-        """Catches generic provider prefixes or dirty cleanup enabling failover."""
+        """Catches trusting public flags, prefixes, or non-provider origins."""
 
         from inci_tennis_runtime.live_shadow_collector import (
+            _CleanProviderFailureAttestation,
             LiveShadowCollector,
             ShadowCollectorError,
+            _provider_failure_attestation,
+            _provider_failure_attestation_is_valid,
         )
+
+        with self.assertRaises(TypeError):
+            ShadowCollectorError(
+                "sportradar_transport_unavailable",
+                failover_eligible=True,
+            )
 
         class FailingProvider(_SportradarTransport):
             def __init__(self, capture: TrialCapture, code: str) -> None:
@@ -665,14 +675,10 @@ class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
             def append_terminal(self, **values: object) -> None:
                 self.terminals.append(values)
 
-        for code, expected in (
-            ("sportradar_transport_unavailable", True),
-            ("sportradar_http_status_429", True),
-            ("sportradar_summary_schema_unknown", True),
-            ("sportradar_match_identity_mismatch", False),
-            ("sportradar_usage_ledger_write_failed", False),
-            ("sportradar_new_unknown_failure", False),
-            ("kalshi_ws_contract_invalid", False),
+        for code, expected_source in (
+            ("sportradar_transport_unavailable", "sportradar_fetch"),
+            ("sportradar_http_status_429", "sportradar_fetch"),
+            ("sportradar_new_unknown_failure", None),
         ):
             with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
                 clock = _Clock()
@@ -697,7 +703,110 @@ class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
                     await collector.run(duration_seconds=10, poll_seconds=10)
 
                 self.assertEqual(raised.exception.code, code)
-                self.assertIs(raised.exception.failover_eligible, expected)
+                attestation = _provider_failure_attestation(raised.exception)
+                if expected_source is None:
+                    self.assertIsNone(attestation)
+                else:
+                    self.assertIs(type(attestation), _CleanProviderFailureAttestation)
+                    self.assertEqual(attestation.code, code)
+                    self.assertEqual(attestation.source, expected_source)
+                    self.assertTrue(
+                        _provider_failure_attestation_is_valid(
+                            attestation, code
+                        )
+                    )
+                    with self.assertRaises(AttributeError):
+                        attestation.code = "sportradar_http_status_500"
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = _Clock()
+            malformed = replace(_capture(Path(directory)), payload=b"{}")
+            collector = LiveShadowCollector(
+                provider_match_id=MATCH_ID,
+                market_tickers=TICKERS,
+                sportradar_transport=_SportradarTransport(malformed),
+                sportradar_ledger=_SportradarLedger(),
+                kalshi_transport=_KalshiTransport(clock, []),
+                market_projector=_Projector(lambda _: None),
+                evidence_store=RecordingEvidence(),
+                wall_ns=clock.wall_ns,
+                monotonic_ns=clock.monotonic_ns,
+                pause=clock.pause,
+                stop_requested=lambda: False,
+                render=lambda _: None,
+            )
+            with self.assertRaises(ShadowCollectorError) as raised:
+                await collector.run(duration_seconds=10, poll_seconds=10)
+            attestation = _provider_failure_attestation(raised.exception)
+            self.assertIs(type(attestation), _CleanProviderFailureAttestation)
+            self.assertEqual(attestation.source, "sportradar_parser")
+
+    async def test_provider_coded_kalshi_and_evidence_errors_have_no_attestation(
+        self,
+    ) -> None:
+        """Catches code text laundering non-provider failures into failover."""
+
+        from inci_tennis_runtime.live_shadow_collector import (
+            LiveShadowCollector,
+            ShadowCollectorError,
+            _provider_failure_attestation,
+        )
+
+        class ProviderCodedKalshi(_KalshiTransport):
+            async def open_readonly(self) -> None:
+                self.open_calls += 1
+                raise _CodedError("sportradar_transport_unavailable")
+
+        class ProviderCodedEvidence:
+            def __init__(self, fail_observation: bool) -> None:
+                self.fail_observation = fail_observation
+                self.terminals: list[dict[str, object]] = []
+
+            def persist_kalshi_frame(self, frame: object) -> object:
+                raise AssertionError(f"unexpected frame: {frame!r}")
+
+            def append_observation(self, record: object) -> None:
+                del record
+                if self.fail_observation:
+                    raise _CodedError("sportradar_transport_unavailable")
+
+            def append_terminal(self, **values: object) -> None:
+                self.terminals.append(values)
+
+        for label in ("kalshi", "evidence"):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                clock = _Clock()
+                collector = LiveShadowCollector(
+                    provider_match_id=MATCH_ID,
+                    market_tickers=TICKERS,
+                    sportradar_transport=_SportradarTransport(
+                        _capture(Path(directory))
+                    ),
+                    sportradar_ledger=_SportradarLedger(),
+                    kalshi_transport=(
+                        ProviderCodedKalshi(clock, [])
+                        if label == "kalshi"
+                        else _KalshiTransport(clock, [])
+                    ),
+                    market_projector=_Projector(lambda _: None),
+                    evidence_store=ProviderCodedEvidence(label == "evidence"),
+                    wall_ns=clock.wall_ns,
+                    monotonic_ns=clock.monotonic_ns,
+                    pause=clock.pause,
+                    stop_requested=lambda: False,
+                    render=lambda _: None,
+                )
+
+                with self.assertRaises(ShadowCollectorError) as raised:
+                    await collector.run(duration_seconds=10, poll_seconds=10)
+
+                self.assertEqual(
+                    raised.exception.code,
+                    "sportradar_transport_unavailable",
+                )
+                self.assertIsNone(
+                    _provider_failure_attestation(raised.exception)
+                )
 
     async def test_cancellation_during_open_still_closes_and_records_terminals(self) -> None:
         """Catches abandoning a partially opened socket on early cancellation."""

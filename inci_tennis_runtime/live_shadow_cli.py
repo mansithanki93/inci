@@ -39,6 +39,8 @@ from inci_tennis_runtime.live_shadow_collector import (
     ShadowCollectorError,
     _durable_to_thread,
     _provider_failure_allows_price_only,
+    _provider_failure_attestation,
+    _provider_failure_attestation_is_valid,
 )
 from inci_tennis_runtime.live_price_only_collector import (
     PriceOnlyShadowCollector,
@@ -574,13 +576,62 @@ async def _capture_optional_provider(
             raise
         capture: object | None = None
         provider_snapshot: object | None = None
+        raw_path: str | None = None
+        raw_digest: str | None = None
+        captured_wall_ns: int | None = None
         terminal_attempted = False
-        provider_context = services.sportradar_transport_factory(
-            api_key=provider_key,
-            ledger=trial_ledger,
-        )
+        provider_entered = False
+        body_error: BaseException | None = None
+
+        async def record_terminal(
+            reason: str,
+            code: str | None = None,
+        ) -> None:
+            nonlocal terminal_attempted
+            if terminal_attempted:
+                raise ShadowCollectorError(
+                    "sportradar_trial_terminal_duplicate"
+                )
+            terminal_attempted = True
+            await _record_trial_terminal(
+                trial_ledger,
+                provider_match_id=None,
+                reason=reason,
+                code=code,
+            )
+
+        try:
+            provider_context = services.sportradar_transport_factory(
+                api_key=provider_key,
+                ledger=trial_ledger,
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt) as error:
+            reason = (
+                "cancelled"
+                if isinstance(error, asyncio.CancelledError)
+                else "operator_interrupt"
+            )
+            code = (
+                "sportradar_shadow_task_cancelled"
+                if reason == "cancelled"
+                else "sportradar_operator_interrupt"
+            )
+            try:
+                await record_terminal(reason, code)
+            except BaseException as cleanup_error:
+                raise error from cleanup_error
+            raise
+        except BaseException as error:
+            code = _trial_halt_code(error)
+            await record_terminal("halted", code)
+            return _ProviderDiscovery(
+                None,
+                _discovery_state("error", code),
+            )
+
         try:
             async with provider_context as provider:
+                provider_entered = True
                 try:
                     capture = await provider.fetch_live_summaries()
                     payload = getattr(capture, "payload", None)
@@ -589,6 +640,8 @@ async def _capture_optional_provider(
                             "sportradar_response_body_invalid"
                         )
                     raw_digest = sha256(payload).hexdigest()
+                    path_value = str(getattr(capture, "raw_path", ""))
+                    raw_path = path_value or None
                     try:
                         provider_snapshot = (
                             trial_wire.parse_live_summaries_for_hybrid(payload)
@@ -601,12 +654,13 @@ async def _capture_optional_provider(
                             code=error.code,
                         )
                         raise
-                    captured_wall_ns = getattr(
-                        capture, "captured_wall_ns", None
+                    captured = getattr(capture, "captured_wall_ns", None)
+                    captured_wall_ns = (
+                        captured if type(captured) is int else None
                     )
                     difference = (
                         captured_wall_ns - provider_snapshot.generated_wall_ns
-                        if type(captured_wall_ns) is int
+                        if captured_wall_ns is not None
                         else None
                     )
                     if difference is None:
@@ -628,9 +682,7 @@ async def _capture_optional_provider(
                             command="shadow",
                             reservation=capture.reservation,
                             provider_match_id=None,
-                            generated_wall_ns=(
-                                provider_snapshot.generated_wall_ns
-                            ),
+                            generated_wall_ns=provider_snapshot.generated_wall_ns,
                             captured_wall_ns=captured_wall_ns,
                             status="listed",
                             match_status=None,
@@ -649,104 +701,110 @@ async def _capture_optional_provider(
                         raise trial_wire.SportradarWireContractError(
                             "sportradar_source_stale"
                         )
-                    if not provider_snapshot.matches:
-                        terminal_attempted = True
-                        await _record_trial_terminal(
-                            trial_ledger,
-                            provider_match_id=None,
-                            reason="list_complete",
-                        )
-                        return _ProviderDiscovery(
-                            provider_snapshot,
-                            _discovery_state(
-                                "unavailable",
-                                "provider_empty",
-                                raw_sha256=raw_digest,
-                                captured_wall_ns=captured_wall_ns,
-                            ),
-                            str(capture.raw_path),
-                            raw_digest,
-                        )
-                    terminal_attempted = True
-                    await _record_trial_terminal(
-                        trial_ledger,
-                        provider_match_id=None,
-                        reason="list_complete",
-                    )
-                    return _ProviderDiscovery(
-                        provider_snapshot,
-                        _discovery_state(
-                            "available",
-                            "provider_discovery_available",
-                            raw_sha256=raw_digest,
-                            captured_wall_ns=captured_wall_ns,
-                        ),
-                        str(capture.raw_path),
-                        raw_digest,
-                    )
-                except asyncio.CancelledError:
-                    if terminal_attempted:
-                        raise
-                    terminal_attempted = True
-                    await _record_trial_terminal(
-                        trial_ledger,
-                        provider_match_id=None,
-                        reason="cancelled",
-                        code="sportradar_shadow_task_cancelled",
-                    )
-                    raise
-                except KeyboardInterrupt:
-                    if terminal_attempted:
-                        raise
-                    terminal_attempted = True
-                    await _record_trial_terminal(
-                        trial_ledger,
-                        provider_match_id=None,
-                        reason="operator_interrupt",
-                        code="sportradar_operator_interrupt",
-                    )
-                    raise
                 except BaseException as error:
-                    if terminal_attempted:
-                        raise
-                    code = _code(error)
-                    terminal_attempted = True
-                    await _record_trial_terminal(
-                        trial_ledger,
-                        provider_match_id=None,
-                        reason="halted",
-                        code=_trial_halt_code(error),
+                    body_error = error
+        except BaseException as lifecycle_error:
+            if isinstance(lifecycle_error, asyncio.CancelledError):
+                try:
+                    await record_terminal(
+                        "cancelled", "sportradar_shadow_task_cancelled"
                     )
-                    if not _provider_failure_allows_price_only(code):
-                        raise
-                    raw_path = (
-                        None
-                        if capture is None
-                        else str(getattr(capture, "raw_path", "")) or None
+                except BaseException as terminal_error:
+                    raise lifecycle_error from terminal_error
+                raise
+            if isinstance(lifecycle_error, KeyboardInterrupt):
+                try:
+                    await record_terminal(
+                        "operator_interrupt", "sportradar_operator_interrupt"
                     )
-                    raw_digest = (
-                        None
-                        if capture is None
-                        else sha256(getattr(capture, "payload", b"")).hexdigest()
-                    )
-                    captured_wall_ns = (
-                        None
-                        if capture is None
-                        else getattr(capture, "captured_wall_ns", None)
-                    )
-                    return _ProviderDiscovery(
-                        provider_snapshot,
-                        _discovery_state(
-                            "stale" if code == "sportradar_source_stale" else "error",
-                            code,
-                            raw_sha256=raw_digest,
-                            captured_wall_ns=captured_wall_ns,
-                        ),
-                        raw_path,
-                        raw_digest,
-                    )
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            raise
+                except BaseException as terminal_error:
+                    raise lifecycle_error from terminal_error
+                raise
+            if body_error is not None:
+                if isinstance(body_error, asyncio.CancelledError):
+                    try:
+                        await record_terminal(
+                            "cancelled",
+                            "sportradar_shadow_task_cancelled",
+                        )
+                    except BaseException as terminal_error:
+                        raise body_error from terminal_error
+                    raise body_error from lifecycle_error
+                if isinstance(body_error, KeyboardInterrupt):
+                    try:
+                        await record_terminal(
+                            "operator_interrupt",
+                            "sportradar_operator_interrupt",
+                        )
+                    except BaseException as terminal_error:
+                        raise body_error from terminal_error
+                    raise body_error from lifecycle_error
+                await record_terminal(
+                    "halted", _trial_halt_code(body_error)
+                )
+                raise body_error from lifecycle_error
+            if provider_entered:
+                await record_terminal(
+                    "halted", _trial_halt_code(lifecycle_error)
+                )
+                raise
+            code = _trial_halt_code(lifecycle_error)
+            await record_terminal("halted", code)
+            return _ProviderDiscovery(
+                None,
+                _discovery_state("error", code),
+            )
+
+        if body_error is not None:
+            if isinstance(body_error, asyncio.CancelledError):
+                await record_terminal(
+                    "cancelled", "sportradar_shadow_task_cancelled"
+                )
+                raise body_error
+            if isinstance(body_error, KeyboardInterrupt):
+                await record_terminal(
+                    "operator_interrupt", "sportradar_operator_interrupt"
+                )
+                raise body_error
+            code = _code(body_error)
+            await record_terminal("halted", _trial_halt_code(body_error))
+            if not _provider_failure_allows_price_only(code):
+                raise body_error
+            bound_path = raw_path if raw_digest is not None else None
+            bound_digest = raw_digest if bound_path is not None else None
+            return _ProviderDiscovery(
+                provider_snapshot,
+                _discovery_state(
+                    "stale" if code == "sportradar_source_stale" else "error",
+                    code,
+                    raw_sha256=raw_digest,
+                    captured_wall_ns=captured_wall_ns,
+                ),
+                bound_path,
+                bound_digest,
+            )
+
+        await record_terminal("list_complete")
+        assert provider_snapshot is not None
+        state = "available" if provider_snapshot.matches else "unavailable"
+        reason = (
+            "provider_discovery_available"
+            if provider_snapshot.matches
+            else "provider_empty"
+        )
+        bound_path = raw_path if raw_digest is not None else None
+        bound_digest = raw_digest if bound_path is not None else None
+        return _ProviderDiscovery(
+            provider_snapshot,
+            _discovery_state(
+                state,
+                reason,
+                raw_sha256=raw_digest,
+                captured_wall_ns=captured_wall_ns,
+            ),
+            bound_path,
+            bound_digest,
+        )
 
 
 def _clock_pair(services: LiveShadowCliDependencies) -> tuple[int, int]:
@@ -1106,9 +1164,14 @@ async def _run_collection(
                 reason="halted",
                 code="sportradar_shadow_discovery_halted",
             )
+        code = _code(error)
+        attestation = _provider_failure_attestation(error)
         if (
             mapping_mode == "auto_matched"
-            and getattr(error, "failover_eligible", False) is True
+            and _provider_failure_attestation_is_valid(
+                attestation, code
+            )
+            and _provider_failure_allows_price_only(code)
         ):
             session_id = getattr(evidence, "session_id", None)
             terminal_digest = getattr(
@@ -1127,7 +1190,7 @@ async def _run_collection(
                     "shadow_evidence_reference_invalid"
                 ) from error
             return _VerifiedCollectionHalt(
-                _code(error), session_id, terminal_digest
+                code, session_id, terminal_digest
             )
         raise
 

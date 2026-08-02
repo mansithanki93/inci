@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from hashlib import sha256
 import json
@@ -585,6 +586,119 @@ class LiveShadowCliTests(unittest.TestCase):
                 if label in {"missing", "quota"}:
                     self.assertEqual(provider_calls, [])
 
+    def test_discovery_factory_and_context_entry_failures_downgrade_after_terminal(self) -> None:
+        """Catches optional provider startup failures aborting Kalshi-only use."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        class EntryFailure(_ChooserProvider):
+            async def __aenter__(self) -> object:
+                self.entered = True
+                raise ShadowCollectorError("sportradar_transport_unavailable")
+
+        def factory_failure(**_: object) -> object:
+            raise ShadowCollectorError("sportradar_transport_unavailable")
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        for label, provider_factory in (
+            ("factory", factory_failure),
+            ("context_entry", lambda **_: EntryFailure()),
+        ):
+            with self.subTest(label=label):
+                ledger = _ChooserLedger()
+                price_collectors: list[_PriceCollector] = []
+                errors = io.StringIO()
+                code = run_cli(
+                    ["--choose", "--duration-seconds", "10"],
+                    environ={"SPORTRADAR_API_KEY": "secret"},
+                    stdin=io.StringIO("1\n"),
+                    stdout=io.StringIO(),
+                    stderr=errors,
+                    dependencies=LiveShadowCliDependencies(
+                        kalshi_only_credential_loader=lambda _: material,
+                        catalog_transport_factory=_HybridCatalog,
+                        trial_ledger_factory=lambda: ledger,
+                        sportradar_transport_factory=provider_factory,
+                        evidence_store_factory=_Context,
+                        kalshi_transport_factory=lambda *_: object(),
+                        projector_factory=lambda _: object(),
+                        price_only_collector_factory=lambda **values: (
+                            price_collectors.append(_PriceCollector(**values))
+                            or price_collectors[-1]
+                        ),
+                        wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                        monotonic_ns=lambda: 10_000_000_000,
+                    ),
+                )
+
+                self.assertEqual(code, 0, errors.getvalue())
+                self.assertEqual(len(price_collectors), 1)
+                self.assertEqual(
+                    ledger.terminals,
+                    [
+                        {
+                            "command": "shadow",
+                            "provider_match_id": None,
+                            "reason": "halted",
+                            "code": "sportradar_transport_unavailable",
+                        }
+                    ],
+                )
+
+    def test_non_bytes_discovery_payload_downgrades_without_raw_binding(self) -> None:
+        """Catches hashing malformed provider payloads or retaining partial raw proof."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        ledger = _ChooserLedger()
+        provider = _ChooserProvider()
+        provider.payload = "not-bytes"
+        price_collectors: list[_PriceCollector] = []
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={"SPORTRADAR_API_KEY": "secret"},
+            stdin=io.StringIO("1\n"),
+            stdout=io.StringIO(),
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                kalshi_only_credential_loader=lambda _: material,
+                catalog_transport_factory=_HybridCatalog,
+                trial_ledger_factory=lambda: ledger,
+                sportradar_transport_factory=lambda **_: provider,
+                evidence_store_factory=_Context,
+                kalshi_transport_factory=lambda *_: object(),
+                projector_factory=lambda _: object(),
+                price_only_collector_factory=lambda **values: (
+                    price_collectors.append(_PriceCollector(**values))
+                    or price_collectors[-1]
+                ),
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: 10_000_000_000,
+            ),
+        )
+
+        self.assertEqual(code, 0, errors.getvalue())
+        self.assertEqual(ledger.terminals[-1]["code"], "sportradar_response_body_invalid")
+        session = price_collectors[0].values["session_evidence"]
+        self.assertEqual(session.provider_discovery_reason, "sportradar_response_body_invalid")
+        self.assertIsNone(session.provider_discovery_raw_path)
+        self.assertIsNone(session.provider_discovery_raw_sha256)
+
     def test_three_sections_share_selectable_numbering_and_conflicts_reprompt(self) -> None:
         """Catches conflict numbering or selection-triggered rediscovery."""
 
@@ -766,7 +880,63 @@ class LiveShadowCliTests(unittest.TestCase):
             LiveShadowCliDependencies,
             run_cli,
         )
-        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+        from inci_tennis_runtime.live_shadow_collector import (
+            LiveShadowCollector,
+            ShadowCollectorError,
+        )
+
+        class VerifiedFailingProvider(_ChooserProvider):
+            def __init__(self, events: list[str]) -> None:
+                super().__init__(events=events, label="verified_provider")
+                self.completed_captures = 0
+
+            async def fetch_summary(self, match_id: str) -> object:
+                del match_id
+                raise ShadowCollectorError(
+                    "sportradar_transport_unavailable"
+                )
+
+            async def fetch_timeline(self, match_id: str) -> object:
+                raise AssertionError(f"unexpected timeline: {match_id}")
+
+        class VerifiedEvidence(_ChooserEvidence):
+            def append_terminal(self, **values: object) -> None:
+                self.halted.append(values)
+                self.terminal_row_sha256 = "d" * 64
+
+        class ReadOnlyKalshi:
+            async def open_readonly(self) -> None:
+                events.append("kalshi_open")
+
+            async def subscribe(self) -> object:
+                events.append("kalshi_subscribe")
+                return SimpleNamespace(
+                    request_id=1,
+                    physical_connection_generation=1,
+                )
+
+            async def receive_one(self, timeout_seconds: float) -> object:
+                del timeout_seconds
+                raise ShadowCollectorError("kalshi_ws_receive_timeout")
+
+            async def request_snapshot(self, sid: int) -> object:
+                raise AssertionError(f"unexpected snapshot: {sid}")
+
+            async def close(self) -> None:
+                events.append("kalshi_close")
+
+        class Projector:
+            def begin_subscription(self, receipt: object) -> None:
+                del receipt
+
+            def apply(self, frame: object) -> object:
+                raise AssertionError(f"unexpected frame: {frame!r}")
+
+            def snapshot_requested(self, receipt: object) -> None:
+                raise AssertionError(f"unexpected snapshot: {receipt!r}")
+
+            def disconnect(self, generation: int | None) -> None:
+                del generation
 
         events: list[str] = []
         discovery_ledger = _ChooserLedger(events=events, label="discovery_ledger")
@@ -777,29 +947,26 @@ class LiveShadowCliTests(unittest.TestCase):
             events=events,
             label="discovery_provider",
         )
-        verified_provider = _ChooserProvider(
-            events=events,
-            label="verified_provider",
-        )
+        verified_provider = VerifiedFailingProvider(events)
         providers = iter((discovery_provider, verified_provider))
-        verified_evidence = _ChooserEvidence(
+        verified_evidence = VerifiedEvidence(
             events,
             session_id="11111111-1111-4111-8111-111111111111",
         )
         price_evidence = _Context(events=events, label="price_evidence")
         evidence = iter((verified_evidence, price_evidence))
         price_collectors: list[_PriceCollector] = []
-        clocks = iter((1_000_000_000, 12_200_000_000, 12_200_000_000))
-
-        class ProviderFailureCollector(_Collector):
-            async def run(
-                self, *, duration_seconds: int, poll_seconds: int
-            ) -> str:
-                del duration_seconds, poll_seconds
-                raise ShadowCollectorError(
-                    "sportradar_transport_unavailable",
-                    failover_eligible=True,
-                )
+        clocks = iter(
+            (
+                1_000_000_000,
+                2_000_000_000,
+                3_000_000_000,
+                12_200_000_000,
+                12_200_000_000,
+            )
+        )
+        kalshi_transports = iter((ReadOnlyKalshi(), object()))
+        projectors = iter((Projector(), object()))
 
         def price_factory(**values: object) -> _PriceCollector:
             events.append("price_collector")
@@ -824,9 +991,9 @@ class LiveShadowCliTests(unittest.TestCase):
                 trial_ledger_factory=lambda: next(ledgers),
                 sportradar_transport_factory=lambda **_: next(providers),
                 evidence_store_factory=lambda: next(evidence),
-                kalshi_transport_factory=lambda *_: (events.append("kalshi") or object()),
-                projector_factory=lambda _: (events.append("projector") or object()),
-                collector_factory=ProviderFailureCollector,
+                kalshi_transport_factory=lambda *_: next(kalshi_transports),
+                projector_factory=lambda _: next(projectors),
+                collector_factory=LiveShadowCollector,
                 price_only_collector_factory=price_factory,
                 wall_ns=lambda: GENERATED_NS + 6_000_000_000,
                 monotonic_ns=lambda: next(clocks),
@@ -868,18 +1035,118 @@ class LiveShadowCliTests(unittest.TestCase):
         )
         from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
 
+        async def real_provider_failure() -> ShadowCollectorError:
+            from inci_tennis_runtime.live_shadow_collector import (
+                LiveShadowCollector,
+            )
+
+            class Provider:
+                completed_captures = 0
+
+                async def fetch_summary(self, match_id: str) -> object:
+                    del match_id
+                    raise ShadowCollectorError(
+                        "sportradar_transport_unavailable"
+                    )
+
+                async def fetch_timeline(self, match_id: str) -> object:
+                    raise AssertionError(f"unexpected timeline: {match_id}")
+
+            class Kalshi:
+                async def open_readonly(self) -> None:
+                    pass
+
+                async def subscribe(self) -> object:
+                    return SimpleNamespace(
+                        request_id=1,
+                        physical_connection_generation=1,
+                    )
+
+                async def receive_one(self, timeout_seconds: float) -> object:
+                    del timeout_seconds
+                    raise ShadowCollectorError("kalshi_ws_receive_timeout")
+
+                async def request_snapshot(self, sid: int) -> object:
+                    raise AssertionError(f"unexpected snapshot: {sid}")
+
+                async def close(self) -> None:
+                    pass
+
+            class Ledger:
+                def record_session_terminal(self, **values: object) -> None:
+                    del values
+
+            class Evidence:
+                def append_terminal(self, **values: object) -> None:
+                    del values
+
+            class Projector:
+                def begin_subscription(self, receipt: object) -> None:
+                    del receipt
+
+                def apply(self, frame: object) -> object:
+                    raise AssertionError(f"unexpected frame: {frame!r}")
+
+                def snapshot_requested(self, receipt: object) -> None:
+                    raise AssertionError(f"unexpected snapshot: {receipt!r}")
+
+                def disconnect(self, generation: int | None) -> None:
+                    del generation
+
+            async def pause(seconds: float) -> None:
+                del seconds
+                await asyncio.sleep(0)
+
+            collector = LiveShadowCollector(
+                provider_match_id=MATCH_ID,
+                market_tickers=TICKERS,
+                sportradar_transport=Provider(),
+                sportradar_ledger=Ledger(),
+                kalshi_transport=Kalshi(),
+                market_projector=Projector(),
+                evidence_store=Evidence(),
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: 1_000_000_000,
+                pause=pause,
+                stop_requested=lambda: False,
+                render=lambda _: None,
+            )
+            try:
+                await collector.run(duration_seconds=10, poll_seconds=10)
+            except ShadowCollectorError as error:
+                return error
+            raise AssertionError("provider failure was not raised")
+
+        short_attested_error = asyncio.run(real_provider_failure())
+
         cases = (
-            ("kalshi", "kalshi_transport_unavailable", False, (1, 2)),
-            ("evidence", "shadow_evidence_write_failed", False, (1, 2)),
-            ("unknown", "sportradar_new_unknown_failure", False, (1, 2)),
+            (
+                "kalshi",
+                ShadowCollectorError("kalshi_transport_unavailable"),
+                (1, 2),
+            ),
+            (
+                "evidence",
+                ShadowCollectorError("shadow_evidence_write_failed"),
+                (1, 2),
+            ),
+            (
+                "unknown",
+                ShadowCollectorError("sportradar_new_unknown_failure"),
+                (1, 2),
+            ),
+            (
+                "forged",
+                ShadowCollectorError("sportradar_transport_unavailable"),
+                (1, 2),
+            ),
             (
                 "short",
-                "sportradar_transport_unavailable",
-                True,
+                short_attested_error,
                 (1_000_000_000, 21_500_000_000),
             ),
         )
-        for label, error_code, eligible, clock_values in cases:
+        for label, selected_error, clock_values in cases:
             with self.subTest(label=label):
                 ledgers = iter((_ChooserLedger(), _ChooserLedger()))
                 providers = iter(
@@ -897,10 +1164,7 @@ class LiveShadowCliTests(unittest.TestCase):
                         self, *, duration_seconds: int, poll_seconds: int
                     ) -> str:
                         del duration_seconds, poll_seconds
-                        raise ShadowCollectorError(
-                            error_code,
-                            failover_eligible=eligible,
-                        )
+                        raise selected_error
 
                 material = SimpleNamespace(
                     kalshi_api_key_id="identifier",
@@ -932,7 +1196,7 @@ class LiveShadowCliTests(unittest.TestCase):
 
                 self.assertEqual(code, 1)
                 self.assertEqual(price_calls, [])
-                self.assertIn(error_code, errors.getvalue())
+                self.assertIn(selected_error.code, errors.getvalue())
 
     def test_choose_lists_once_reprompts_locally_and_runs_second_match(self) -> None:
         """Catches rediscovery or selecting a row other than the displayed number."""

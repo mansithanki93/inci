@@ -108,16 +108,8 @@ _PROVIDER_HTTP_STATUS_PATTERN = pattern_compile(
 class ShadowCollectorError(RuntimeError):
     """A fixed shadow diagnostic without raw payload or credential text."""
 
-    def __init__(
-        self,
-        code: str,
-        *,
-        failover_eligible: bool = False,
-    ) -> None:
-        if type(failover_eligible) is not bool:
-            failover_eligible = False
+    def __init__(self, code: str) -> None:
         self.code = code
-        self.failover_eligible = failover_eligible
         super().__init__(code)
 
 
@@ -130,6 +122,93 @@ def _provider_failure_allows_price_only(code: object) -> bool:
         code in _PROVIDER_FAILOVER_TRANSPORT_CODES
         or code in _PROVIDER_FAILOVER_PARSER_CODES
         or _PROVIDER_HTTP_STATUS_PATTERN.fullmatch(code) is not None
+    )
+
+
+_PROVIDER_ATTESTATION_SEAL = object()
+_PROVIDER_ATTESTATION_SCHEMA = "clean-provider-failure-v1"
+_PROVIDER_FAILURE_SOURCES = frozenset(
+    {"sportradar_fetch", "sportradar_parser"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanProviderFailureAttestation:
+    code: str
+    source: str
+    schema: str
+    _seal: object
+
+    def __post_init__(self) -> None:
+        if (
+            self._seal is not _PROVIDER_ATTESTATION_SEAL
+            or self.schema != _PROVIDER_ATTESTATION_SCHEMA
+            or self.source not in _PROVIDER_FAILURE_SOURCES
+            or not _provider_failure_allows_price_only(self.code)
+        ):
+            raise TypeError("clean provider failure attestation is internal")
+
+
+class _AttestedProviderFailure(ShadowCollectorError):
+    def __init__(self, code: str, source: str, *, _seal: object) -> None:
+        if _seal is not _PROVIDER_ATTESTATION_SEAL:
+            raise TypeError("attested provider failure is internal")
+        super().__init__(code)
+        self._attestation = _CleanProviderFailureAttestation(
+            code,
+            source,
+            _PROVIDER_ATTESTATION_SCHEMA,
+            _PROVIDER_ATTESTATION_SEAL,
+        )
+
+
+class _ProviderOperationFailure(RuntimeError):
+    def __init__(self, code: str, source: str, *, _seal: object) -> None:
+        if (
+            _seal is not _PROVIDER_ATTESTATION_SEAL
+            or source not in _PROVIDER_FAILURE_SOURCES
+            or not _provider_failure_allows_price_only(code)
+        ):
+            raise TypeError("provider operation failure is internal")
+        self.code = code
+        self.source = source
+        super().__init__(code)
+
+
+def _provider_failure_attestation(
+    error: object,
+) -> _CleanProviderFailureAttestation | None:
+    if type(error) is not _AttestedProviderFailure:
+        return None
+    value = getattr(error, "_attestation", None)
+    return value if type(value) is _CleanProviderFailureAttestation else None
+
+
+def _provider_failure_attestation_is_valid(
+    attestation: object,
+    code: object,
+) -> bool:
+    return (
+        type(attestation) is _CleanProviderFailureAttestation
+        and attestation._seal is _PROVIDER_ATTESTATION_SEAL
+        and attestation.schema == _PROVIDER_ATTESTATION_SCHEMA
+        and attestation.source in _PROVIDER_FAILURE_SOURCES
+        and type(code) is str
+        and attestation.code == code
+    )
+
+
+def _provider_operation_failure(
+    error: BaseException,
+    source: str,
+) -> BaseException:
+    code = _error_code(error)
+    if not _provider_failure_allows_price_only(code):
+        return error
+    return _ProviderOperationFailure(
+        code,
+        source,
+        _seal=_PROVIDER_ATTESTATION_SEAL,
     )
 
 
@@ -581,7 +660,19 @@ class LiveShadowCollector:
 
     async def _capture_summary(self) -> None:
         started_wall, started_monotonic = self._clock()
-        capture = await self._sportradar.fetch_summary(self._provider_match_id)
+        try:
+            capture = await self._sportradar.fetch_summary(
+                self._provider_match_id
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as error:
+            marked = _provider_operation_failure(
+                error, "sportradar_fetch"
+            )
+            if marked is error:
+                raise
+            raise marked from error
         self._sportradar_captures += 1
         completed_wall, completed_monotonic = self._clock()
         if completed_monotonic < started_monotonic:
@@ -607,7 +698,12 @@ class LiveShadowCollector:
                 reservation=capture.reservation,
                 code=error.code,
             )
-            raise
+            marked = _provider_operation_failure(
+                error, "sportradar_parser"
+            )
+            if marked is error:
+                raise
+            raise marked from error
         self._score = score
         self._provider_capture = capture
         self._progression = "initial"
@@ -615,7 +711,19 @@ class LiveShadowCollector:
 
     async def _capture_timeline(self) -> None:
         started_wall, started_monotonic = self._clock()
-        capture = await self._sportradar.fetch_timeline(self._provider_match_id)
+        try:
+            capture = await self._sportradar.fetch_timeline(
+                self._provider_match_id
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as error:
+            marked = _provider_operation_failure(
+                error, "sportradar_fetch"
+            )
+            if marked is error:
+                raise
+            raise marked from error
         self._sportradar_captures += 1
         completed_wall, completed_monotonic = self._clock()
         if completed_monotonic < started_monotonic:
@@ -653,7 +761,12 @@ class LiveShadowCollector:
                 reservation=capture.reservation,
                 code=error.code,
             )
-            raise
+            marked = _provider_operation_failure(
+                error, "sportradar_parser"
+            )
+            if marked is error:
+                raise
+            raise marked from error
         self._timeline = timeline
         self._score = timeline.score
         self._provider_capture = capture
@@ -1040,6 +1153,7 @@ class LiveShadowCollector:
         _, start = self._clock()
         reason: str | None = None
         failure: str | None = None
+        provider_failure_source: str | None = None
         cancellation: asyncio.CancelledError | None = None
         opened = False
         try:
@@ -1101,6 +1215,10 @@ class LiveShadowCollector:
             failure = None
         except KeyboardInterrupt:
             reason = "operator_interrupt"
+        except _ProviderOperationFailure as error:
+            failure = error.code
+            provider_failure_source = error.source
+            reason = "halted"
         except Exception as error:
             failure = _error_code(error)
             reason = "halted"
@@ -1132,13 +1250,17 @@ class LiveShadowCollector:
         reason, failure, cleanup_clean = result
         if reason == "halted":
             code = failure or "shadow_internal_error"
-            raise ShadowCollectorError(
-                code,
-                failover_eligible=(
-                    cleanup_clean
-                    and _provider_failure_allows_price_only(code)
-                ),
-            )
+            if (
+                cleanup_clean
+                and provider_failure_source is not None
+                and _provider_failure_allows_price_only(code)
+            ):
+                raise _AttestedProviderFailure(
+                    code,
+                    provider_failure_source,
+                    _seal=_PROVIDER_ATTESTATION_SEAL,
+                )
+            raise ShadowCollectorError(code)
         return reason
 
 
