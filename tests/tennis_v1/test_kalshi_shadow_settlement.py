@@ -5,7 +5,6 @@ import hashlib
 import json
 from pathlib import Path
 import unittest
-from urllib.parse import urlsplit
 
 
 _ORIGIN = "https://external-api.kalshi.com"
@@ -77,11 +76,7 @@ _FORBIDDEN_IMPORT_TERMS = frozenset({
     "portfolio", "order", "trade", "account", "credential", "provider",
     "strategy", "signal", "executor", "position", "fill", "fee", "pnl",
 })
-_APPROVED_TRANSPORT_CONSTANTS = {
-    "_ORIGIN": "https://external-api.kalshi.com",
-    "_CURRENT_PATH": "/trade-api/v2/markets/",
-    "_HISTORICAL_PATH": "/trade-api/v2/historical/markets/",
-}
+_REVIEWED_TRANSPORT_AST_SHA256 = "00128b2f077dae03c0a62a4c28fa60cd2f704899c50852b13a895c4c6dd7b954"
 
 
 def _assert_authority_free_ast(tree: ast.AST) -> None:
@@ -94,63 +89,13 @@ def _assert_authority_free_ast(tree: ast.AST) -> None:
     assert not any(term in module.casefold() for module in modules for term in _FORBIDDEN_IMPORT_TERMS)
 
 
-def _assert_exact_transport_constants(tree: ast.AST) -> None:
-    assignments: dict[str, str] = {}
-    for node in tree.body:  # type: ignore[attr-defined]
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant) and type(node.value.value) is str:
-            assignments[target.id] = node.value.value
-    assert {name: assignments.get(name) for name in _APPROVED_TRANSPORT_CONSTANTS} == _APPROVED_TRANSPORT_CONSTANTS
-    literals = [node.value for node in ast.walk(tree)
-                if isinstance(node, ast.Constant) and type(node.value) is str]
-    assert not any(
-        (value.startswith("/") or "://" in value)
-        and value not in _APPROVED_TRANSPORT_CONSTANTS.values()
-        for value in literals
-    )
+def _canonical_ast_sha256(source: str) -> str:
+    canonical = ast.dump(ast.parse(source), include_attributes=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
-def _assert_only_get_request_ast(tree: ast.AST) -> None:
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-             and isinstance(node.func, ast.Attribute) and node.func.attr == "request"]
-    assert len(calls) == 1
-    call = calls[0]
-    assert len(call.args) == 2
-    assert isinstance(call.args[0], ast.Constant) and call.args[0].value == "GET"
-    assert {keyword.arg for keyword in call.keywords} == {"headers", "allow_redirects", "stream", "timeout"}
-    assert isinstance(call.args[1], ast.BinOp) and isinstance(call.args[1].op, ast.Add)
-    assert isinstance(call.args[1].left, ast.Name) and call.args[1].left.id == "_ORIGIN"
-    headers = next(keyword.value for keyword in call.keywords if keyword.arg == "headers")
-    assert isinstance(headers, ast.Dict)
-    assert len(headers.keys) == 2
-    assert all(isinstance(key, ast.Constant) and type(key.value) is str for key in headers.keys)
-    assert all(isinstance(value, ast.Constant) and type(value.value) is str for value in headers.values)
-    assert {(key.value, value.value) for key, value in zip(headers.keys, headers.values)} == {
-                ("Accept", "application/json"), ("Accept-Encoding", "identity"),
-            }
-    values = {keyword.arg: keyword.value for keyword in call.keywords}
-    assert isinstance(values["allow_redirects"], ast.Constant) and values["allow_redirects"].value is False
-    assert isinstance(values["stream"], ast.Constant) and values["stream"].value is True
-    timeout = values["timeout"]
-    assert isinstance(timeout, ast.Tuple) and len(timeout.elts) == 2
-    assert all(isinstance(item, ast.Constant) for item in timeout.elts)
-    assert tuple(item.value for item in timeout.elts) == (3, 10)
-
-
-def _assert_only_market_route_calls(tree: ast.AST) -> None:
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-             and isinstance(node.func, ast.Attribute) and node.func.attr == "_request"]
-    assert len(calls) == 2
-    prefixes: set[str] = set()
-    for call in calls:
-        assert len(call.args) == 1
-        argument = call.args[0]
-        assert isinstance(argument, ast.BinOp) and isinstance(argument.op, ast.Add)
-        assert isinstance(argument.left, ast.Name)
-        prefixes.add(argument.left.id)
-    assert prefixes == {"_CURRENT_PATH", "_HISTORICAL_PATH"}
+def _assert_reviewed_transport_ast(source: str) -> None:
+    assert _canonical_ast_sha256(source) == _REVIEWED_TRANSPORT_AST_SHA256
 
 
 class KalshiShadowSettlementTransportTests(unittest.TestCase):
@@ -165,11 +110,10 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
         self.assertEqual(response.close_count, 1)
         method, url, kwargs = session.calls[0]
         self.assertEqual((method, url), ("GET", _ORIGIN + "/trade-api/v2/markets/" + _TICKER))
-        self.assertEqual(kwargs["headers"], {"Accept": "application/json", "Accept-Encoding": "identity"})
-        self.assertEqual(kwargs["timeout"], (3, 10))
-        self.assertFalse(kwargs["allow_redirects"])
-        self.assertTrue(kwargs["stream"])
-        self.assertNotIn("params", kwargs)
+        self.assertEqual(kwargs, {
+            "headers": {"Accept": "application/json", "Accept-Encoding": "identity"},
+            "allow_redirects": False, "stream": True, "timeout": (3, 10),
+        })
         self.assertFalse(session.trust_env)
 
     def test_only_closed_exact_current_404_uses_historical_route(self) -> None:
@@ -180,7 +124,11 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
         self.assertEqual(state.route_tier, "historical")
         self.assertEqual(current.close_count, 1)
         self.assertEqual(historical.close_count, 1)
-        self.assertEqual(urlsplit(session.calls[1][1]).path, "/trade-api/v2/historical/markets/" + _TICKER)
+        self.assertEqual(session.calls[1], (
+            "GET", _ORIGIN + "/trade-api/v2/historical/markets/" + _TICKER,
+            {"headers": {"Accept": "application/json", "Accept-Encoding": "identity"},
+             "allow_redirects": False, "stream": True, "timeout": (3, 10)},
+        ))
 
     def test_429_retries_with_exact_bounded_schedule_and_closes_every_attempt(self) -> None:
         """Catches unbounded or mistimed rate-limit retry behavior."""
@@ -285,38 +233,50 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "kalshi_settlement_schema_invalid"):
                 _transport(_Session([_Response({"market": market})])).get_market_result(_TICKER)
 
-    def test_ast_exclusively_allows_literal_get_market_routes_and_safe_imports(self) -> None:
-        """Catches an alternate HTTP authority or forbidden imported capability."""
-        source = Path(__file__).parents[2] / "inci_tennis_io" / "kalshi_shadow_settlement.py"
-        tree = ast.parse(source.read_text(encoding="utf-8"))
+    def test_transport_ast_matches_exact_reviewed_program_and_forbids_authority_imports(self) -> None:
+        """Catches any executable change or an imported authority-bearing capability."""
+        source_path = Path(__file__).parents[2] / "inci_tennis_io" / "kalshi_shadow_settlement.py"
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
         _assert_authority_free_ast(tree)
-        _assert_exact_transport_constants(tree)
-        _assert_only_get_request_ast(tree)
-        _assert_only_market_route_calls(tree)
+        _assert_reviewed_transport_ast(source)
 
-    def test_ast_helpers_reject_forbidden_import_method_and_query_mutations(self) -> None:
-        """Proves the static policy helpers fail when unsafe shapes are introduced."""
+    def test_transport_ast_seal_ignores_comments_and_formatting(self) -> None:
+        """Catches hashing source bytes instead of the location-free canonical AST."""
+        source_path = Path(__file__).parents[2] / "inci_tennis_io" / "kalshi_shadow_settlement.py"
+        source = source_path.read_text(encoding="utf-8")
+        _assert_reviewed_transport_ast("# review-only comment\n\n" + source)
+        _assert_reviewed_transport_ast(ast.unparse(ast.parse(source)))
+
+    def test_ast_policy_rejects_all_reviewed_executable_mutations(self) -> None:
+        """Catches executable authority changes outside handcrafted request checks."""
+        source_path = Path(__file__).parents[2] / "inci_tennis_io" / "kalshi_shadow_settlement.py"
+        source = source_path.read_text(encoding="utf-8")
+        mutations = (
+            ("auth assignment", "    def _request(self, path: str) -> tuple[int, bytes | None]:\n",
+             "    def _request(self, path: str) -> tuple[int, bytes | None]:\n        self.s.auth = credentials\n"),
+            ("post call", "    def _request(self, path: str) -> tuple[int, bytes | None]:\n",
+             "    def _request(self, path: str) -> tuple[int, bytes | None]:\n        self.s.post(path)\n"),
+            ("portfolio traversal", "_CURRENT_PATH + ticker", "_CURRENT_PATH + \"../portfolio/orders\""),
+            ("post method", "\"GET\", _ORIGIN + path,", "\"POST\", _ORIGIN + path,"),
+            ("auth header", "{\"Accept\": \"application/json\", \"Accept-Encoding\": \"identity\"}",
+             "{\"Accept\": \"application/json\", \"Accept-Encoding\": \"identity\", \"Authorization\": credentials}"),
+            ("params", "allow_redirects=False, stream=True, timeout=(3, 10),",
+             "params={}, allow_redirects=False, stream=True, timeout=(3, 10),"),
+            ("third positional", "\"GET\", _ORIGIN + path,", "\"GET\", _ORIGIN + path, body,"),
+        )
+        for label, old, new in mutations:
+            with self.subTest(label=label):
+                self.assertEqual(source.count(old), 1)
+                mutated = source.replace(old, new)
+                self.assertNotEqual(_canonical_ast_sha256(mutated), _REVIEWED_TRANSPORT_AST_SHA256)
+                with self.assertRaises(AssertionError):
+                    _assert_reviewed_transport_ast(mutated)
+
+    def test_forbidden_import_semantic_check_rejects_authority_module(self) -> None:
+        """Catches a forbidden capability import independently of the exact AST seal."""
         with self.assertRaises(AssertionError):
             _assert_authority_free_ast(ast.parse("from product.provider import Client"))
-        with self.assertRaises(AssertionError):
-            _assert_only_get_request_ast(ast.parse("client.request('POST', origin + path, headers={}, allow_redirects=False, stream=True, timeout=(3, 10))"))
-        with self.assertRaises(AssertionError):
-            _assert_only_get_request_ast(ast.parse("client.request('GET', origin + path, headers={}, allow_redirects=False, stream=True, timeout=(3, 10), params={})"))
-        with self.assertRaises(AssertionError):
-            _assert_only_get_request_ast(ast.parse("client.request('GET', origin + path, headers={'Authorization': 'x'}, allow_redirects=False, stream=True, timeout=(3, 10))"))
-
-    def test_ast_policy_rejects_header_spread_and_third_positional_bypasses(self) -> None:
-        """Catches static policy accepting dynamic credentials or a hidden request body."""
-        with self.assertRaises(AssertionError):
-            _assert_only_get_request_ast(ast.parse("client.request('GET', _ORIGIN + path, body, headers={**dynamic_headers, 'Accept': 'application/json', 'Accept-Encoding': 'identity'}, allow_redirects=False, stream=True, timeout=(3, 10))"))
-
-    def test_ast_policy_rejects_extra_route_literal_and_dynamic_authorization_header(self) -> None:
-        """Catches a third endpoint or Authorization smuggled through an AST spread."""
-        constants = "_ORIGIN = 'https://external-api.kalshi.com'\n_CURRENT_PATH = '/trade-api/v2/markets/'\n_HISTORICAL_PATH = '/trade-api/v2/historical/markets/'\n_EXTRA = '/trade-api/v2/portfolio/'"
-        with self.assertRaises(AssertionError):
-            _assert_exact_transport_constants(ast.parse(constants))
-        with self.assertRaises(AssertionError):
-            _assert_only_get_request_ast(ast.parse("client.request('GET', _ORIGIN + path, headers={**authorization, 'Accept': 'application/json', 'Accept-Encoding': 'identity'}, allow_redirects=False, stream=True, timeout=(3, 10))"))
 
 
 if __name__ == "__main__":
