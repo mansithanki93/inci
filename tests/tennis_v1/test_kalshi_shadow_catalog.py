@@ -278,13 +278,135 @@ class KalshiShadowCatalogTests(unittest.TestCase):
         self.assertFalse(any(urlsplit(str(call["url"])).path == "/trade-api/v2/events" for call in session.calls))
 
     def test_compatibility_wrapper_returns_catalog_games_and_digest(self) -> None:
-        """Catches legacy consumers receiving a changed return shape."""
+        """Catches legacy resolver rejection of the wrapper's game value type."""
+
+        from inci_tennis_adapters.shadow_match_chooser import resolve_shadow_matches
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            SportradarLiveSummariesSnapshot,
+            SportradarScoreSnapshot,
+        )
 
         transport = _transport(_Session(_base_pages()))
         games, digest = transport.discover_tennis_games(now=_NOW)
+        provider = SportradarLiveSummariesSnapshot(
+            generated_wall_ns=1_785_088_800_000_000_000,
+            snapshots=(SportradarScoreSnapshot(
+                provider_match_id="sr:sport_event:1",
+                generated_wall_ns=1_785_088_800_000_000_000,
+                start_wall_ns=1_785_088_800_000_000_000,
+                best_of=3,
+                home_id="sr:competitor:1",
+                home_name="Alice Smith",
+                away_id="sr:competitor:2",
+                away_name="Bea Jones",
+                status="live",
+                match_status="live",
+                sets_home=0,
+                sets_away=0,
+                games_home=0,
+                games_away=0,
+                points_home="0",
+                points_away="0",
+                serving=None,
+                in_tiebreak=False,
+                payload_sha256="a" * 64,
+            ),),
+            payload_sha256="a" * 64,
+        )
+        resolved = resolve_shadow_matches(
+            provider, games, kalshi_catalog_sha256=digest
+        )
 
         self.assertEqual(len(games), 1)
         self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(len(resolved.ready), 1)
+
+    def test_series_pagination_is_exhaustive_and_cursor_failures_abort(self) -> None:
+        """Catches silently omitting Tennis Series that appear on later pages."""
+
+        pages = _base_pages()
+        pages["/trade-api/v2/series"] = [
+            {"series": [{"ticker": "KXSOCCER", "category": "Sports", "tags": ["Soccer"]}], "cursor": "series-next"},
+            {"series": [{"ticker": "KXATP", "category": "Sports", "tags": ["Tennis"]}], "cursor": ""},
+        ]
+        session = _Session(pages)
+        snapshot = _transport(session).discover_tennis_catalog(now=_NOW)
+
+        self.assertEqual([game.event_ticker for game in snapshot.games], [_EVENT])
+        self.assertEqual(
+            [call["params"].get("cursor") for call in session.calls if urlsplit(str(call["url"])).path.endswith("/series")],
+            [None, "series-next"],
+        )
+        loop = _base_pages()
+        loop["/trade-api/v2/series"] = [
+            {"series": [], "cursor": "again"},
+            {"series": [], "cursor": "again"},
+        ]
+        with self.assertRaisesRegex(Exception, "kalshi_catalog_pagination_invalid"):
+            _transport(_Session(loop)).discover_tennis_catalog(now=_NOW)
+        duplicate = _base_pages()
+        duplicate["/trade-api/v2/series"] = [
+            {"series": [{"ticker": "KXATP", "category": "Sports", "tags": ["Tennis"]}], "cursor": "again"},
+            {"series": [{"ticker": "KXATP", "category": "Sports", "tags": ["Tennis"]}], "cursor": ""},
+        ]
+        with self.assertRaisesRegex(Exception, "kalshi_catalog_schema_invalid"):
+            _transport(_Session(duplicate)).discover_tennis_catalog(now=_NOW)
+
+    def test_book_state_requires_two_sided_quotes_for_each_market(self) -> None:
+        """Catches opposing one-sided markets being mislabeled as a two-sided book."""
+
+        event = _event(markets=[
+            _market(_EVENT + "-A", "Alice Smith", yes_ask_size_fp="0.00"),
+            _market(_EVENT + "-B", "Bea Jones", yes_bid_size_fp="0.00"),
+        ])
+        snapshot = _transport(_Session(_base_pages(events=[event]))).discover_tennis_catalog(now=_NOW)
+
+        self.assertEqual(snapshot.games[0].initial_book_state, "one_sided")
+
+    def test_prefixes_do_not_classify_mve_and_explicit_mve_does_not_form_game(self) -> None:
+        """Catches ticker-prefix MVE inference or accepting explicit MVE siblings."""
+
+        prefixed = _event("KXMVE-26JUL26-NOT-MVE")
+        prefixed_snapshot = _transport(_Session(_base_pages(
+            milestones=[_milestone(prefixed["event_ticker"])], events=[prefixed]
+        ))).discover_tennis_catalog(now=_NOW)
+        self.assertEqual([game.event_ticker for game in prefixed_snapshot.games], ["KXMVE-26JUL26-NOT-MVE"])
+
+        explicit_mve = _event(markets=[
+            _market(_EVENT + "-A", "Alice Smith", mve_collection_ticker="mve-collection"),
+            _market(_EVENT + "-B", "Bea Jones", mve_collection_ticker="mve-collection"),
+        ])
+        excluded_snapshot = _transport(_Session(_base_pages(events=[explicit_mve]))).discover_tennis_catalog(now=_NOW)
+        self.assertEqual(
+            [(row.event_ticker, row.reason) for row in excluded_snapshot.excluded],
+            [(_EVENT, "active_binary_sibling_count_invalid")],
+        )
+
+    def test_ambiguous_primary_event_tickers_abort_instead_of_partial_census(self) -> None:
+        """Catches a current-day game Milestone disappearing when no primary Event is unique."""
+
+        milestone = _milestone()
+        milestone["details"]["main_game_event_ticker"] = None
+        milestone["primary_event_tickers"] = ["KXATP-26JUL26-A", "KXATP-26JUL26-B"]
+        with self.assertRaisesRegex(Exception, "kalshi_catalog_schema_invalid"):
+            _transport(_Session(_base_pages(milestones=[milestone]))).discover_tennis_catalog(now=_NOW)
+
+    def test_public_route_family_and_origin_are_exact(self) -> None:
+        """Catches an origin change or unapproved metadata route widening."""
+
+        session = _Session(_base_pages())
+        _transport(session).discover_tennis_catalog(now=_NOW)
+
+        self.assertEqual(
+            [(call["method"], urlsplit(str(call["url"])).path, call["params"]) for call in session.calls],
+            [
+                ("GET", "/trade-api/v2/search/filters_by_sport", {}),
+                ("GET", "/trade-api/v2/series", {"category": "Sports"}),
+                ("GET", "/trade-api/v2/milestones", {"category": "Sports", "minimum_start_date": "2026-07-26T00:00:00Z", "competition": "ATP Washington", "limit": 500}),
+                ("GET", "/trade-api/v2/events/" + _EVENT, {"with_nested_markets": "true"}),
+            ],
+        )
+        self.assertTrue(all(str(call["url"]).startswith(_ORIGIN + "/trade-api/v2/") for call in session.calls))
 
     def test_milestone_pagination_is_exhaustive_and_incomplete_pages_abort(self) -> None:
         """Catches a partial current-day census escaping Milestone pagination failure."""
@@ -351,12 +473,13 @@ class KalshiShadowCatalogTests(unittest.TestCase):
             _event("KXATP-26JUL26-ONLY", markets=[_market("KXATP-26JUL26-ONLY-A", "One", event_ticker="KXATP-26JUL26-ONLY")]),
             _event("KXATP-26JUL26-THREE", markets=[_market(f"KXATP-26JUL26-THREE-{index}", f"P{index}", event_ticker="KXATP-26JUL26-THREE") for index in range(3)]),
             _event("KXATP-26JUL26-DUP", markets=[_market("KXATP-26JUL26-DUP-A", "Same", event_ticker="KXATP-26JUL26-DUP"), _market("KXATP-26JUL26-DUP-B", " same ", event_ticker="KXATP-26JUL26-DUP")]),
+            _event("KXATP-26JUL26-SCALAR", markets=[_market("KXATP-26JUL26-SCALAR-A", "One", event_ticker="KXATP-26JUL26-SCALAR", market_type="scalar"), _market("KXATP-26JUL26-SCALAR-B", "Two", event_ticker="KXATP-26JUL26-SCALAR", market_type="scalar")]),
         ]
         milestones = [_milestone(str(row["event_ticker"]), identity=f"m-{index}") for index, row in enumerate([good, *invalid])]
         snapshot = _transport(_Session(_base_pages(milestones=milestones, events=[good, *invalid]))).discover_tennis_catalog(now=_NOW)
 
         self.assertEqual([game.event_ticker for game in snapshot.games], [_EVENT])
-        self.assertEqual([row.event_ticker for row in snapshot.excluded], ["KXATP-26JUL26-DUP", "KXATP-26JUL26-ONLY", "KXATP-26JUL26-THREE"])
+        self.assertEqual([row.event_ticker for row in snapshot.excluded], ["KXATP-26JUL26-DUP", "KXATP-26JUL26-ONLY", "KXATP-26JUL26-SCALAR", "KXATP-26JUL26-THREE"])
 
     def test_catalog_hash_changes_for_provenance_books_and_exclusions(self) -> None:
         """Catches an audit digest omitting retained evidence that changes the census."""

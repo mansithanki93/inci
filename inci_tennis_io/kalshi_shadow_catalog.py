@@ -22,6 +22,8 @@ from inci_tennis_adapters.shadow_discovery_contracts import (
     KalshiShadowMarket,
 )
 from inci_tennis_adapters.shadow_match_chooser import (
+    KalshiShadowGame as LegacyKalshiShadowGame,
+    KalshiShadowMarket as LegacyKalshiShadowMarket,
     normalize_player_name,
 )
 
@@ -156,10 +158,6 @@ def _parse_series(value: object) -> tuple[dict[str, object], ...]:
     rows = _required(value, "series")
     if type(rows) is not list:
         raise ValueError("kalshi_catalog_schema_invalid")
-    if "cursor" in value:
-        cursor = value["cursor"]
-        if type(cursor) is not str or cursor:
-            raise ValueError("kalshi_catalog_schema_invalid")
     result: list[dict[str, object]] = []
     tickers: set[str] = set()
     for row in rows:
@@ -177,6 +175,18 @@ def _parse_series(value: object) -> tuple[dict[str, object], ...]:
             }
         )
     return tuple(result)
+
+
+def _parse_series_page(
+    value: object,
+) -> tuple[tuple[dict[str, object], ...], str]:
+    rows = _parse_series(value)
+    if type(value) is not dict:
+        raise ValueError("kalshi_catalog_schema_invalid")
+    cursor = value.get("cursor", "")
+    if type(cursor) is not str:
+        raise ValueError("kalshi_catalog_schema_invalid")
+    return rows, cursor
 
 
 def _parse_milestone(row: object) -> dict[str, object]:
@@ -216,11 +226,7 @@ def _parse_market(row: object) -> tuple[dict[str, object] | None, str | None]:
     raw_collection = row.get("mve_collection_ticker")
     if raw_collection is not None and type(raw_collection) is not str:
         raise ValueError("kalshi_catalog_schema_invalid")
-    if (
-        raw_collection
-        or ticker.startswith("KXMVE")
-        or event_ticker.startswith("KXMVE")
-    ):
+    if raw_collection:
         return None, "mve"
     yes_name = _text(_required(row, "yes_sub_title"), allow_empty=True)
     no_name = _text(_required(row, "no_sub_title"), allow_empty=True)
@@ -650,9 +656,15 @@ class KalshiShadowCatalogTransport:
 
     def get_sports_series(self) -> tuple[dict[str, object], ...]:
         try:
-            return _parse_series(
-                self._read(_API_PREFIX + "/series", {"category": "Sports"})
+            rows, _ = self._pages(
+                _API_PREFIX + "/series",
+                {"category": "Sports"},
+                _parse_series_page,
             )
+            tickers = [row["series_ticker"] for row in rows]
+            if len(tickers) != len(set(tickers)):
+                raise ValueError("kalshi_catalog_schema_invalid")
+            return rows
         except KalshiShadowCatalogError:
             raise
         except Exception:
@@ -771,7 +783,7 @@ class KalshiShadowCatalogTransport:
                     if event_ticker is None:
                         primary = milestone["primary_event_tickers"]
                         if type(primary) is not tuple or len(primary) != 1:
-                            continue
+                            raise ValueError("kalshi_catalog_schema_invalid")
                         event_ticker = primary[0]
                     if type(event_ticker) is not str:
                         raise ValueError("kalshi_catalog_schema_invalid")
@@ -867,15 +879,15 @@ class KalshiShadowCatalogTransport:
                         except ValueError:
                             _fail("kalshi_catalog_timestamp_invalid")
                     if reason is None:
-                        has_bid = any(
+                        has_bid = tuple(
                             market["yes_bid"] is not None for market in markets
                         )
-                        has_ask = any(
+                        has_ask = tuple(
                             market["yes_ask"] is not None for market in markets
                         )
                         state = (
-                            "two_sided" if has_bid and has_ask else
-                            "one_sided" if has_bid or has_ask else "empty"
+                            "two_sided" if all(has_bid) and all(has_ask) else
+                            "one_sided" if any(has_bid) or any(has_ask) else "empty"
                         )
                         games.append(
                             KalshiShadowGame(
@@ -924,9 +936,24 @@ class KalshiShadowCatalogTransport:
 
     def discover_tennis_games(
         self, *, now: datetime | None = None
-    ) -> tuple[tuple[KalshiShadowGame, ...], str]:
+    ) -> tuple[tuple[LegacyKalshiShadowGame, ...], str]:
         snapshot = self.discover_tennis_catalog(now=now)
-        return snapshot.games, snapshot.catalog_sha256
+        games = tuple(
+            LegacyKalshiShadowGame(
+                event_ticker=game.event_ticker,
+                scheduled_start_wall_ns=game.scheduled_start_wall_ns,
+                game_title=game.game_title,
+                markets=tuple(
+                    LegacyKalshiShadowMarket(
+                        ticker=market.ticker,
+                        yes_player_name=market.yes_player_name,
+                    )
+                    for market in game.markets
+                ),
+            )
+            for game in snapshot.games
+        )
+        return games, snapshot.catalog_sha256
 
 
 __all__ = ["KalshiShadowCatalogError", "KalshiShadowCatalogTransport"]
