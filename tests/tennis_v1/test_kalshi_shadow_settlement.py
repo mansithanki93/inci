@@ -27,7 +27,7 @@ class _Response:
     def __init__(self, value: object = None, *, status: object = 200,
                  body: bytes | None = None, chunks: list[object] | None = None,
                  headers: dict[str, object] | None = None,
-                 close_error: Exception | None = None) -> None:
+                 close_error: BaseException | None = None) -> None:
         encoded = json.dumps(value, separators=(",", ":")).encode("utf-8")
         self.status_code = status
         self._chunks = list(chunks) if chunks is not None else [body if body is not None else encoded]
@@ -71,6 +71,54 @@ class _Session:
 def _transport(session: _Session, sleeps: list[float] | None = None):
     from inci_tennis_io.kalshi_shadow_settlement import KalshiShadowSettlementTransport
     return KalshiShadowSettlementTransport(session=session, sleep=(sleeps.append if sleeps is not None else lambda _: None))
+
+
+_FORBIDDEN_IMPORT_TERMS = frozenset({
+    "portfolio", "order", "trade", "account", "credential", "provider",
+    "strategy", "signal", "executor", "position", "fill", "fee", "pnl",
+})
+
+
+def _assert_authority_free_ast(tree: ast.AST) -> None:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            modules.add(node.module)
+    assert not any(term in module.casefold() for module in modules for term in _FORBIDDEN_IMPORT_TERMS)
+
+
+def _assert_only_get_request_ast(tree: ast.AST) -> None:
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == "request"]
+    assert len(calls) == 1
+    call = calls[0]
+    assert len(call.args) >= 2
+    assert isinstance(call.args[0], ast.Constant) and call.args[0].value == "GET"
+    assert {keyword.arg for keyword in call.keywords} == {"headers", "allow_redirects", "stream", "timeout"}
+    assert isinstance(call.args[1], ast.BinOp) and isinstance(call.args[1].op, ast.Add)
+    assert isinstance(call.args[1].left, ast.Name) and call.args[1].left.id == "_ORIGIN"
+    headers = next(keyword.value for keyword in call.keywords if keyword.arg == "headers")
+    assert isinstance(headers, ast.Dict)
+    assert {(key.value, value.value) for key, value in zip(headers.keys, headers.values)
+            if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)} == {
+                ("Accept", "application/json"), ("Accept-Encoding", "identity"),
+            }
+
+
+def _assert_only_market_route_calls(tree: ast.AST) -> None:
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == "_request"]
+    assert len(calls) == 2
+    prefixes: set[str] = set()
+    for call in calls:
+        assert len(call.args) == 1
+        argument = call.args[0]
+        assert isinstance(argument, ast.BinOp) and isinstance(argument.op, ast.Add)
+        assert isinstance(argument.left, ast.Name)
+        prefixes.add(argument.left.id)
+    assert prefixes == {"_CURRENT_PATH", "_HISTORICAL_PATH"}
 
 
 class KalshiShadowSettlementTransportTests(unittest.TestCase):
@@ -131,16 +179,25 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
             _transport(_Session([valid])).get_market_result(_TICKER)
         self.assertEqual(valid.close_count, 1)
 
+    def test_close_keyboard_interrupt_never_masks_primary_or_becomes_a_value_error(self) -> None:
+        """Catches cleanup swallowing an interrupt or replacing a schema error with it."""
+        invalid = _Response({"market": _market()}, headers={"Content-Type": "text/plain"}, close_error=KeyboardInterrupt())
+        with self.assertRaisesRegex(ValueError, "kalshi_settlement_content_type_invalid"):
+            _transport(_Session([invalid])).get_market_result(_TICKER)
+        valid = _Response({"market": _market()}, close_error=KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            _transport(_Session([valid])).get_market_result(_TICKER)
+
     def test_nonfinal_null_or_empty_settlement_fields_are_admitted_without_final_claim(self) -> None:
         """Catches transport declaring a non-finalized Market invalid or final."""
-        for fields in (
-            {"result": None, "settlement_value_dollars": None, "settlement_ts": None},
-            {"result": "", "settlement_value_dollars": "", "settlement_ts": ""},
-            {"result": "yes", "settlement_value_dollars": "0.0000", "settlement_ts": "2026-08-01T18:30:00Z"},
+        for fields, expected in (
+            ({"result": None, "settlement_value_dollars": None, "settlement_ts": None}, (None, None, None)),
+            ({"result": "", "settlement_value_dollars": "", "settlement_ts": ""}, ("", "", "")),
+            ({"result": "yes", "settlement_value_dollars": "0.0000", "settlement_ts": "2026-08-01T18:30:00Z"}, ("yes", "0.0000", "2026-08-01T18:30:00Z")),
         ):
             state = _transport(_Session([_Response({"market": _market(status="determined", **fields)})])).get_market_result(_TICKER)
             self.assertEqual(state.status, "determined")
-            self.assertIn(state.result, (None, "", "yes"))
+            self.assertEqual((state.result, state.settlement_value_dollars, state.settlement_ts), expected)
 
     def test_scalar_and_unknown_safe_final_literals_are_evidence_not_transport_rejections(self) -> None:
         """Catches 7A classifying scalar/void evidence instead of preserving it for 7B."""
@@ -196,16 +253,24 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "kalshi_settlement_schema_invalid"):
                 _transport(_Session([_Response({"market": market})])).get_market_result(_TICKER)
 
-    def test_ast_keeps_only_literal_get_market_routes_and_no_authority_imports(self) -> None:
-        """Catches adding account, portfolio, order, or trade authority to this reader."""
+    def test_ast_exclusively_allows_literal_get_market_routes_and_safe_imports(self) -> None:
+        """Catches an alternate HTTP authority or forbidden imported capability."""
         source = Path(__file__).parents[2] / "inci_tennis_io" / "kalshi_shadow_settlement.py"
         tree = ast.parse(source.read_text(encoding="utf-8"))
-        strings = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and type(node.value) is str}
-        self.assertIn("GET", strings)
-        self.assertIn("/trade-api/v2/markets/", strings)
-        self.assertIn("/trade-api/v2/historical/markets/", strings)
-        imported = {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names}
-        self.assertFalse({"portfolio", "orders", "trades", "account"} & imported)
+        _assert_authority_free_ast(tree)
+        _assert_only_get_request_ast(tree)
+        _assert_only_market_route_calls(tree)
+
+    def test_ast_helpers_reject_forbidden_import_method_and_query_mutations(self) -> None:
+        """Proves the static policy helpers fail when unsafe shapes are introduced."""
+        with self.assertRaises(AssertionError):
+            _assert_authority_free_ast(ast.parse("from product.provider import Client"))
+        with self.assertRaises(AssertionError):
+            _assert_only_get_request_ast(ast.parse("client.request('POST', origin + path, headers={}, allow_redirects=False, stream=True, timeout=(3, 10))"))
+        with self.assertRaises(AssertionError):
+            _assert_only_get_request_ast(ast.parse("client.request('GET', origin + path, headers={}, allow_redirects=False, stream=True, timeout=(3, 10), params={})"))
+        with self.assertRaises(AssertionError):
+            _assert_only_get_request_ast(ast.parse("client.request('GET', origin + path, headers={'Authorization': 'x'}, allow_redirects=False, stream=True, timeout=(3, 10))"))
 
 
 if __name__ == "__main__":

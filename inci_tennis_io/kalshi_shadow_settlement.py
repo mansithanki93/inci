@@ -72,7 +72,7 @@ def _nullable_text(value: object, field: str) -> str | None:
     if type(value) is not dict or field not in value:
         raise ValueError("kalshi_settlement_schema_invalid")
     result = value[field]
-    if result is None or result == "":
+    if result is None:
         return None
     if type(result) is not str:
         raise ValueError("kalshi_settlement_schema_invalid")
@@ -139,9 +139,11 @@ class KalshiShadowSettlementTransport:
         finally:
             try:
                 response.close()  # type: ignore[attr-defined]
-            except Exception:
-                if primary_error is None:
+            except BaseException as close_error:
+                if primary_error is None and isinstance(close_error, Exception):
                     _fail("kalshi_settlement_close_invalid")
+                if primary_error is None:
+                    raise
 
     def _request(self, path: str) -> tuple[int, bytes | None]:
         for attempt in range(len(_GET_429_DELAYS) + 1):
@@ -243,14 +245,14 @@ class KalshiShadowSettlementTransport:
                     not _safe_ticker(event_ticker) or _TOKEN.fullmatch(market_type) is None or
                     status not in _STATUSES):
                 raise ValueError("kalshi_settlement_schema_invalid")
-            if result is not None and _TOKEN.fullmatch(result) is None:
+            if result not in (None, "") and _TOKEN.fullmatch(result) is None:
                 raise ValueError("kalshi_settlement_schema_invalid")
-            if settlement_value is not None:
+            if settlement_value not in (None, ""):
                 _settlement_decimal(settlement_value)
-            if settlement_ts is not None:
+            if settlement_ts not in (None, ""):
                 _settlement_timestamp(settlement_ts)
             if status == "finalized" and (
-                result is None or settlement_value is None or settlement_ts is None
+                not result or not settlement_value or not settlement_ts
             ):
                 raise ValueError("kalshi_settlement_schema_invalid")
         except KalshiShadowSettlementError:
