@@ -368,6 +368,8 @@ def resolve_shadow_matches(
                 game_edges.setdefault(game_index, []).append(provider_index)
 
     ready_rows: list[ShadowMatchChoice] = []
+    selected_provider_indexes: set[int] = set()
+    selected_game_indexes: set[int] = set()
     for provider_index, links in provider_edges.items():
         if len(links) != 1 or provider_index in provider_reasons:
             continue
@@ -393,20 +395,19 @@ def resolve_shadow_matches(
                 ),
             )
         )
+        selected_provider_indexes.add(provider_index)
+        selected_game_indexes.add(game_index)
 
-    selected_provider_ids = {row.provider_match_id for row in ready_rows}
-    selected_game_ids = {row.event_ticker for row in ready_rows}
     unavailable_rows: list[ShadowUnavailableMatch] = []
     for index, (row, _) in enumerate(provider_entries):
-        if _provider_entry_identity(row) in selected_provider_ids:
+        if index in selected_provider_indexes:
             continue
         reason = provider_reasons.get(index)
         if reason is None:
             reason = "provider_ambiguous" if len(provider_edges.get(index, ())) > 1 else "provider_unmatched"
         unavailable_rows.append(_unavailable_provider(row, reason))
     for index, (game, _) in enumerate(game_entries):
-        identity = _game_entry_identity(game)
-        if identity in selected_game_ids:
+        if index in selected_game_indexes:
             continue
         reason = game_reasons.get(index)
         if reason is None:

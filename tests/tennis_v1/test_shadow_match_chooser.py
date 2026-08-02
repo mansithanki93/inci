@@ -306,6 +306,29 @@ class ShadowMatchChooserTests(unittest.TestCase):
             ),
         )
 
+    def test_malformed_provider_row_is_retained_when_a_valid_id_matches_its_old_sentinel(self) -> None:
+        """Catches selected public IDs suppressing an unrelated malformed row."""
+        from inci_tennis_adapters.shadow_match_chooser import ShadowUnavailableMatch
+
+        snapshot = self.resolve(
+            (score("provider_row_invalid"), object()),
+            (self.game(),),
+        )
+
+        self.assertEqual(len(snapshot.ready), 1)
+        self.assertEqual(snapshot.ready[0].provider_match_id, "provider_row_invalid")
+        self.assertEqual(
+            snapshot.unavailable,
+            (
+                ShadowUnavailableMatch(
+                    source="provider",
+                    identity="provider_row_invalid",
+                    display_name="provider_row_invalid",
+                    reason="provider_invalid",
+                ),
+            ),
+        )
+
     def test_unpaired_surrogate_player_name_is_rejected_as_value_error(self) -> None:
         """Catches malformed Unicode leaking a raw encoding exception."""
         from inci_tennis_adapters.shadow_match_chooser import normalize_player_name
