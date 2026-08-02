@@ -1,8 +1,8 @@
 """GET-only public Kalshi Market evidence for shadow settlement.
 
-This module deliberately has no account, portfolio, order, trade, provider, or
-outcome-classification capability.  It validates one public Market response and
-returns immutable evidence for the reconciliation layer to interpret.
+The transport validates and preserves a single public Market response.  It has
+no account, order, portfolio, trade, provider, or outcome-classification
+authority; settlement-pair semantics belong to the reconciliation layer.
 """
 
 from __future__ import annotations
@@ -22,14 +22,16 @@ _ORIGIN = "https://external-api.kalshi.com"
 _CURRENT_PATH = "/trade-api/v2/markets/"
 _HISTORICAL_PATH = "/trade-api/v2/historical/markets/"
 _MAXIMUM_BODY_BYTES = 8_388_608
+_STREAM_CHUNK_BYTES = 65_536
 _GET_429_DELAYS = (0.25, 0.5, 1.0, 2.0)
 _TICKER = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
-_FIXED_POINT = pattern_compile(r"\d+(?:\.\d+)?\Z")
+_TOKEN = pattern_compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+_FIXED_POINT = pattern_compile(r"(?:0|[1-9]\d*)(?:\.\d+)?\Z")
+_RFC3339_UTC = pattern_compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 _STATUSES = frozenset({
     "initialized", "inactive", "active", "closed", "determined", "disputed",
     "amended", "finalized",
 })
-_RESULTS = frozenset({"yes", "no"})
 
 
 class KalshiShadowSettlementError(ValueError):
@@ -66,46 +68,54 @@ def _required_text(value: object, field: str) -> str:
     return result
 
 
+def _nullable_text(value: object, field: str) -> str | None:
+    if type(value) is not dict or field not in value:
+        raise ValueError("kalshi_settlement_schema_invalid")
+    result = value[field]
+    if result is None or result == "":
+        return None
+    if type(result) is not str:
+        raise ValueError("kalshi_settlement_schema_invalid")
+    return result
+
+
 def _settlement_decimal(value: str) -> None:
     if _FIXED_POINT.fullmatch(value) is None:
         raise ValueError("kalshi_settlement_schema_invalid")
     try:
-        parsed = Decimal(value)
+        if not Decimal(value).is_finite():
+            raise ValueError("kalshi_settlement_schema_invalid")
     except InvalidOperation:
         raise ValueError("kalshi_settlement_schema_invalid") from None
-    if not parsed.is_finite():
-        raise ValueError("kalshi_settlement_schema_invalid")
 
 
 def _settlement_timestamp(value: str) -> None:
-    if not value.endswith("Z"):
+    if _RFC3339_UTC.fullmatch(value) is None:
         raise ValueError("kalshi_settlement_schema_invalid")
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
         raise ValueError("kalshi_settlement_schema_invalid") from None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("kalshi_settlement_schema_invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class KalshiFinalMarketState:
-    """Validated immutable Market evidence, without a winner interpretation."""
+    """Immutable validated Market evidence; this type makes no finality claim."""
 
     ticker: str
     event_ticker: str
     market_type: str
     status: str
-    result: str
-    settlement_value_dollars: str
-    settlement_ts: str
+    result: str | None
+    settlement_value_dollars: str | None
+    settlement_ts: str | None
     raw_body: bytes
     raw_sha256: str
     route_tier: str
 
 
 class KalshiShadowSettlementTransport:
-    """Public GET-only Market client with tightly bounded retry behavior."""
+    """Fixed-origin, public, GET-only Market transport."""
 
     __slots__ = ("_session", "_sleep")
 
@@ -118,46 +128,62 @@ class KalshiShadowSettlementTransport:
         self._session = chosen_session
         self._sleep = time.sleep if sleep is None else sleep
 
+    @staticmethod
+    def _close_after(response: object, operation: object) -> object:
+        primary_error: BaseException | None = None
+        try:
+            return operation()  # type: ignore[operator]
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                response.close()  # type: ignore[attr-defined]
+            except Exception:
+                if primary_error is None:
+                    _fail("kalshi_settlement_close_invalid")
+
     def _request(self, path: str) -> tuple[int, bytes | None]:
-        response = None
         for attempt in range(len(_GET_429_DELAYS) + 1):
             try:
                 response = self._session.request(  # type: ignore[union-attr]
                     "GET", _ORIGIN + path,
                     headers={"Accept": "application/json", "Accept-Encoding": "identity"},
-                    allow_redirects=False,
-                    timeout=(3, 10),
+                    allow_redirects=False, stream=True, timeout=(3, 10),
                 )
             except Exception:
                 _fail("kalshi_settlement_transport_invalid")
-            status = getattr(response, "status_code", None)
-            if type(status) is not int:
-                _fail("kalshi_settlement_response_invalid")
-            if status == 429:
-                if attempt == len(_GET_429_DELAYS):
-                    _fail("kalshi_settlement_rate_limited")
-                try:
-                    self._sleep(_GET_429_DELAYS[attempt])  # type: ignore[operator]
-                except Exception:
-                    _fail("kalshi_settlement_transport_invalid")
-                continue
-            if 300 <= status < 400:
-                _fail("kalshi_settlement_redirect_invalid")
-            if status == 404:
-                return status, None
-            if status != 200:
-                _fail("kalshi_settlement_status_invalid")
-            return status, self._validated_body(response)
+
+            def disposition() -> tuple[int, bytes | None]:
+                status = getattr(response, "status_code", None)
+                if type(status) is not int:
+                    _fail("kalshi_settlement_response_invalid")
+                if 300 <= status < 400:
+                    _fail("kalshi_settlement_redirect_invalid")
+                if status == 404 or status == 429:
+                    return status, None
+                if status != 200:
+                    _fail("kalshi_settlement_status_invalid")
+                return status, self._stream_body(response)
+
+            status, body = self._close_after(response, disposition)  # type: ignore[misc]
+            if status != 429:
+                return status, body
+            if attempt == len(_GET_429_DELAYS):
+                _fail("kalshi_settlement_rate_limited")
+            try:
+                self._sleep(_GET_429_DELAYS[attempt])  # type: ignore[operator]
+            except Exception:
+                _fail("kalshi_settlement_transport_invalid")
         _fail("kalshi_settlement_rate_limited")
 
     @staticmethod
-    def _validated_body(response: object) -> bytes:
+    def _stream_body(response: object) -> bytes:
         try:
             headers = response.headers  # type: ignore[attr-defined]
             content_type = headers.get("Content-Type")
             content_encoding = headers.get("Content-Encoding")
             content_length = headers.get("Content-Length")
-            body = response.content  # type: ignore[attr-defined]
         except Exception:
             _fail("kalshi_settlement_headers_invalid")
         if (type(content_type) is not str or
@@ -167,16 +193,31 @@ class KalshiShadowSettlementTransport:
             type(content_encoding) is not str or content_encoding.strip().casefold() != "identity"
         ):
             _fail("kalshi_settlement_content_encoding_invalid")
-        if type(body) is not bytes or not body:
-            _fail("kalshi_settlement_body_invalid")
-        if len(body) > _MAXIMUM_BODY_BYTES:
-            _fail("kalshi_settlement_body_too_large")
+        expected_size: int | None = None
         if content_length is not None:
             if type(content_length) is not str or not content_length.isascii() or not content_length.isdigit():
                 _fail("kalshi_settlement_headers_invalid")
-            if int(content_length) != len(body):
-                _fail("kalshi_settlement_body_invalid")
-        return body
+            expected_size = int(content_length)
+            if expected_size > _MAXIMUM_BODY_BYTES:
+                _fail("kalshi_settlement_body_too_large")
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            iterator = response.iter_content(chunk_size=_STREAM_CHUNK_BYTES)  # type: ignore[attr-defined]
+            for chunk in iterator:
+                if type(chunk) is not bytes or not chunk:
+                    _fail("kalshi_settlement_body_invalid")
+                size += len(chunk)
+                if size > _MAXIMUM_BODY_BYTES:
+                    _fail("kalshi_settlement_body_too_large")
+                chunks.append(chunk)
+        except KalshiShadowSettlementError:
+            raise
+        except Exception:
+            _fail("kalshi_settlement_body_invalid")
+        if size == 0 or (expected_size is not None and size != expected_size):
+            _fail("kalshi_settlement_body_invalid")
+        return b"".join(chunks)
 
     @staticmethod
     def _state(ticker: str, body: bytes, route_tier: str) -> KalshiFinalMarketState:
@@ -195,15 +236,23 @@ class KalshiShadowSettlementTransport:
             event_ticker = _required_text(market, "event_ticker")
             market_type = _required_text(market, "market_type")
             status = _required_text(market, "status")
-            result = _required_text(market, "result")
-            settlement_value = _required_text(market, "settlement_value_dollars")
-            settlement_ts = _required_text(market, "settlement_ts")
+            result = _nullable_text(market, "result")
+            settlement_value = _nullable_text(market, "settlement_value_dollars")
+            settlement_ts = _nullable_text(market, "settlement_ts")
             if (returned_ticker != ticker or not _safe_ticker(returned_ticker) or
-                    not _safe_ticker(event_ticker) or market_type != "binary" or
-                    status not in _STATUSES or result not in _RESULTS):
+                    not _safe_ticker(event_ticker) or _TOKEN.fullmatch(market_type) is None or
+                    status not in _STATUSES):
                 raise ValueError("kalshi_settlement_schema_invalid")
-            _settlement_decimal(settlement_value)
-            _settlement_timestamp(settlement_ts)
+            if result is not None and _TOKEN.fullmatch(result) is None:
+                raise ValueError("kalshi_settlement_schema_invalid")
+            if settlement_value is not None:
+                _settlement_decimal(settlement_value)
+            if settlement_ts is not None:
+                _settlement_timestamp(settlement_ts)
+            if status == "finalized" and (
+                result is None or settlement_value is None or settlement_ts is None
+            ):
+                raise ValueError("kalshi_settlement_schema_invalid")
         except KalshiShadowSettlementError:
             raise
         except Exception:
@@ -221,7 +270,7 @@ class KalshiShadowSettlementTransport:
         status, body = self._request(_CURRENT_PATH + ticker)
         if status == 200 and body is not None:
             return self._state(ticker, body, "current")
-        # Only a fully received current-route 404 reaches this fallback.
+        # Historical retrieval is permitted only after a fully closed exact 404.
         status, body = self._request(_HISTORICAL_PATH + ticker)
         if status != 200 or body is None:
             _fail("kalshi_settlement_status_invalid")
