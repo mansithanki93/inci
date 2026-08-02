@@ -79,7 +79,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "dcfad924e5a8a89c2e666eb048284ee57e5258b7c903b17483480f994954a532"
         ),
         "kalshi_shadow_catalog.py": (
-            "c044a6060fccda196a4778af8d643a9499768909723d9336e7a4020b1588f46c"
+            "333ec550bd9cc1bd28ab61ea93b5ba26499fad570515314a9505337cb2aea0a4"
         ),
         "kalshi_shadow_settlement.py": (
             "d08a3c297aa901a98b47f57c15f29259475bb1395b9879f07b2d7d80f33462e3"

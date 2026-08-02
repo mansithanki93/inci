@@ -313,6 +313,35 @@ class KalshiShadowCatalogTests(unittest.TestCase):
             ["ATP Washington", "ATP Washington Qualifying"],
         )
 
+    def test_unrelated_sport_competition_metadata_cannot_block_tennis_census(self) -> None:
+        """Catches malformed non-Tennis filter labels aborting Tennis discovery."""
+
+        pages = _base_pages()
+        filters = pages["/trade-api/v2/search/filters_by_sport"][0]
+        filters["filters_by_sports"]["Soccer"] = {
+            "competitions": {
+                "Peru Liga 1 ": {"scopes": ["Games"]},
+            },
+            "scopes": ["Games"],
+        }
+        filters["sport_ordering"] = ["All sports", "Soccer", "Tennis"]
+        session = _Session(pages)
+
+        snapshot = _transport(session).discover_tennis_catalog(now=_NOW)
+
+        self.assertEqual(
+            [game.event_ticker for game in snapshot.games],
+            [_EVENT],
+        )
+        self.assertEqual(
+            [
+                call["params"]["competition"]
+                for call in session.calls
+                if urlsplit(str(call["url"])).path.endswith("/milestones")
+            ],
+            ["ATP Washington"],
+        )
+
     def test_each_rejected_expected_event_has_stable_identity_and_provenance(self) -> None:
         """Catches aggregating away which current-day expected Event was excluded."""
 

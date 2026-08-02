@@ -179,11 +179,12 @@ def _parse_filters(value: object) -> dict[str, object]:
         if type(raw_competitions) is not dict:
             raise ValueError("kalshi_catalog_schema_invalid")
         competitions: dict[str, frozenset[str]] = {}
-        for name, competition in raw_competitions.items():
-            canonical_name = _identity_text(name)
-            competitions[canonical_name] = frozenset(
-                _identity_tuple(_required(competition, "scopes"))
-            )
+        if sport.casefold() == "tennis":
+            for name, competition in raw_competitions.items():
+                canonical_name = _identity_text(name)
+                competitions[canonical_name] = frozenset(
+                    _identity_tuple(_required(competition, "scopes"))
+                )
         sports[sport] = {
             "scopes": scopes,
             "competitions": competitions,
