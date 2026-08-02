@@ -24,6 +24,7 @@ _MAXIMUM_KALSHI_FRAME_BYTES = 1_048_576
 _MAXIMUM_SPORTRADAR_CAPTURE_BYTES = 8_388_608
 _ZERO_DIGEST = "0" * 64
 _COMMIT_WATERMARK_SCHEMA = "inci-tennis-shadow-commit-watermark-v1"
+_PROTOCOL_EPOCH_SCHEMA = "inci-tennis-shadow-protocol-epoch-v1"
 _DIGEST_PATTERN = pattern_compile(r"[0-9a-f]{64}\Z", flags=ASCII)
 _TICKER_PATTERN = pattern_compile(
     r"[A-Z0-9][A-Z0-9._-]{0,127}\Z", flags=ASCII
@@ -1559,6 +1560,7 @@ class ShadowEvidenceStore:
         self._terminal_recorded = False
         self._terminal_row_sha256: str | None = None
         self._poisoned = False
+        self._protocol_epoch_persisted = False
         self._lock_fd = _open_private_file(root / "shadow.lock", create=True)
         try:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1598,6 +1600,10 @@ class ShadowEvidenceStore:
         value = self.session_id if session_id is None else session_id
         return self.state_root / f"session-{value}.commit"
 
+    def _protocol_epoch_path(self, session_id: str | None = None) -> Path:
+        value = self.session_id if session_id is None else session_id
+        return self.state_root / f"session-{value}.epoch"
+
     def _watermark_payload(self, row_number: int, row_sha256: str) -> bytes:
         return _canonical_json(
             {
@@ -1608,7 +1614,16 @@ class ShadowEvidenceStore:
             }
         ) + b"\n"
 
-    def _persist_pending_marker(self, path: Path, payload: bytes) -> None:
+    def _protocol_epoch_payload(self) -> bytes:
+        return _canonical_json(
+            {
+                "commit_watermark_schema": _COMMIT_WATERMARK_SCHEMA,
+                "schema": _PROTOCOL_EPOCH_SCHEMA,
+                "session_id": self.session_id,
+            }
+        ) + b"\n"
+
+    def _persist_new_marker(self, path: Path, payload: bytes) -> None:
         descriptor: int | None = None
         try:
             descriptor = _open_private_file(path, create=True, exclusive=True)
@@ -1647,8 +1662,16 @@ class ShadowEvidenceStore:
     ) -> tuple[Path, bytes]:
         path = self._pending_marker_path()
         payload = self._watermark_payload(row_number, row_sha256)
-        self._persist_pending_marker(path, payload)
+        self._persist_new_marker(path, payload)
         return path, payload
+
+    def _ensure_protocol_epoch(self) -> None:
+        if self._protocol_epoch_persisted:
+            return
+        self._persist_new_marker(
+            self._protocol_epoch_path(), self._protocol_epoch_payload()
+        )
+        self._protocol_epoch_persisted = True
 
     def _commit_pending_marker(self, path: Path) -> None:
         try:
@@ -1706,8 +1729,50 @@ class ShadowEvidenceStore:
             _fail("shadow_evidence_prior_corrupt")
         return marker["row_number"], marker["row_sha256"]
 
-    def _audit_marker_inventory(self) -> dict[str, tuple[int, str]]:
+    def _audit_protocol_epoch(self, path: Path, session_id: str) -> None:
+        try:
+            info = path.lstat()
+        except OSError:
+            _fail("shadow_evidence_prior_corrupt")
+        if stat.S_ISLNK(info.st_mode):
+            _fail("shadow_evidence_prior_corrupt")
+        payload = _validate_existing_regular_file(
+            path,
+            expected_mode=0o600,
+            code="shadow_evidence_prior_corrupt",
+            read_payload=True,
+            maximum_bytes=512,
+        )
+        if payload is None or not payload.endswith(b"\n"):
+            _fail("shadow_evidence_prior_corrupt")
+        try:
+            marker = json.loads(
+                payload,
+                object_pairs_hook=_strict_json_object,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            _fail("shadow_evidence_prior_corrupt")
+        if (
+            type(marker) is not dict
+            or frozenset(marker)
+            != {
+                "commit_watermark_schema",
+                "schema",
+                "session_id",
+            }
+            or marker.get("commit_watermark_schema")
+            != _COMMIT_WATERMARK_SCHEMA
+            or marker.get("schema") != _PROTOCOL_EPOCH_SCHEMA
+            or marker.get("session_id") != session_id
+            or _canonical_json(marker) + b"\n" != payload
+        ):
+            _fail("shadow_evidence_prior_corrupt")
+
+    def _audit_marker_inventory(
+        self,
+    ) -> tuple[dict[str, tuple[int, str]], set[str]]:
         commits: dict[str, tuple[int, str]] = {}
+        protocol_epochs: set[str] = set()
         try:
             entries = sorted(self.state_root.iterdir(), key=lambda path: path.name)
         except OSError:
@@ -1737,19 +1802,32 @@ class ShadowEvidenceStore:
                     _fail("shadow_evidence_prior_corrupt")
                 commits[session_id] = self._audit_watermark(path, session_id)
                 continue
+            if name.startswith("session-") and name.endswith(".epoch"):
+                session_id = name[len("session-") : -len(".epoch")]
+                if (
+                    name != f"session-{session_id}.epoch"
+                    or _canonical_session_id(session_id) is None
+                    or session_id in protocol_epochs
+                ):
+                    _fail("shadow_evidence_prior_corrupt")
+                self._audit_protocol_epoch(path, session_id)
+                protocol_epochs.add(session_id)
+                continue
             if (
                 name.endswith(".pending")
                 or name.endswith(".commit")
+                or name.endswith(".epoch")
                 or name.endswith(".poisoned")
             ):
                 _fail("shadow_evidence_prior_corrupt")
             _fail("shadow_evidence_prior_corrupt")
-        return commits
+        return commits, protocol_epochs
 
     def _audit_prior_sessions(self) -> None:
         receipts: dict[str, str] = {}
-        commits = self._audit_marker_inventory()
+        commits, protocol_epochs = self._audit_marker_inventory()
         audited_tails: dict[str, tuple[int, str]] = {}
+        price_only_sessions: set[str] = set()
         try:
             ledgers = sorted(self.state_root.glob("session-*.jsonl"))
         except OSError:
@@ -1786,6 +1864,7 @@ class ShadowEvidenceStore:
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 _fail("shadow_evidence_prior_corrupt")
             if rows and rows[0].get("kind") == "price_only_session":
+                price_only_sessions.add(session_id)
                 audited_tails[session_id] = (
                     len(rows),
                     self._audit_price_only_rows(rows, session_id, receipts),
@@ -1892,8 +1971,16 @@ class ShadowEvidenceStore:
                     rows[-1]["ended_wall_ns"],
                 )
             audited_tails[session_id] = (len(rows), previous_digest)
-        for session_id, watermark in commits.items():
-            if audited_tails.get(session_id) != watermark:
+        current_protocol_sessions = (
+            price_only_sessions | set(commits) | protocol_epochs
+        )
+        if not current_protocol_sessions.issubset(audited_tails):
+            _fail("shadow_evidence_prior_corrupt")
+        for session_id in current_protocol_sessions:
+            if (
+                session_id not in protocol_epochs
+                or commits.get(session_id) != audited_tails[session_id]
+            ):
                 _fail("shadow_evidence_prior_corrupt")
         for (
             predecessor_session_id,
@@ -2417,6 +2504,7 @@ class ShadowEvidenceStore:
         current_digest = _row_digest(persisted)
         persisted["row_sha256"] = current_digest
         payload = _canonical_json(persisted) + b"\n"
+        self._ensure_protocol_epoch()
         pending_path, _ = self._create_pending_marker(row_number, current_digest)
         try:
             _write_all(

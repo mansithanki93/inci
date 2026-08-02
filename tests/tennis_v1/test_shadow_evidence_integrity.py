@@ -46,6 +46,24 @@ def _watermark_bytes(
     )
 
 
+def _protocol_epoch_bytes(session_id: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "commit_watermark_schema": (
+                    "inci-tennis-shadow-commit-watermark-v1"
+                ),
+                "schema": "inci-tennis-shadow-protocol-epoch-v1",
+                "session_id": session_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
 def _private_payload(path: Path, payload: bytes) -> None:
     path.write_bytes(payload)
     path.chmod(0o600)
@@ -1594,6 +1612,7 @@ class ShadowEvidenceIntegrityTests(unittest.TestCase):
                     original_write = evidence_module._write_all
                     original_fsync = evidence_module.os.fsync
                     pending_descriptors: set[int] = set()
+                    root_fsyncs = 0
 
                     def track_open(path: Path, **kwargs: object) -> int:
                         descriptor = original_open(path, **kwargs)
@@ -1625,10 +1644,13 @@ class ShadowEvidenceIntegrityTests(unittest.TestCase):
                     original_directory = evidence_module._fsync_directory
 
                     def fail_marker_directory(path: Path) -> None:
+                        nonlocal root_fsyncs
                         if path == root:
-                            raise ShadowEvidenceError(
-                                "shadow_evidence_write_failed"
-                            )
+                            root_fsyncs += 1
+                            if root_fsyncs == 2:
+                                raise ShadowEvidenceError(
+                                    "shadow_evidence_write_failed"
+                                )
                         original_directory(path)
 
                     with (
@@ -1922,7 +1944,10 @@ class ShadowEvidenceIntegrityTests(unittest.TestCase):
             "unknown",
             "multiple",
         ):
-            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(artifact=artifact),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 base = Path(directory)
                 root = base / "shadow"
                 session_id = "11111111-1111-4111-8111-111111111111"
@@ -1977,6 +2002,282 @@ class ShadowEvidenceIntegrityTests(unittest.TestCase):
                     "shadow_evidence_(prior_corrupt|unclean_session|state_unsafe)",
                 ):
                     ShadowEvidenceStore(root)
+
+    def test_price_only_ledger_requires_an_exact_tail_commit(self) -> None:
+        """Catches deleting a price-only commit to misclassify it as historical."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            ledger = _complete_price_only_session(root)
+            session_id = ledger.stem.removeprefix("session-")
+            (root / f"session-{session_id}.commit").unlink()
+
+            with self.assertRaisesRegex(
+                ShadowEvidenceError, "shadow_evidence_prior_corrupt"
+            ):
+                ShadowEvidenceStore(root)
+
+    def test_current_protocol_legacy_ledger_requires_an_exact_tail_commit(self) -> None:
+        """Catches treating a new legacy append as historical after commit deletion."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            ledger, _ = _complete_session(root)
+            session_id = ledger.stem.removeprefix("session-")
+            (root / f"session-{session_id}.commit").unlink()
+
+            with self.assertRaisesRegex(
+                ShadowEvidenceError, "shadow_evidence_prior_corrupt"
+            ):
+                ShadowEvidenceStore(root)
+
+    def test_historical_finalized_legacy_ledger_remains_markerless_compatible(
+        self,
+    ) -> None:
+        """Catches narrowing compatibility beyond genuine finalized legacy data."""
+
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+
+        session_id = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            root.mkdir(mode=0o700)
+            (root / "raw").mkdir(mode=0o700)
+            ledger = root / f"session-{session_id}.jsonl"
+            _private_payload(ledger, FROZEN_LEGACY_TERMINAL_JSONL)
+
+            with ShadowEvidenceStore(root) as reopened:
+                _terminal(reopened, sportradar_captures=0, kalshi_frames=0)
+
+            self.assertEqual(ledger.read_bytes(), FROZEN_LEGACY_TERMINAL_JSONL)
+            self.assertFalse((root / f"session-{session_id}.epoch").exists())
+            self.assertFalse((root / f"session-{session_id}.commit").exists())
+
+    def test_protocol_epoch_is_permanent_canonical_and_required(self) -> None:
+        """Catches losing the durable protocol identity while retaining its ledger."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            with ShadowEvidenceStore(root) as store:
+                epoch_path = root / f"session-{store.session_id}.epoch"
+                self.assertFalse(epoch_path.exists())
+                store.append_price_only_session(_price_only_session())
+                expected = _protocol_epoch_bytes(store.session_id)
+                self.assertTrue(epoch_path.is_file())
+                self.assertEqual(epoch_path.read_bytes(), expected)
+                receipt = store.persist_kalshi_frame(_frame())
+                store.append_price_only_observation(
+                    _price_only_observation(receipt)
+                )
+                store.append_price_only_terminal(**_price_only_terminal())
+                self.assertEqual(epoch_path.read_bytes(), expected)
+            epoch_path.unlink()
+
+            with self.assertRaisesRegex(
+                ShadowEvidenceError, "shadow_evidence_prior_corrupt"
+            ):
+                ShadowEvidenceStore(root)
+
+    def test_protocol_epoch_inventory_rejects_invalid_artifacts(self) -> None:
+        """Catches trusting an unsafe, malformed, or orphan epoch attestation."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        for artifact in (
+            "malformed",
+            "noncanonical",
+            "wrong_session",
+            "wrong_schema",
+            "orphan",
+            "mode",
+            "directory",
+            "symlink",
+            "hardlink",
+            "unknown",
+            "multiple",
+        ):
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                root = base / "shadow"
+                ledger, _ = _complete_session(root)
+                session_id = ledger.stem.removeprefix("session-")
+                epoch_path = root / f"session-{session_id}.epoch"
+                payload = _protocol_epoch_bytes(session_id)
+                _private_payload(epoch_path, payload)
+
+                if artifact == "malformed":
+                    _private_payload(epoch_path, b"{not-json}\n")
+                elif artifact == "noncanonical":
+                    marker = json.loads(payload)
+                    _private_payload(epoch_path, json.dumps(marker).encode() + b"\n")
+                elif artifact == "wrong_session":
+                    _private_payload(
+                        epoch_path,
+                        _protocol_epoch_bytes(
+                            "22222222-2222-4222-8222-222222222222"
+                        ),
+                    )
+                elif artifact == "wrong_schema":
+                    marker = json.loads(payload)
+                    marker["schema"] = "inci-tennis-shadow-protocol-epoch-v2"
+                    _private_payload(
+                        epoch_path,
+                        json.dumps(
+                            marker, sort_keys=True, separators=(",", ":")
+                        ).encode()
+                        + b"\n",
+                    )
+                elif artifact == "orphan":
+                    orphan_id = "22222222-2222-4222-8222-222222222222"
+                    _private_payload(
+                        root / f"session-{orphan_id}.epoch",
+                        _protocol_epoch_bytes(orphan_id),
+                    )
+                elif artifact == "mode":
+                    epoch_path.chmod(0o644)
+                elif artifact == "directory":
+                    epoch_path.unlink()
+                    epoch_path.mkdir(mode=0o700)
+                elif artifact == "symlink":
+                    target = base / "epoch-target"
+                    _private_payload(target, payload)
+                    epoch_path.unlink()
+                    epoch_path.symlink_to(target)
+                elif artifact == "hardlink":
+                    source = base / "epoch-source"
+                    _private_payload(source, payload)
+                    epoch_path.unlink()
+                    os.link(source, epoch_path)
+                elif artifact == "unknown":
+                    _private_payload(
+                        root / f"session-{session_id}.epoch.bak", payload
+                    )
+                elif artifact == "multiple":
+                    _private_payload(
+                        root / f"session-{session_id}.epoch.bak", payload
+                    )
+
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError,
+                    "shadow_evidence_(prior_corrupt|unclean_session|state_unsafe)",
+                ):
+                    ShadowEvidenceStore(root)
+
+    def test_protocol_epoch_faults_precede_the_first_ledger_append(self) -> None:
+        """Catches writing ledger bytes before the epoch is durably established."""
+
+        import inci_tennis_io.shadow_evidence as evidence_module
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        for boundary in ("open", "write", "fsync", "directory_fsync"):
+            with (
+                self.subTest(boundary=boundary),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory) / "shadow"
+                with ShadowEvidenceStore(root) as store:
+                    epoch_path = root / f"session-{store.session_id}.epoch"
+                    epoch_descriptors: set[int] = set()
+                    original_open = evidence_module._open_private_file
+                    original_write = evidence_module._write_all
+                    original_fsync = evidence_module.os.fsync
+                    original_directory = evidence_module._fsync_directory
+
+                    def track_open(path: Path, **kwargs: object) -> int:
+                        descriptor = original_open(path, **kwargs)
+                        if path == epoch_path:
+                            epoch_descriptors.add(descriptor)
+                        return descriptor
+
+                    def fail_open(path: Path, **kwargs: object) -> int:
+                        if path == epoch_path:
+                            raise ShadowEvidenceError(
+                                "shadow_evidence_write_failed"
+                            )
+                        return track_open(path, **kwargs)
+
+                    def fail_write(
+                        descriptor: int, payload: bytes, code: str
+                    ) -> None:
+                        if (
+                            b'"schema":"inci-tennis-shadow-protocol-epoch-v1"'
+                            in payload
+                        ):
+                            raise ShadowEvidenceError(
+                                "shadow_evidence_write_failed"
+                            )
+                        original_write(descriptor, payload, code)
+
+                    def fail_fsync(descriptor: int) -> None:
+                        if descriptor in epoch_descriptors:
+                            raise OSError("injected epoch fsync failure")
+                        original_fsync(descriptor)
+
+                    def fail_directory(path: Path) -> None:
+                        if path == root:
+                            raise ShadowEvidenceError(
+                                "shadow_evidence_write_failed"
+                            )
+                        original_directory(path)
+
+                    with (
+                        patch.object(
+                            evidence_module,
+                            "_open_private_file",
+                            fail_open if boundary == "open" else track_open,
+                        ),
+                        patch.object(
+                            evidence_module,
+                            "_write_all",
+                            fail_write if boundary == "write" else original_write,
+                        ),
+                        patch.object(
+                            evidence_module.os,
+                            "fsync",
+                            fail_fsync if boundary == "fsync" else original_fsync,
+                        ),
+                        patch.object(
+                            evidence_module,
+                            "_fsync_directory",
+                            fail_directory
+                            if boundary == "directory_fsync"
+                            else original_directory,
+                        ),
+                    ):
+                        with self.assertRaises(ShadowEvidenceError):
+                            store.append_price_only_session(
+                                _price_only_session()
+                            )
+
+                    self.assertEqual(store.ledger_path.read_bytes(), b"")
+                    self.assertFalse(
+                        (root / f"session-{store.session_id}.pending").exists()
+                    )
+                    self.assertFalse(
+                        (root / f"session-{store.session_id}.commit").exists()
+                    )
+                    self.assertTrue(store._poisoned)
 
     def test_raw_close_failure_is_sanitized_and_poisoned(self) -> None:
         """Catches leaking a raw descriptor-close error after frame persistence."""
