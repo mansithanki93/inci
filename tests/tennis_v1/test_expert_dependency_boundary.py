@@ -959,6 +959,60 @@ TASK8_OBSERVATION_ONLY_RUNTIME_FILES = frozenset(
         "shadow_settlement_cli.py",
     }
 )
+TASK8_RUNTIME_PEER_IMPORTS = {
+    "live_price_only_collector.py": frozenset(
+        {
+            (
+                "inci_tennis_runtime.live_shadow_collector."
+                "CandidateMarketProjection"
+            ),
+            "inci_tennis_runtime.live_shadow_collector.CandidateMarketView",
+            "inci_tennis_runtime.live_shadow_collector.ShadowCollectorError",
+            "inci_tennis_runtime.live_shadow_collector._age",
+            "inci_tennis_runtime.live_shadow_collector._durable_to_thread",
+            (
+                "inci_tennis_runtime.live_shadow_collector."
+                "_durable_to_thread_result"
+            ),
+            "inci_tennis_runtime.live_shadow_collector._error_code",
+            (
+                "inci_tennis_runtime.live_shadow_collector."
+                "_shielded_task_result"
+            ),
+            "inci_tennis_runtime.live_shadow_collector._terminal_text",
+        }
+    ),
+    "live_shadow_cli.py": frozenset(
+        {
+            (
+                "inci_tennis_runtime.live_shadow_collector."
+                "CandidateMarketProjection"
+            ),
+            "inci_tennis_runtime.live_shadow_collector.CandidateMarketView",
+            "inci_tennis_runtime.live_shadow_collector.LiveShadowCollector",
+            "inci_tennis_runtime.live_shadow_collector.ShadowCollectorError",
+            "inci_tennis_runtime.live_shadow_collector._durable_to_thread",
+            (
+                "inci_tennis_runtime.live_shadow_collector."
+                "_provider_failure_allows_price_only"
+            ),
+            (
+                "inci_tennis_runtime.live_shadow_collector."
+                "_provider_failure_attestation"
+            ),
+            (
+                "inci_tennis_runtime.live_shadow_collector."
+                "_provider_failure_attestation_is_valid"
+            ),
+            (
+                "inci_tennis_runtime.live_price_only_collector."
+                "PriceOnlyShadowCollector"
+            ),
+        }
+    ),
+    "live_shadow_collector.py": frozenset(),
+    "shadow_settlement_cli.py": frozenset(),
+}
 
 FROZEN_ROOT_V6_IMPORT_ROOTS = frozenset(
     Path(relative_path).stem
@@ -2813,11 +2867,23 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
             else frozenset()
         )
         for module in imported_bindings:
+            is_expert_module = (
+                module == "inci_tennis_expert"
+                or module.startswith("inci_tennis_expert.")
+            )
+            if (
+                filename in TASK8_OBSERVATION_ONLY_RUNTIME_FILES
+                and _root_name(module) == "inci_tennis_runtime"
+                and module not in TASK8_RUNTIME_PEER_IMPORTS[filename]
+            ):
+                raise ExpertBoundaryViolation(
+                    f"{filename}:runtime_peer_import_forbidden:{module}"
+                )
             if _segments(module) & FORBIDDEN_RUNTIME_SEGMENTS:
                 raise ExpertBoundaryViolation(
                     f"{filename}:runtime_implementation_import_forbidden:{module}"
                 )
-            if module.startswith("inci_tennis_io.") and not any(
+            if _root_name(module) == "inci_tennis_io" and not any(
                 module.startswith(prefix)
                 for prefix in (
                     "inci_tennis_io.facade.",
@@ -2829,28 +2895,28 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
                 )
             if (
                 filename in TASK8_OBSERVATION_ONLY_RUNTIME_FILES
-                and module.startswith("inci_tennis_expert.")
+                and is_expert_module
             ):
                 raise ExpertBoundaryViolation(
                     f"{filename}:runtime_expert_import_forbidden:{module}"
                 )
             if (
                 filename in TASK7_RUNTIME_EXPERT_IMPORTS
-                and module.startswith("inci_tennis_expert.")
+                and is_expert_module
                 and module not in scoped_expert_imports
             ):
                 raise ExpertBoundaryViolation(
                     f"{filename}:runtime_expert_import_forbidden:{module}"
                 )
             if (
-                module.startswith("inci_tennis_expert.")
+                is_expert_module
                 and not is_exactly_sealed_source
                 and not any(
-                module.startswith(prefix)
-                for prefix in (
-                    "inci_tennis_expert.engine.",
-                    "inci_tennis_expert.facade.",
-                )
+                    module.startswith(prefix)
+                    for prefix in (
+                        "inci_tennis_expert.engine.",
+                        "inci_tennis_expert.facade.",
+                    )
                 )
             ):
                 raise ExpertBoundaryViolation(
@@ -3362,6 +3428,101 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         ExpertBoundaryViolation,
                         "runtime_expert_import_forbidden",
+                    ):
+                        check_source(
+                            normalized,
+                            package_name="inci_tennis_runtime",
+                            filename=filename,
+                        )
+                finally:
+                    expected[filename] = original
+
+    def test_task8_observation_runtime_rejects_expert_root_alias_after_reseal(
+        self,
+    ) -> None:
+        """Catches a package-root alias bypassing expert import rejection."""
+
+        source = """
+            import inci_tennis_expert as expert
+
+            def collect(*args, **kwargs):
+                return expert.synchronizer.validate_synchronization_transition(
+                    *args,
+                    **kwargs,
+                )
+        """
+        normalized = textwrap.dedent(source)
+        expected = EXPECTED_PACKAGE_AST_SHA256["inci_tennis_runtime"]
+        for filename in sorted(TASK8_OBSERVATION_ONLY_RUNTIME_FILES):
+            with self.subTest(filename=filename):
+                original = expected[filename]
+                expected[filename] = canonical_ast_sha256(normalized, filename)
+                try:
+                    with self.assertRaisesRegex(
+                        ExpertBoundaryViolation,
+                        "runtime_expert_import_forbidden",
+                    ):
+                        check_source(
+                            normalized,
+                            package_name="inci_tennis_runtime",
+                            filename=filename,
+                        )
+                finally:
+                    expected[filename] = original
+
+    def test_task8_observation_runtime_rejects_sync_peer_after_reseal(
+        self,
+    ) -> None:
+        """Catches synchronization authority re-exported by a runtime peer."""
+
+        source = """
+            from inci_tennis_runtime.shadow_runtime import (
+                validate_synchronization_transition,
+            )
+
+            def collect(*args, **kwargs):
+                return validate_synchronization_transition(*args, **kwargs)
+        """
+        normalized = textwrap.dedent(source)
+        expected = EXPECTED_PACKAGE_AST_SHA256["inci_tennis_runtime"]
+        for filename in sorted(TASK8_OBSERVATION_ONLY_RUNTIME_FILES):
+            with self.subTest(filename=filename):
+                original = expected[filename]
+                expected[filename] = canonical_ast_sha256(normalized, filename)
+                try:
+                    with self.assertRaisesRegex(
+                        ExpertBoundaryViolation,
+                        "runtime_peer_import_forbidden",
+                    ):
+                        check_source(
+                            normalized,
+                            package_name="inci_tennis_runtime",
+                            filename=filename,
+                        )
+                finally:
+                    expected[filename] = original
+
+    def test_task8_observation_runtime_rejects_io_root_alias_after_reseal(
+        self,
+    ) -> None:
+        """Catches a package-root alias bypassing the exact IO allowlist."""
+
+        source = """
+            import inci_tennis_io as evidence_io
+
+            def collect(*args, **kwargs):
+                return evidence_io.expert_journal_store.append(*args, **kwargs)
+        """
+        normalized = textwrap.dedent(source)
+        expected = EXPECTED_PACKAGE_AST_SHA256["inci_tennis_runtime"]
+        for filename in sorted(TASK8_OBSERVATION_ONLY_RUNTIME_FILES):
+            with self.subTest(filename=filename):
+                original = expected[filename]
+                expected[filename] = canonical_ast_sha256(normalized, filename)
+                try:
+                    with self.assertRaisesRegex(
+                        ExpertBoundaryViolation,
+                        "runtime_io_import_forbidden",
                     ):
                         check_source(
                             normalized,

@@ -174,9 +174,11 @@ Result: `No broken requirements found.`
   score/book/reducer state; Kalshi/evidence/unknown failures halt.
 - Collection/provider evidence locations, append-only guarantees, and the
   whole-root rollback limitation are explicit.
-- Settlement uses the exact absolute-session-path command. Pending writes
-  nothing. Final/conflict appends use finalized Kalshi evidence only, and
-  changed evidence after a durable final becomes permanent conflict.
+- Settlement uses the exact absolute-session-path command. Initial recognized
+  non-final evidence stays pending and writes nothing. Initial final/conflict
+  labels require finalized Kalshi evidence; after a durable final, any changed
+  normalized evidence appends permanent conflict, including non-final evidence,
+  with a supersedes link to the prior row.
 - The settlement root is exactly
   `Path(pwd.getpwuid(os.getuid()).pw_dir) / '.local/state/inci/tennis-shadow-settlement'`,
   displayed as `~/.local/state/inci/tennis-shadow-settlement`, and explicitly
@@ -274,17 +276,29 @@ datagram/server/DNS paths, and reject expert imports for the four
 observation-only runtime modules even after their AST digests are refreshed.
 The broad row-level `KeyError` catch noted in Task 1 was also removed.
 
-Post-remediation verification:
+The subsequent scoped re-review found four remaining gaps: package-root expert
+aliases, synchronization authority re-exported through an unrestricted runtime
+peer, the public `socket.SocketType` alias, and the stale report sentence about
+post-final non-final evidence. Each bypass was reproduced before correction.
+The adjacent low-level `_socket.socket` constructor and IO package-root alias
+were also reproduced and closed during the same remediation.
+The observation-only audit now rejects the expert package root and permits only
+an exact per-file set of reviewed runtime-peer bindings. The sentinel routes
+both public and low-level socket constructor aliases through its denial path,
+including nested sentinel contexts. This report now describes post-final
+supersession accurately.
 
-- hybrid, settlement, source-audit, and sentinel suite: `328/328` OK;
+Post-second-remediation verification:
+
+- hybrid, settlement, source-audit, and sentinel suite: `331/331` OK;
 - root suite: `202/202` PASS;
 - expert contracts: `84/84` OK;
 - expert journal/store: `114/114` OK;
-- passing dependency-boundary subset: `42/42` OK;
-- full boundary: `43` tests with only the unchanged
+- passing dependency-boundary subset: `45/45` OK;
+- full boundary: `46` tests with only the unchanged
   `tennis_v1/ingress.py:new_package_import_forbidden` error;
 - `pip check` and `git diff --check`: clean.
 
 The remediation still has no order, portfolio, signal, P&L, demo, or live
-execution authority. A fresh scoped re-review and whole-branch re-review are
+execution authority. A fresh scoped re-review and whole-branch re-review remain
 required before push.
