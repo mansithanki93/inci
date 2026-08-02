@@ -97,7 +97,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "191df622e4eac7115dcd78696f8139778778e1404e92827505a23940ec6d8e50"
         ),
         "sportradar_trial_transport.py": (
-            "2825ad2552efca3e4849970785a50ea00c8a3e2eac2b91f97177f9ea574230a6"
+            "75497ff641e9e718f8ac965e43d9760c825f2ee4ca7001bdc5b09a3130c6b044"
         ),
     },
     "inci_tennis_adapters": {
