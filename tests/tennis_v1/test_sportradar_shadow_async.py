@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from pathlib import Path
 import tempfile
@@ -91,6 +92,128 @@ def _outcome_rows(root: Path) -> list[dict[str, object]]:
 
 
 class SportradarShadowAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_cancel_retrieves_failed_reservation_worker(self) -> None:
+        """Catches a failed shield worker leaking an unhandled exception."""
+
+        from inci_tennis_io.sportradar_shadow_async import (
+            SportradarShadowAsyncTransport,
+        )
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            loop = asyncio.get_running_loop()
+            loop.set_debug(True)
+            exception_contexts: list[dict[str, object]] = []
+            loop.set_exception_handler(
+                lambda _loop, context: exception_contexts.append(context)
+            )
+            reserve_started = threading.Event()
+            reserve_release = threading.Event()
+            with TrialUsageLedger(Path(directory)) as ledger:
+                def failed_reserve(_: str) -> object:
+                    reserve_started.set()
+                    if not reserve_release.wait(timeout=2):
+                        raise AssertionError("test did not release reservation")
+                    raise OSError("synthetic reservation failure")
+
+                ledger.reserve = failed_reserve  # type: ignore[method-assign]
+                transport = SportradarShadowAsyncTransport(
+                    api_key="safe-trial-key",
+                    ledger=ledger,
+                    session=_FakeSession(_FakeRequestContext(_FakeResponse())),
+                )
+                task = asyncio.create_task(
+                    transport.fetch_summary("sr:sport_event:123456")
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(reserve_started.wait, 1),
+                    "reservation never started",
+                )
+                task.cancel("first-reservation-cancel")
+                await asyncio.sleep(0)
+                task.cancel("second-reservation-cancel")
+                await asyncio.sleep(0)
+                reserve_release.set()
+                with self.assertRaises(asyncio.CancelledError) as caught:
+                    await task
+
+                self.assertEqual(
+                    caught.exception.args,
+                    ("first-reservation-cancel",),
+                )
+                task = None  # type: ignore[assignment]
+                for _ in range(3):
+                    gc.collect()
+                    await asyncio.sleep(0)
+                self.assertEqual(exception_contexts, [])
+
+    async def test_repeated_cancel_waits_for_reservation_and_outcome(self) -> None:
+        """Catches a second cancellation escaping before quota disposition."""
+
+        from inci_tennis_io.sportradar_shadow_async import (
+            SportradarShadowAsyncTransport,
+        )
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = _FakeSession(_FakeRequestContext(_FakeResponse()))
+            reserve_started = threading.Event()
+            reserve_release = threading.Event()
+            reserve_finished = threading.Event()
+            with TrialUsageLedger(root) as ledger:
+                original = ledger.reserve
+
+                def delayed_reserve(route: str):
+                    reservation = original(route)
+                    reserve_started.set()
+                    if not reserve_release.wait(timeout=2):
+                        raise AssertionError("test did not release reservation")
+                    reserve_finished.set()
+                    return reservation
+
+                ledger.reserve = delayed_reserve  # type: ignore[method-assign]
+                transport = SportradarShadowAsyncTransport(
+                    api_key="safe-trial-key",
+                    ledger=ledger,
+                    session=session,
+                )
+                task = asyncio.create_task(
+                    transport.fetch_summary("sr:sport_event:123456")
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(reserve_started.wait, 1),
+                    "reservation never started",
+                )
+                task.cancel("first-reservation-cancel")
+                await asyncio.sleep(0)
+                task.cancel("second-reservation-cancel")
+                await asyncio.sleep(0)
+                exited_before_durable_reservation = task.done()
+                reserve_release.set()
+                self.assertTrue(
+                    await asyncio.to_thread(reserve_finished.wait, 1),
+                    "reservation never completed",
+                )
+                with self.assertRaises(asyncio.CancelledError) as caught:
+                    await task
+
+                self.assertFalse(exited_before_durable_reservation)
+                self.assertEqual(
+                    caught.exception.args,
+                    ("first-reservation-cancel",),
+                )
+                self.assertEqual(session.calls, [])
+                rows = _outcome_rows(root)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(
+                    (rows[0]["outcome"], rows[0]["code"]),
+                    (
+                        "failed",
+                        "sportradar_operator_interrupt_during_request",
+                    ),
+                )
+
     async def test_cancel_after_durable_capture_keeps_completed_count(self) -> None:
         """Catches a persisted provider capture disappearing from terminal counts."""
 
@@ -136,6 +259,68 @@ class SportradarShadowAsyncTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(_outcome_rows(root)), 1)
             self.assertEqual(len(list((root / "raw").glob("*.json"))), 1)
+
+    async def test_repeated_cancel_retrieves_failed_persistence_worker(self) -> None:
+        """Catches failed capture persistence leaking a shield exception."""
+
+        from inci_tennis_io.sportradar_shadow_async import (
+            SportradarShadowAsyncTransport,
+        )
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            loop = asyncio.get_running_loop()
+            loop.set_debug(True)
+            exception_contexts: list[dict[str, object]] = []
+            loop.set_exception_handler(
+                lambda _loop, context: exception_contexts.append(context)
+            )
+            persist_started = threading.Event()
+            persist_release = threading.Event()
+            with TrialUsageLedger(root) as ledger:
+                def failed_persist(*_: object, **__: object) -> Path:
+                    persist_started.set()
+                    if not persist_release.wait(timeout=2):
+                        raise AssertionError("test did not release persistence")
+                    raise OSError("synthetic persistence failure")
+
+                ledger.persist_raw = failed_persist  # type: ignore[method-assign]
+                transport = SportradarShadowAsyncTransport(
+                    api_key="safe-trial-key",
+                    ledger=ledger,
+                    session=_FakeSession(_FakeRequestContext(_FakeResponse())),
+                )
+                task = asyncio.create_task(
+                    transport.fetch_summary("sr:sport_event:123456")
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(persist_started.wait, 1),
+                    "persistence never started",
+                )
+                task.cancel("first-persistence-cancel")
+                await asyncio.sleep(0)
+                task.cancel("second-persistence-cancel")
+                await asyncio.sleep(0)
+                persist_release.set()
+                with self.assertRaises(asyncio.CancelledError) as caught:
+                    await task
+
+                self.assertEqual(
+                    caught.exception.args,
+                    ("first-persistence-cancel",),
+                )
+                rows = _outcome_rows(root)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(
+                    (rows[0]["outcome"], rows[0]["code"]),
+                    ("failed", "sportradar_transport_unavailable"),
+                )
+                task = None  # type: ignore[assignment]
+                for _ in range(3):
+                    gc.collect()
+                    await asyncio.sleep(0)
+                self.assertEqual(exception_contexts, [])
 
     async def test_fetch_summary_is_get_only_and_durable_before_return(self) -> None:
         from inci_tennis_io.sportradar_shadow_async import (
@@ -337,6 +522,147 @@ class SportradarShadowAsyncTests(unittest.IsolatedAsyncioTestCase):
                     "sportradar_operator_interrupt_during_request",
                 ),
             )
+
+    async def test_repeated_cancel_waits_for_interrupted_outcome(self) -> None:
+        """Catches cancellation escaping while its outcome fsync is blocked."""
+
+        from inci_tennis_io.sportradar_shadow_async import (
+            SportradarShadowAsyncTransport,
+        )
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request_entered = asyncio.Event()
+            session = _FakeSession(
+                _FakeRequestContext(
+                    _FakeResponse(),
+                    entered=request_entered,
+                    release=asyncio.Event(),
+                )
+            )
+            outcome_started = threading.Event()
+            outcome_release = threading.Event()
+            outcome_finished = threading.Event()
+            with TrialUsageLedger(root) as ledger:
+                original = ledger.record_interrupted_outcome
+
+                def delayed_outcome(reservation: object) -> None:
+                    outcome_started.set()
+                    if not outcome_release.wait(timeout=2):
+                        raise AssertionError("test did not release outcome")
+                    original(reservation)  # type: ignore[arg-type]
+                    outcome_finished.set()
+
+                ledger.record_interrupted_outcome = (  # type: ignore[method-assign]
+                    delayed_outcome
+                )
+                transport = SportradarShadowAsyncTransport(
+                    api_key="safe-trial-key",
+                    ledger=ledger,
+                    session=session,
+                )
+                task = asyncio.create_task(
+                    transport.fetch_summary("sr:sport_event:123456")
+                )
+                await asyncio.wait_for(request_entered.wait(), timeout=0.5)
+                task.cancel("first-outcome-cancel")
+                self.assertTrue(
+                    await asyncio.to_thread(outcome_started.wait, 1),
+                    "outcome persistence never started",
+                )
+                task.cancel("second-outcome-cancel")
+                await asyncio.sleep(0)
+                exited_before_durable_outcome = task.done()
+                outcome_release.set()
+                self.assertTrue(
+                    await asyncio.to_thread(outcome_finished.wait, 1),
+                    "outcome persistence never completed",
+                )
+                with self.assertRaises(asyncio.CancelledError) as caught:
+                    await task
+
+                self.assertFalse(exited_before_durable_outcome)
+                self.assertEqual(
+                    caught.exception.args,
+                    ("first-outcome-cancel",),
+                )
+                rows = _outcome_rows(root)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(
+                    (rows[0]["outcome"], rows[0]["code"]),
+                    (
+                        "failed",
+                        "sportradar_operator_interrupt_during_request",
+                    ),
+                )
+
+    async def test_repeated_cancel_retrieves_failed_outcome_worker(self) -> None:
+        """Catches outcome failure replacing or leaking original cancellation."""
+
+        from inci_tennis_io.sportradar_shadow_async import (
+            SportradarShadowAsyncTransport,
+        )
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            loop = asyncio.get_running_loop()
+            loop.set_debug(True)
+            exception_contexts: list[dict[str, object]] = []
+            loop.set_exception_handler(
+                lambda _loop, context: exception_contexts.append(context)
+            )
+            request_entered = asyncio.Event()
+            session = _FakeSession(
+                _FakeRequestContext(
+                    _FakeResponse(),
+                    entered=request_entered,
+                    release=asyncio.Event(),
+                )
+            )
+            outcome_started = threading.Event()
+            outcome_release = threading.Event()
+            with TrialUsageLedger(Path(directory)) as ledger:
+                def failed_outcome(_: object) -> None:
+                    outcome_started.set()
+                    if not outcome_release.wait(timeout=2):
+                        raise AssertionError("test did not release outcome")
+                    raise OSError("synthetic outcome failure")
+
+                ledger.record_interrupted_outcome = (  # type: ignore[method-assign]
+                    failed_outcome
+                )
+                transport = SportradarShadowAsyncTransport(
+                    api_key="safe-trial-key",
+                    ledger=ledger,
+                    session=session,
+                )
+                task = asyncio.create_task(
+                    transport.fetch_summary("sr:sport_event:123456")
+                )
+                await asyncio.wait_for(request_entered.wait(), timeout=0.5)
+                task.cancel("first-outcome-cancel")
+                self.assertTrue(
+                    await asyncio.to_thread(outcome_started.wait, 1),
+                    "outcome persistence never started",
+                )
+                task.cancel("second-outcome-cancel")
+                await asyncio.sleep(0)
+                task.cancel("third-outcome-cancel")
+                await asyncio.sleep(0)
+                outcome_release.set()
+                with self.assertRaises(asyncio.CancelledError) as caught:
+                    await task
+
+                self.assertEqual(
+                    caught.exception.args,
+                    ("first-outcome-cancel",),
+                )
+                task = None  # type: ignore[assignment]
+                for _ in range(3):
+                    gc.collect()
+                    await asyncio.sleep(0)
+                self.assertEqual(exception_contexts, [])
 
     async def test_http_failure_is_redacted_not_retried_and_has_outcome(self) -> None:
         from inci_tennis_io.sportradar_shadow_async import (
@@ -599,6 +925,45 @@ class SportradarShadowAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.close_calls, 1)
         self.assertEqual(session.calls, [])
+
+    async def test_close_failure_is_loud_and_can_be_retried(self) -> None:
+        """Catches a failed owned-session close being reported as success."""
+
+        from inci_tennis_io.sportradar_shadow_async import (
+            SportradarShadowAsyncTransport,
+        )
+        from inci_tennis_io.sportradar_trial_transport import (
+            SportradarTrialObserverError,
+            TrialUsageLedger,
+        )
+
+        class FailOnceSession(_FakeSession):
+            async def close(self) -> None:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise RuntimeError("synthetic close failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = FailOnceSession(_FakeRequestContext(_FakeResponse()))
+            with TrialUsageLedger(Path(directory)) as ledger:
+                transport = SportradarShadowAsyncTransport(
+                    api_key="safe-trial-key",
+                    ledger=ledger,
+                    session=session,
+                )
+                with self.assertRaisesRegex(
+                    SportradarTrialObserverError,
+                    "sportradar_transport_cleanup_failed",
+                ):
+                    await transport.close()
+                await transport.close()
+                with self.assertRaisesRegex(
+                    SportradarTrialObserverError,
+                    "sportradar_transport_closed",
+                ):
+                    await transport.fetch_summary("sr:sport_event:123456")
+
+        self.assertEqual(session.close_calls, 2)
 
     async def test_invalid_match_id_is_rejected_before_reservation(self) -> None:
         from inci_tennis_io.sportradar_shadow_async import (

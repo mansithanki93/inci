@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from inci_tennis_adapters.sportradar_trial_v3 import (
     SportradarLiveSummariesSnapshot,
@@ -758,6 +759,56 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "^hybrid_shadow_resolver_input_invalid$"):
             self.resolve(self.catalog(malformed))
+
+    def test_remote_row_counts_are_capped_before_quadratic_edge_building(self) -> None:
+        """Catches byte-bounded inputs amplifying into an unbounded game-by-match scan."""
+
+        import inci_tennis_adapters.shadow_match_chooser as chooser
+
+        cases = (
+            (
+                self.catalog(
+                    self.game("KXATP-ONE"),
+                    self.game("KXATP-TWO", home="One", away="Two"),
+                ),
+                None,
+            ),
+            (
+                self.catalog(self.game("KXATP-ONE")),
+                self.discovery(
+                    score("sr:one"),
+                    score("sr:two", home="One", away="Two"),
+                ),
+            ),
+        )
+        with patch.object(
+            chooser, "_MAXIMUM_HYBRID_INPUT_ROWS", 1, create=True
+        ):
+            for catalog, discovery in cases:
+                with self.subTest(
+                    games=len(catalog.games),
+                    matches=0 if discovery is None else len(discovery.matches),
+                ), self.assertRaisesRegex(
+                    ValueError,
+                    "^hybrid_shadow_resolver_capacity_exceeded$",
+                ):
+                    self.resolve(catalog, discovery)
+
+    def test_provider_original_names_must_fit_the_durable_identity_grammar(self) -> None:
+        """Catches normalized provider aliases verifying when their originals cannot persist."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        for name in (" Ada Lovelace", "Ada Lovelace ", "Ada\nLovelace"):
+            with self.subTest(name=repr(name)):
+                discovery = self.discovery(score("sr:bad", home=name))
+                row = self.resolve(
+                    self.catalog(self.game("KXATP-BAD-NAME")),
+                    discovery,
+                    provider_state=self.fresh_state(discovery),
+                ).rows[0]
+                self.assertEqual(row.status, HybridStatus.PRICE_ONLY)
+                self.assertIsNone(row.provider_match)
 
     def test_public_provider_state_and_market_mapping_contracts_reject_invalid_values(self) -> None:
         """Catches public immutable values representing an unbound provider or unusable mapping."""

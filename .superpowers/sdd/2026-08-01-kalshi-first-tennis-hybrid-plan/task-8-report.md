@@ -302,3 +302,55 @@ Post-second-remediation verification:
 The remediation still has no order, portfolio, signal, P&L, demo, or live
 execution authority. A fresh scoped re-review and whole-branch re-review remain
 required before push.
+
+## Final pre-commit hardening and verification
+
+A subsequent whole-source adversarial pass reproduced and closed the remaining
+resource-boundary and durability gaps before the final seal refresh:
+
+- pre-opened native socket descriptors are quarantined by the automated-test
+  sentinel, closing immutable constructor/method alias bypasses;
+- evidence and settlement-label audits enforce finite directory, per-file,
+  aggregate-byte, and prospective-commit capacities before unknown content or
+  network transports are used;
+- catalog and settlement reconciliation have aggregate request/row/time limits,
+  including streamed-chunk deadline checks and stable overlong-header rejection;
+- price-only durable admission validates the exact selected session before any
+  evidence or Kalshi transport side effect, including stale-provider downgrade;
+- verified and price-only setup failures terminalize inside an open evidence
+  store, preserve cancellation/interrupt semantics, and close any unstarted
+  Kalshi transport;
+- repeated cancellation cannot abandon Sportradar reservation/outcome writes or
+  leave unobserved shield-future exceptions; every worker outcome is retrieved
+  exactly once and the first cancellation is preserved;
+- WebSocket subscribe/snapshot sends and finalized-Market reconciliation are
+  bounded; settlement CLI success is emitted only after successful cleanup;
+- numeric wire grammars are ASCII-only, and deep Sportradar JSON recursion maps
+  to the sanitized wire-contract error instead of escaping raw interpreter data.
+
+Final pre-commit verification on the sealed moving tree:
+
+- hybrid/settlement behavior under the no-network sentinel: `422/422` OK;
+- standalone sentinel self-tests: `11/11` OK;
+- root v6 regression: `202/202` PASS;
+- expert contracts: `84/84` OK;
+- expert journal/store: `114/114` OK;
+- passing dependency-boundary subset: `47/47` OK;
+- full boundary: `48` tests with exactly the unchanged inherited
+  `tennis_v1/ingress.py:new_package_import_forbidden` error;
+- canonical package AST comparison: zero mismatches;
+- Python parse: `100` files; `pip check`: no broken requirements;
+- `git diff --check`: clean.
+
+No test made a network call, and no order, portfolio, signal, fee, P&L, demo,
+or live-execution authority was added.
+
+## Final independent moving-tree review
+
+An independent whole-source review found no unresolved Critical or Important
+issues. Its final post-seal focused hybrid run passed `364/364` tests under the
+no-network sentinel. Exact seals and dependency maps passed, and the boundary
+suite passed `47/48`; its sole failure remains the inherited
+`tennis_v1/ingress.py:new_package_import_forbidden` finding. The reviewer found
+no prohibited execution, order, portfolio, signal, fee, P&L, expert-sync, or
+unexpected network authority in the reviewed tree.

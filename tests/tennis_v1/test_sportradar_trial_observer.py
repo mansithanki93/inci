@@ -463,6 +463,26 @@ class SportradarWireContractTests(unittest.TestCase):
             ):
                 parse_live_summaries_for_hybrid(invalid)
 
+    def test_hybrid_parser_sanitizes_deep_json_recursion_failure(self) -> None:
+        """Catches a nested provider payload escaping as a raw RecursionError."""
+
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            SportradarWireContractError,
+            parse_live_summaries_for_hybrid,
+        )
+
+        payload = b"[" * 200_000 + b"0" + b"]" * 200_000
+        try:
+            parse_live_summaries_for_hybrid(payload)
+        except BaseException as error:
+            caught = error
+        else:
+            self.fail("deeply nested JSON was accepted")
+
+        self.assertIs(type(caught), SportradarWireContractError)
+        self.assertEqual(str(caught), "sportradar_wire_contract_invalid")
+        self.assertEqual(caught.code, "sportradar_wire_contract_invalid")
+
     def test_hybrid_parser_isolates_zero_period_row(self) -> None:
         """Catches a malformed set number aborting unrelated hybrid rows."""
 

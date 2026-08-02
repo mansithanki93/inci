@@ -178,10 +178,17 @@ class _StreamingResponse:
 
 
 class _Session:
-    def __init__(self, pages: dict[str, list[object]]) -> None:
+    def __init__(
+        self,
+        pages: dict[str, list[object]],
+        *,
+        close_error: BaseException | None = None,
+    ) -> None:
         self.trust_env = True
         self.pages = {path: list(values) for path, values in pages.items()}
         self.calls: list[dict[str, object]] = []
+        self.close_count = 0
+        self.close_error = close_error
 
     def request(self, method: str, url: str, **kwargs: object) -> object:
         path = urlsplit(url).path
@@ -196,6 +203,11 @@ class _Session:
             else _Response(value)
         )
 
+    def close(self) -> None:
+        self.close_count += 1
+        if self.close_error is not None:
+            raise self.close_error
+
 
 def _transport(session: _Session):
     from inci_tennis_io.kalshi_shadow_catalog import KalshiShadowCatalogTransport
@@ -205,6 +217,32 @@ def _transport(session: _Session):
 
 
 class KalshiShadowCatalogTests(unittest.TestCase):
+    def test_catalog_session_close_is_idempotent_loud_and_terminal(self) -> None:
+        """Catches leaking the owned Requests session or reusing it after shutdown."""
+
+        session = _Session(_base_pages())
+        transport = _transport(session)
+        transport.close()
+        transport.close()
+        self.assertEqual(session.close_count, 1)
+        with self.assertRaisesRegex(
+            ValueError, "^kalshi_catalog_transport_invalid$"
+        ):
+            transport.get_sports_filters()
+        self.assertEqual(session.calls, [])
+
+        failing = _Session(
+            _base_pages(), close_error=OSError("private close detail")
+        )
+        retryable = _transport(failing)
+        with self.assertRaisesRegex(
+            ValueError, "^kalshi_catalog_session_close_invalid$"
+        ):
+            retryable.close()
+        failing.close_error = None
+        retryable.close()
+        self.assertEqual(failing.close_count, 2)
+
     def test_empty_and_one_sided_books_remain_in_complete_census(self) -> None:
         """Catches a quote-presence filter silently dropping structurally valid games."""
 
@@ -414,6 +452,75 @@ class KalshiShadowCatalogTests(unittest.TestCase):
 
         self.assertEqual(snapshot.games[0].initial_book_state, "one_sided")
 
+    def test_player_identity_text_must_be_durably_storable(self) -> None:
+        """Catches selectable games whose original player names cannot be journaled."""
+
+        invalid_names = (
+            " Alice Smith",
+            "Alice Smith ",
+            "Alice\nSmith",
+            "A" * 257,
+        )
+        for name in invalid_names:
+            with self.subTest(kind=(len(name), repr(name[:16]))):
+                event = _event(
+                    markets=[
+                        _market(_EVENT + "-A", name),
+                        _market(_EVENT + "-B", "Bea Jones"),
+                    ]
+                )
+                snapshot = _transport(
+                    _Session(_base_pages(events=[event]))
+                ).discover_tennis_catalog(now=_NOW)
+                self.assertEqual(snapshot.games, ())
+                self.assertEqual(
+                    [(row.event_ticker, row.reason) for row in snapshot.excluded],
+                    [(_EVENT, "player_identity_invalid")],
+                )
+
+    def test_provenance_text_must_be_durably_storable(self) -> None:
+        """Catches catalog provenance that passes discovery but fails session persistence."""
+
+        cases: list[dict[str, list[object]]] = []
+        bad_id = _milestone(identity=" match-1")
+        cases.append(_base_pages(milestones=[bad_id]))
+        bad_league = _milestone(league="ATP\nOfficial")
+        cases.append(_base_pages(milestones=[bad_league]))
+        cases.append(_base_pages(competitions=(" ATP Washington",)))
+        cases.append(
+            _base_pages(
+                series=((" KXATP", ("Tennis",)),),
+                events=[_event(series_ticker=" KXATP")],
+            )
+        )
+        for index, pages in enumerate(cases):
+            with self.subTest(index=index), self.assertRaisesRegex(
+                ValueError, "^kalshi_catalog_schema_invalid$"
+            ):
+                _transport(_Session(pages)).discover_tennis_catalog(now=_NOW)
+
+    def test_quote_text_uses_the_durable_canonical_decimal_grammar(self) -> None:
+        """Catches retained quote strings that the evidence journal must reject."""
+
+        for field, value in (
+            ("yes_bid_dollars", "00.4900"),
+            ("yes_bid_size_fp", "010.00"),
+            ("yes_bid_dollars", "0.٤٩٠٠"),
+            ("yes_bid_size_fp", "10.००"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "^kalshi_catalog_schema_invalid$"
+            ):
+                event = _event(
+                    markets=[
+                        _market(_EVENT + "-A", "Alice Smith", **{field: value}),
+                        _market(_EVENT + "-B", "Bea Jones"),
+                    ]
+                )
+                _transport(
+                    _Session(_base_pages(events=[event]))
+                ).discover_tennis_catalog(now=_NOW)
+
     def test_prefixes_do_not_classify_mve_and_explicit_mve_does_not_form_game(self) -> None:
         """Catches ticker-prefix MVE inference or accepting explicit MVE siblings."""
 
@@ -601,6 +708,91 @@ class KalshiShadowCatalogTests(unittest.TestCase):
             (1, 1),
         )
 
+    def test_discovery_rejects_an_unbounded_competition_fanout(self) -> None:
+        """Catches a widened sport filter launching one pagination walk per competition."""
+
+        from inci_tennis_io import kalshi_shadow_catalog as catalog
+
+        pages = _base_pages(
+            competitions=("ATP Washington", "ATP Washington Qualifying")
+        )
+        pages["/trade-api/v2/milestones"] = [
+            {"milestones": [_milestone()], "cursor": ""},
+            {"milestones": [_milestone()], "cursor": ""},
+        ]
+        with patch.object(
+            catalog, "_MAXIMUM_COMPETITIONS", 1, create=True
+        ), self.assertRaisesRegex(
+            ValueError, "^kalshi_catalog_capacity_exceeded$"
+        ):
+            _transport(_Session(pages)).discover_tennis_catalog(now=_NOW)
+
+    def test_discovery_caps_aggregate_parsed_rows(self) -> None:
+        """Catches individually bounded pages accumulating an unbounded in-memory census."""
+
+        from inci_tennis_io import kalshi_shadow_catalog as catalog
+
+        with patch.object(
+            catalog, "_MAXIMUM_AGGREGATE_ROWS", 1, create=True
+        ), self.assertRaisesRegex(
+            ValueError, "^kalshi_catalog_capacity_exceeded$"
+        ):
+            _transport(_Session(_base_pages())).discover_tennis_catalog(now=_NOW)
+
+    def test_discovery_caps_total_http_attempts_across_all_routes(self) -> None:
+        """Catches per-route limits composing into an unbounded total request count."""
+
+        from inci_tennis_io import kalshi_shadow_catalog as catalog
+
+        with patch.object(
+            catalog, "_MAXIMUM_DISCOVERY_REQUEST_ATTEMPTS", 3, create=True
+        ), self.assertRaisesRegex(
+            ValueError, "^kalshi_catalog_capacity_exceeded$"
+        ):
+            _transport(_Session(_base_pages())).discover_tennis_catalog(now=_NOW)
+
+    def test_discovery_has_one_total_wall_clock_deadline(self) -> None:
+        """Catches bounded requests still composing into an unbounded discovery duration."""
+
+        from inci_tennis_io import kalshi_shadow_catalog as catalog
+
+        with patch.object(
+            catalog, "_MAXIMUM_DISCOVERY_SECONDS", 0.0, create=True
+        ), self.assertRaisesRegex(
+            ValueError, "^kalshi_catalog_capacity_exceeded$"
+        ):
+            _transport(_Session(_base_pages())).discover_tennis_catalog(now=_NOW)
+
+    def test_discovery_deadline_is_enforced_between_streamed_chunks(self) -> None:
+        """Catches a slowly streaming body escaping the aggregate deadline."""
+
+        from inci_tennis_io import kalshi_shadow_catalog as catalog
+
+        response = _StreamingResponse(
+            [b'{"filters_by_sports":', b'{"Tennis":{}}}'],
+        )
+        session = _Session(
+            {
+                "/trade-api/v2/search/filters_by_sport": [response],
+            }
+        )
+        transport = _transport(session)
+        clock = {"value": 0.0}
+
+        def advancing_clock() -> float:
+            value = clock["value"]
+            clock["value"] += 0.3
+            return value
+
+        transport._monotonic = advancing_clock
+        with patch.object(
+            catalog, "_MAXIMUM_DISCOVERY_SECONDS", 1.0
+        ), self.assertRaisesRegex(
+            ValueError, "^kalshi_catalog_capacity_exceeded$"
+        ):
+            transport.discover_tennis_catalog(now=_NOW)
+        self.assertEqual(response.close_count, 1)
+
     def test_invalid_sibling_groups_are_excluded_without_dropping_valid_games(self) -> None:
         """Catches accepting partial, MVE, scalar, or duplicate-player game groups."""
 
@@ -616,6 +808,75 @@ class KalshiShadowCatalogTests(unittest.TestCase):
 
         self.assertEqual([game.event_ticker for game in snapshot.games], [_EVENT])
         self.assertEqual([row.event_ticker for row in snapshot.excluded], ["KXATP-26JUL26-DUP", "KXATP-26JUL26-ONLY", "KXATP-26JUL26-SCALAR", "KXATP-26JUL26-THREE"])
+
+    def test_forbidden_extra_sibling_cannot_hide_behind_two_valid_markets(self) -> None:
+        """Catches filtering a third scalar, MVE, or inactive sibling pre-check."""
+
+        extras = {
+            "scalar": {"market_type": "scalar"},
+            "mve": {"mve_collection_ticker": "mve-collection"},
+            "inactive": {"status": "closed"},
+        }
+        for label, overrides in extras.items():
+            with self.subTest(label=label):
+                event = _event(
+                    markets=[
+                        _market(_EVENT + "-A", "Alice Smith"),
+                        _market(_EVENT + "-B", "Bea Jones"),
+                        _market(_EVENT + "-SIDE", "Side Product", **overrides),
+                    ]
+                )
+                snapshot = _transport(
+                    _Session(_base_pages(events=[event]))
+                ).discover_tennis_catalog(now=_NOW)
+
+                self.assertEqual(snapshot.games, ())
+                self.assertEqual(
+                    [
+                        (row.event_ticker, row.reason)
+                        for row in snapshot.excluded
+                    ],
+                    [(_EVENT, "active_binary_sibling_count_invalid")],
+                )
+
+    def test_catalog_digest_commits_to_skipped_sibling_counts(self) -> None:
+        """Catches scalar/MVE skip counts disappearing from provenance."""
+
+        one_scalar = _event(
+            markets=[
+                _market(
+                    _EVENT + "-SIDE-1",
+                    "Side One",
+                    market_type="scalar",
+                )
+            ]
+        )
+        two_scalars = _event(
+            markets=[
+                _market(
+                    _EVENT + "-SIDE-1",
+                    "Side One",
+                    market_type="scalar",
+                ),
+                _market(
+                    _EVENT + "-SIDE-2",
+                    "Side Two",
+                    market_type="scalar",
+                ),
+            ]
+        )
+        first = _transport(
+            _Session(_base_pages(events=[one_scalar]))
+        ).discover_tennis_catalog(now=_NOW)
+        second = _transport(
+            _Session(_base_pages(events=[two_scalars]))
+        ).discover_tennis_catalog(now=_NOW)
+
+        self.assertNotEqual(first.catalog_sha256, second.catalog_sha256)
+        self.assertNotEqual(
+            first.excluded[0].diagnostics,
+            second.excluded[0].diagnostics,
+        )
 
     def test_catalog_hash_changes_for_provenance_books_and_exclusions(self) -> None:
         """Catches an audit digest omitting retained evidence that changes the census."""

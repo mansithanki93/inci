@@ -73,16 +73,16 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "8b0f81774187da7e55f4d2022ff7a6e5b19672c3f5900e17b9a6903159bc69b1"
         ),
         "facade.py": (
-            "63111051c9cacdeb91cd71d4d8edd8a141c60e7e6aec974874c58f318b3647fc"
+            "696c8410e7ac164b86d819edb4277bdf4468d4b93a1703e494e4130faf80dcc0"
         ),
         "kalshi_readonly.py": (
-            "44ec46b550a48c0d8a7e456b4620f044123b91ce1f330a1c4b0b75680090b2df"
+            "dcfad924e5a8a89c2e666eb048284ee57e5258b7c903b17483480f994954a532"
         ),
         "kalshi_shadow_catalog.py": (
-            "7e6baa8087dfa422c5d93aadc485ba3e884f590fd56e3924c2a88403f8b4035d"
+            "c044a6060fccda196a4778af8d643a9499768909723d9336e7a4020b1588f46c"
         ),
         "kalshi_shadow_settlement.py": (
-            "00128b2f077dae03c0a62a4c28fa60cd2f704899c50852b13a895c4c6dd7b954"
+            "d08a3c297aa901a98b47f57c15f29259475bb1395b9879f07b2d7d80f33462e3"
         ),
         "pinned_artifacts.py": (
             "43feef97b2d9a37f00143f00f6272562a64881da5cf143c060eb77c8c058ca0f"
@@ -94,13 +94,13 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6dde0bf459b9106182f94ca3bab6340d7aae7a3b1ad8f48b644e7739e6d28487"
         ),
         "shadow_evidence.py": (
-            "275ed8e66e2461afec079ba37d6118852e24f02e017e9e4c714e2a555fadf6de"
+            "a40ffa9112b9915650c5f69045dc097d86714142c744611d61633eeffb122c3c"
         ),
         "shadow_settlement_labels.py": (
-            "794a9dc9426f75e6540e18c68eadadd0fd14b98500e74784eea3c1a87a3e795c"
+            "01a0342cb6498826b1f1f70f43b8f1b010e6ef5f14ae3403f716c684ca164ba2"
         ),
         "sportradar_shadow_async.py": (
-            "191df622e4eac7115dcd78696f8139778778e1404e92827505a23940ec6d8e50"
+            "44a9dc48a58fd2efdb3990c0a3a4c933f7bf20b3ecea78115f47f8f49daa3b53"
         ),
         "sportradar_trial_transport.py": (
             "75497ff641e9e718f8ac965e43d9760c825f2ee4ca7001bdc5b09a3130c6b044"
@@ -121,10 +121,10 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "14e534fd3762d5d6198b1de8762568497bcf1c807fd56177942dab8f4de59229"
         ),
         "shadow_discovery_contracts.py": (
-            "711a2704dc2c873fe166c0704f79f7f47066bf098f6845fc15990f1a1836441f"
+            "8c3569be814936575cbaae81d0be5796ff9b5953acf5c03644faef136b12257c"
         ),
         "shadow_match_chooser.py": (
-            "eac1f6b69b7e398c4c14c2e44c37e3f3ea0f09ec1b448c37280cdd48ab4d6184"
+            "12dc4373029cfcc88f28f69abc5ba6553ca062c3a80bdb549394bb46fbd6b9fd"
         ),
         "shadow_provider_coverage.py": (
             "960a386abe0ee85000f522b6f3438bc4b3e42c3e2c095b4913fa9ccd38515cec"
@@ -133,7 +133,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "7a0757de48b66bd28f0547f2574216a2408a88b70fdf2e259776e067b6aa261f"
         ),
         "sportradar_trial_v3.py": (
-            "7cf66a643ec0e15694022ae3f224d9347b25d8fcacbb93c07bcb6325ec96d90d"
+            "4d9356fb5d2ce027e3b97af448286730c129d7e971f8bef8ee2920c239025d03"
         ),
     },
     "inci_tennis_runtime": {
@@ -145,10 +145,10 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "84685fa90fcbf79c7c1c845c33f57636a08d7f7c516297747f9ec3dc5b50e7c2"
         ),
         "live_shadow_cli.py": (
-            "5c500fc736651f28d7c4748c4358d92dc6721274b09f66af75fb85eb755a920d"
+            "dc1be937bf96a2b13ac25dfda091faedd3a28e73d9e30e7923ca6a2d0bd497c7"
         ),
         "live_shadow_collector.py": (
-            "5073b67b86b467fb4ac20a5f631f4bb9ffbe6cfc3ba360a31ed77a3016a67a9b"
+            "55410dcc6262d46191a3df52785a076e654cda72f72637655953a9dbb1ea659b"
         ),
         "provider_qualification_controller.py": (
             "94be825905f29c252c1d4d32f4544e6e1084661b099255b4d0cfbee9e02d6109"
@@ -163,7 +163,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "611cfb436eedf88fd6ea364983b66ec2073247d449272fb7d0726fa96053cd1e"
         ),
         "shadow_settlement_cli.py": (
-            "11030cf9651e60b4364310d8685b51093531a521daa231eaf7bb639f119d94a6"
+            "05823c93da9f70426230fcea0eb7cd98b969539c79c135190e6e7e3069a60059"
         ),
         "sportradar_trial_cli.py": (
             "afbc1d87c7e42295b942cd7737b7d70eeef5a909c8e9d41e29f3563a55c0e619"
@@ -650,6 +650,10 @@ TASK7_ADAPTER_PEER_IMPORTS = {
             ),
             (
                 "inci_tennis_adapters.shadow_discovery_contracts."
+                "KalshiCompetitionProvenance"
+            ),
+            (
+                "inci_tennis_adapters.shadow_discovery_contracts."
                 "KalshiShadowCatalogSnapshot"
             ),
             (
@@ -994,6 +998,10 @@ TASK8_RUNTIME_PEER_IMPORTS = {
             "inci_tennis_runtime.live_shadow_collector._durable_to_thread",
             (
                 "inci_tennis_runtime.live_shadow_collector."
+                "_durable_to_thread_result"
+            ),
+            (
+                "inci_tennis_runtime.live_shadow_collector."
                 "_provider_failure_allows_price_only"
             ),
             (
@@ -1005,6 +1013,10 @@ TASK8_RUNTIME_PEER_IMPORTS = {
                 "_provider_failure_attestation_is_valid"
             ),
             (
+                "inci_tennis_runtime.live_shadow_collector."
+                "_shielded_task_result"
+            ),
+            (
                 "inci_tennis_runtime.live_price_only_collector."
                 "PriceOnlyShadowCollector"
             ),
@@ -1012,6 +1024,67 @@ TASK8_RUNTIME_PEER_IMPORTS = {
     ),
     "live_shadow_collector.py": frozenset(),
     "shadow_settlement_cli.py": frozenset(),
+}
+TASK8_RUNTIME_IO_IMPORTS = {
+    "live_price_only_collector.py": frozenset(
+        {
+            "inci_tennis_io.shadow_evidence.PriceOnlyEvidenceObservation",
+            "inci_tennis_io.shadow_evidence.PriceOnlySessionEvidence",
+            "inci_tennis_io.shadow_evidence.ShadowMarketCandidate",
+        }
+    ),
+    "live_shadow_cli.py": frozenset(
+        {
+            "inci_tennis_io.facade.KalshiReadOnlyCredentials",
+            "inci_tennis_io.facade.KalshiReadOnlyTransport",
+            "inci_tennis_io.facade.PriceOnlySessionEvidence",
+            "inci_tennis_io.facade.ShadowEvidenceStore",
+            "inci_tennis_io.facade.ShadowMarketCandidate",
+            "inci_tennis_io.facade.ShadowResolutionEvidence",
+            "inci_tennis_io.facade.SportradarShadowAsyncTransport",
+            "inci_tennis_io.facade.TrialObservationRecord",
+            "inci_tennis_io.facade.TrialUsageLedger",
+            "inci_tennis_io.facade.default_shadow_state_root",
+            (
+                "inci_tennis_io.facade."
+                "load_kalshi_only_credential_material"
+            ),
+            "inci_tennis_io.facade.load_shadow_credential_material",
+            "inci_tennis_io.facade.shadow_kalshi_clock_observation",
+            "inci_tennis_io.facade.shadow_monotonic_ns",
+            "inci_tennis_io.facade.shadow_pause",
+            "inci_tennis_io.facade.shadow_wall_ns",
+            "inci_tennis_io.facade.validate_price_only_session_evidence",
+            (
+                "inci_tennis_io.kalshi_shadow_catalog."
+                "KalshiShadowCatalogTransport"
+            ),
+        }
+    ),
+    "live_shadow_collector.py": frozenset(
+        {
+            "inci_tennis_io.facade.ShadowEvidenceObservation",
+            "inci_tennis_io.facade.ShadowMarketCandidate",
+            "inci_tennis_io.facade.TrialCapture",
+            "inci_tennis_io.facade.TrialObservationRecord",
+        }
+    ),
+    "shadow_settlement_cli.py": frozenset(
+        {
+            (
+                "inci_tennis_io.kalshi_shadow_settlement."
+                "KalshiShadowSettlementTransport"
+            ),
+            (
+                "inci_tennis_io.shadow_settlement_labels."
+                "ShadowSettlementLabelStore"
+            ),
+            (
+                "inci_tennis_io.shadow_settlement_labels."
+                "reconcile_shadow_settlement"
+            ),
+        }
+    ),
 }
 
 FROZEN_ROOT_V6_IMPORT_ROOTS = frozenset(
@@ -2554,6 +2627,13 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
         and filename == "expert_journal_store.py"
         and is_exactly_sealed_source
     )
+    if filename in TASK8_OBSERVATION_ONLY_RUNTIME_FILES and any(
+        isinstance(node, ast.ImportFrom) and bool(node.level)
+        for node in ast.walk(tree)
+    ):
+        raise ExpertBoundaryViolation(
+            f"{filename}:runtime_relative_import_forbidden"
+        )
     _reject_forbidden_authority(tree, filename)
     _reject_dynamic_import_authority(
         tree,
@@ -2857,9 +2937,13 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
             filename=filename,
         )
         scoped_io_imports = (
-            TASK7_RUNTIME_IO_IMPORTS.get(filename, frozenset())
-            if is_exactly_sealed_source
-            else frozenset()
+            TASK8_RUNTIME_IO_IMPORTS[filename]
+            if filename in TASK8_OBSERVATION_ONLY_RUNTIME_FILES
+            else (
+                TASK7_RUNTIME_IO_IMPORTS.get(filename, frozenset())
+                if is_exactly_sealed_source
+                else frozenset()
+            )
         )
         scoped_expert_imports = (
             TASK7_RUNTIME_EXPERT_IMPORTS.get(filename, frozenset())
@@ -2883,13 +2967,23 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
                 raise ExpertBoundaryViolation(
                     f"{filename}:runtime_implementation_import_forbidden:{module}"
                 )
-            if _root_name(module) == "inci_tennis_io" and not any(
-                module.startswith(prefix)
-                for prefix in (
-                    "inci_tennis_io.facade.",
-                    "inci_tennis_io.ports.",
+            unscoped_io_binding = (
+                _root_name(module) == "inci_tennis_io"
+                and module not in scoped_io_imports
+            )
+            if (
+                unscoped_io_binding
+                and (
+                    filename in TASK8_OBSERVATION_ONLY_RUNTIME_FILES
+                    or not any(
+                        module.startswith(prefix)
+                        for prefix in (
+                            "inci_tennis_io.facade.",
+                            "inci_tennis_io.ports.",
+                        )
+                    )
                 )
-            ) and module not in scoped_io_imports:
+            ):
                 raise ExpertBoundaryViolation(
                     f"{filename}:runtime_io_import_forbidden:{module}"
                 )
@@ -3531,6 +3625,86 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                         )
                 finally:
                     expected[filename] = original
+
+    def test_task8_observation_runtime_rejects_relative_imports_after_reseal(
+        self,
+    ) -> None:
+        """Catches relative imports escaping exact runtime-peer review."""
+
+        sources = (
+            """
+                from .shadow_runtime import validate_synchronization_transition
+
+                def collect(*args, **kwargs):
+                    return validate_synchronization_transition(*args, **kwargs)
+            """,
+            """
+                from . import shadow_runtime
+
+                def collect(*args, **kwargs):
+                    return shadow_runtime.validate_synchronization_transition(
+                        *args,
+                        **kwargs,
+                    )
+            """,
+            """
+                from .shadow_runtime import *
+
+                def collect(*args, **kwargs):
+                    return validate_synchronization_transition(*args, **kwargs)
+            """,
+        )
+        expected = EXPECTED_PACKAGE_AST_SHA256["inci_tennis_runtime"]
+        for index, source in enumerate(sources):
+            normalized = textwrap.dedent(source)
+            for filename in sorted(TASK8_OBSERVATION_ONLY_RUNTIME_FILES):
+                with self.subTest(index=index, filename=filename):
+                    original = expected[filename]
+                    expected[filename] = canonical_ast_sha256(
+                        normalized,
+                        filename,
+                    )
+                    try:
+                        with self.assertRaisesRegex(
+                            ExpertBoundaryViolation,
+                            "runtime_relative_import_forbidden",
+                        ):
+                            check_source(
+                                normalized,
+                                package_name="inci_tennis_runtime",
+                                filename=filename,
+                            )
+                    finally:
+                        expected[filename] = original
+
+    def test_task8_observation_runtime_rejects_privileged_io_reexports(
+        self,
+    ) -> None:
+        """Catches journal authority hidden behind facade/ports re-exports."""
+
+        sources = (
+            "from inci_tennis_io.facade import append_expert_group\n",
+            "from inci_tennis_io.facade import issue_expert_append_permit\n",
+            "from inci_tennis_io.ports import ExpertJournalAppendPermitV1\n",
+        )
+        expected = EXPECTED_PACKAGE_AST_SHA256["inci_tennis_runtime"]
+        for index, source in enumerate(sources):
+            for filename in sorted(TASK8_OBSERVATION_ONLY_RUNTIME_FILES):
+                with self.subTest(index=index, filename=filename):
+                    original = expected[filename]
+                    expected[filename] = canonical_ast_sha256(source, filename)
+                    try:
+                        with self.assertRaisesRegex(
+                            ExpertBoundaryViolation,
+                            "runtime_io_import_forbidden",
+                        ):
+                            check_source(
+                                source,
+                                package_name="inci_tennis_runtime",
+                                filename=filename,
+                            )
+                    finally:
+                        expected[filename] = original
 
     def test_task7_adapters_reject_unreviewed_phase_one_bindings(self) -> None:
         added_import = (

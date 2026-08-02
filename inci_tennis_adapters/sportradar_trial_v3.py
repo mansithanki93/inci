@@ -150,7 +150,7 @@ def _decode(payload: bytes) -> dict[str, object]:
         )
     except SportradarWireContractError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
         _fail()
     if type(decoded) is not dict:
         _fail()

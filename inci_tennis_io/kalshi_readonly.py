@@ -34,6 +34,7 @@ _MAX_FRAME_BYTES = 1_048_576
 _MAX_SCOPE_BODY_BYTES = 262_144
 _MAX_PRIVATE_KEY_BYTES = 65_536
 _MAX_SIGNED_64 = 9_223_372_036_854_775_807
+_SEND_TIMEOUT_SECONDS = 5.0
 _TICKER_RE = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
 _API_KEY_ID_RE = pattern_compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 
@@ -596,7 +597,13 @@ class KalshiReadOnlyTransport:
             separators=(",", ":"),
         )
         try:
-            await self._socket.send(message)
+            await asyncio.wait_for(
+                self._socket.send(message),
+                timeout=_SEND_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            self._state = "halted"
+            _fail("kalshi_ws_send_timeout")
         except Exception:
             self._state = "halted"
             _fail("kalshi_ws_send_failed")
@@ -678,7 +685,13 @@ class KalshiReadOnlyTransport:
             separators=(",", ":"),
         )
         try:
-            await self._socket.send(message)
+            await asyncio.wait_for(
+                self._socket.send(message),
+                timeout=_SEND_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            self._state = "halted"
+            _fail("kalshi_ws_send_timeout")
         except Exception:
             self._state = "halted"
             _fail("kalshi_ws_send_failed")

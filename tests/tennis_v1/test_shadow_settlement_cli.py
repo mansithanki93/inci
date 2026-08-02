@@ -17,7 +17,7 @@ from inci_tennis_runtime.shadow_settlement_cli import (
 
 
 _SESSION = Path("/private/tmp/session-00000000-0000-4000-8000-000000000000.jsonl")
-_REVIEWED_CLI_AST_SHA256 = "11030cf9651e60b4364310d8685b51093531a521daa231eaf7bb639f119d94a6"
+_REVIEWED_CLI_AST_SHA256 = "05823c93da9f70426230fcea0eb7cd98b969539c79c135190e6e7e3069a60059"
 _ALLOWED_IMPORTS = (
     ("from", "__future__", ("annotations",)),
     ("import", ("argparse",)),
@@ -157,7 +157,6 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
         for stdout in (
             _TextStream(short=True), _TextStream(write_error=OSError()),
             _TextStream(flush_error=OSError()),
-            _TextStream(write_error=KeyboardInterrupt()),
             _TextStream(flush_error=SystemExit()),
         ):
             with self.subTest(stdout=stdout):
@@ -235,13 +234,98 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
         self.assertEqual(stdout.value, "")
         self.assertEqual(stderr.value, "STOPPED: operator interrupt\n")
 
+    def test_keyboard_interrupt_from_help_or_result_stdout_returns_130(self) -> None:
+        """Catches an output interrupt being downgraded to success or a generic halt."""
+
+        for argv in (["--help"], [str(_SESSION)]):
+            with self.subTest(argv=argv):
+                calls: list[str] = []
+                dependencies, _ = _dependencies(
+                    calls, result=SimpleNamespace(state="final")
+                )
+                stderr = _TextStream()
+                self.assertEqual(
+                    run_cli(
+                        argv,
+                        stdout=_TextStream(write_error=KeyboardInterrupt()),
+                        stderr=stderr,
+                        dependencies=dependencies,
+                    ),
+                    130,
+                )
+                self.assertEqual(
+                    stderr.value, "STOPPED: operator interrupt\n"
+                )
+
+    def test_transport_closes_before_success_output_and_cleanup_cannot_mask_primary_failure(
+        self,
+    ) -> None:
+        """Catches leaked cleanup, premature success, or a masked primary error."""
+
+        class ClosableTransport:
+            def __init__(self, close_error: BaseException | None = None) -> None:
+                self.close_error = close_error
+                self.close_count = 0
+
+            def close(self) -> None:
+                self.close_count += 1
+                if self.close_error is not None:
+                    raise self.close_error
+
+        scenarios = (
+            (None, None, 0, "final\n", ""),
+            (
+                RuntimeError("shadow_settlement_source_invalid"),
+                RuntimeError("kalshi_settlement_session_close_invalid"),
+                1,
+                "",
+                "HALTED: shadow_settlement_source_invalid\n",
+            ),
+            (
+                None,
+                RuntimeError("kalshi_settlement_session_close_invalid"),
+                1,
+                "",
+                "HALTED: kalshi_settlement_session_close_invalid\n",
+            ),
+        )
+        for body_error, close_error, status, expected_stdout, expected_stderr in scenarios:
+            with self.subTest(body_error=body_error, close_error=close_error):
+                calls: list[str] = []
+                transport = ClosableTransport(close_error)
+                store, clocks = object(), object()
+
+                def reconcile(*_: object) -> object:
+                    if body_error is not None:
+                        raise body_error
+                    return SimpleNamespace(state="final")
+
+                dependencies = ShadowSettlementCliDependencies(
+                    transport_factory=lambda: transport,
+                    store_factory=lambda: store,
+                    clocks_factory=lambda: clocks,
+                    reconcile=reconcile,
+                )
+                stdout, stderr = _TextStream(), _TextStream()
+                self.assertEqual(
+                    run_cli(
+                        [str(_SESSION)],
+                        stdout=stdout,
+                        stderr=stderr,
+                        dependencies=dependencies,
+                    ),
+                    status,
+                )
+                self.assertEqual(stdout.value, expected_stdout)
+                self.assertEqual(stderr.value, expected_stderr)
+                self.assertEqual(transport.close_count, 1)
+
     def test_short_or_failed_success_output_halts_without_changing_to_a_usage_error(self) -> None:
         """Catches accepting a partial stdout state as a completed reconciliation."""
         cases = (
             (_TextStream(short=True), "final"),
             (_TextStream(write_error=OSError()), ""),
             (_TextStream(flush_error=OSError()), "final\n"),
-            (_TextStream(write_error=KeyboardInterrupt()), ""),
             (_TextStream(flush_error=SystemExit()), "final\n"),
         )
         for stdout, expected_stdout in cases:

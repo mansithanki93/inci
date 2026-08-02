@@ -449,6 +449,42 @@ class ShadowEvidenceStoreTests(unittest.TestCase):
 
 
 class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shielded_cleanup_failure_has_no_orphaned_future(self) -> None:
+        """Catches cancellation leaving a later cleanup exception unobserved."""
+
+        from inci_tennis_runtime.live_shadow_collector import (
+            _shielded_task_result,
+        )
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        exception_contexts: list[dict[str, object]] = []
+        loop = asyncio.get_running_loop()
+        loop.set_debug(True)
+        loop.set_exception_handler(
+            lambda _loop, context: exception_contexts.append(context)
+        )
+
+        async def failing_cleanup() -> object:
+            started.set()
+            await release.wait()
+            raise OSError("injected cleanup failure")
+
+        cleanup = asyncio.create_task(failing_cleanup())
+        waiter = asyncio.create_task(_shielded_task_result(cleanup))
+        await started.wait()
+        waiter.cancel()
+        await asyncio.sleep(0)
+        waiter.cancel()
+        release.set()
+        result, cancellation, error = await waiter
+        await asyncio.sleep(0)
+
+        self.assertIsNone(result)
+        self.assertIsInstance(cancellation, asyncio.CancelledError)
+        self.assertIsInstance(error, OSError)
+        self.assertEqual(exception_contexts, [])
+
     async def test_slow_dashboard_writer_does_not_block_event_loop(self) -> None:
         """Catches terminal flush latency freezing unrelated async work."""
 

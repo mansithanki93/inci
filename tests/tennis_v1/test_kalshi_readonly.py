@@ -11,6 +11,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -165,6 +166,19 @@ class _FakeSocket:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+class _NeverResolvingSendSocket(_FakeSocket):
+    def __init__(self, *, hang_on_send: int) -> None:
+        super().__init__()
+        self.hang_on_send = hang_on_send
+        self.send_calls = 0
+
+    async def send(self, message: str) -> None:
+        self.sent.append(message)
+        self.send_calls += 1
+        if self.send_calls == self.hang_on_send:
+            await asyncio.Future()
 
 
 class _Connector:
@@ -493,6 +507,90 @@ class KalshiReadOnlyTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(socket.close_calls, 1)
         self.assertFalse(hasattr(transport, "send"))
         self.assertFalse(hasattr(transport, "request"))
+
+    async def test_subscribe_send_timeout_is_sanitized_and_cleanup_stays_bounded(
+        self,
+    ) -> None:
+        """Catches a stalled subscribe send blocking terminal cleanup forever."""
+
+        import inci_tennis_io.kalshi_readonly as readonly
+        from inci_tennis_io.kalshi_readonly import (
+            KalshiReadOnlyError,
+            KalshiReadOnlyTransport,
+        )
+
+        socket = _NeverResolvingSendSocket(hang_on_send=1)
+        transport = KalshiReadOnlyTransport(
+            credentials=self.credentials,
+            market_tickers=TICKERS,
+            connector=_Connector(socket),
+            scope_session_factory=self.scope_session_factory,
+            clock_observer=_clock_observer(),
+        )
+        await transport.open_readonly()
+        try:
+            with patch.object(
+                readonly,
+                "_SEND_TIMEOUT_SECONDS",
+                0.001,
+            ):
+                with self.assertRaisesRegex(
+                    KalshiReadOnlyError,
+                    "^kalshi_ws_send_timeout$",
+                ):
+                    try:
+                        await asyncio.wait_for(transport.subscribe(), timeout=0.1)
+                    except TimeoutError:
+                        self.fail("subscribe send remained unbounded")
+        finally:
+            await asyncio.wait_for(transport.close(), timeout=0.1)
+
+        self.assertEqual(socket.send_calls, 1)
+        self.assertEqual(socket.close_calls, 1)
+
+    async def test_snapshot_send_timeout_is_sanitized_and_cleanup_stays_bounded(
+        self,
+    ) -> None:
+        """Catches a stalled snapshot send blocking terminal cleanup forever."""
+
+        import inci_tennis_io.kalshi_readonly as readonly
+        from inci_tennis_io.kalshi_readonly import (
+            KalshiReadOnlyError,
+            KalshiReadOnlyTransport,
+        )
+
+        socket = _NeverResolvingSendSocket(hang_on_send=2)
+        transport = KalshiReadOnlyTransport(
+            credentials=self.credentials,
+            market_tickers=TICKERS,
+            connector=_Connector(socket),
+            scope_session_factory=self.scope_session_factory,
+            clock_observer=_clock_observer(),
+        )
+        await transport.open_readonly()
+        await transport.subscribe()
+        try:
+            with patch.object(
+                readonly,
+                "_SEND_TIMEOUT_SECONDS",
+                0.001,
+            ):
+                with self.assertRaisesRegex(
+                    KalshiReadOnlyError,
+                    "^kalshi_ws_send_timeout$",
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            transport.request_snapshot(27),
+                            timeout=0.1,
+                        )
+                    except TimeoutError:
+                        self.fail("snapshot send remained unbounded")
+        finally:
+            await asyncio.wait_for(transport.close(), timeout=0.1)
+
+        self.assertEqual(socket.send_calls, 2)
+        self.assertEqual(socket.close_calls, 1)
 
     async def test_receive_is_opaque_exact_bounded_and_clocked(self) -> None:
         from inci_tennis_io.kalshi_readonly import (

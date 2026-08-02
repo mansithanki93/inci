@@ -354,6 +354,8 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
             "exponent": (_market(0, settlement_value_dollars="1e0"), _market(1)),
             "sign": (_market(0, settlement_value_dollars="+1"), _market(1)),
             "leading_zero": (_market(0, settlement_value_dollars="01.0"), _market(1)),
+            "arabic_indic": (_market(0, settlement_value_dollars="1.٠"), _market(1)),
+            "devanagari": (_market(0, settlement_value_dollars="1.०"), _market(1)),
         }
         for name, states in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -764,6 +766,7 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
         self.assertLessEqual(labels._MAX_PENDING_BYTES, 65_536)
         self.assertGreater(labels._MAX_LEDGER_BYTES, labels._MAX_LEDGER_LINE_BYTES)
         self.assertGreater(labels._MAX_LEDGER_ROWS, 1)
+        self.assertEqual(labels._MAX_AUDIT_BYTES, 1_073_741_824)
 
         cap_cases = (
             ("_MAX_EPOCH_BYTES", "settlement.epoch"),
@@ -806,6 +809,22 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
             with patch.object(labels, "_MAX_LEDGER_ROWS", 0):
                 with self.assertRaisesRegex(RuntimeError, "row"):
                     _reconcile(source, root, _Transport(states), _Clocks())
+
+            exact_audit_bytes = labels._audit_root(root).audit_bytes
+            with patch.object(labels, "_MAX_AUDIT_BYTES", exact_audit_bytes):
+                no_op_transport = _Transport(states)
+                no_op_clocks = _Clocks()
+                self.assertEqual(
+                    _reconcile(source, root, no_op_transport, no_op_clocks).state,
+                    "final",
+                )
+                self.assertEqual(no_op_transport.calls, list(_TICKERS))
+                self.assertEqual(no_op_clocks.calls, [])
+            with patch.object(labels, "_MAX_AUDIT_BYTES", exact_audit_bytes - 1):
+                blocked_transport = _Transport(states)
+                with self.assertRaisesRegex(RuntimeError, "audit_capacity"):
+                    _reconcile(source, root, blocked_transport, _Clocks())
+                self.assertEqual(blocked_transport.calls, [])
 
         for cap_delta, should_pass in ((0, True), (-1, False)):
             with self.subTest(pending_cap_delta=cap_delta), tempfile.TemporaryDirectory() as directory:
@@ -886,6 +905,7 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
                 "_MAX_RAW_BODY_BYTES": raw_size,
                 "_MAX_LEDGER_LINE_BYTES": len(row_line),
                 "_MAX_LEDGER_BYTES": len(row_line),
+                "_MAX_AUDIT_BYTES": labels._audit_root(probe_root).audit_bytes,
             }
 
             exact_source = _source(base / "s98-source")

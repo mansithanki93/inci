@@ -133,6 +133,63 @@ class HybridNoNetworkSentinelTests(unittest.TestCase):
             ):
                 low_level_socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+    def test_runtime_sentinel_blocks_precaptured_native_socket_types(self) -> None:
+        """Catches immutable native constructors retained before denial."""
+
+        from tests.tennis_v1.hybrid_no_network import deny_network
+
+        low_level_socket = importlib.import_module("_socket")
+        constructors = (
+            socket.SocketType,
+            socket.socket.__mro__[1],
+            low_level_socket.socket,
+        )
+        with deny_network():
+            for constructor in constructors:
+                with self.subTest(
+                    constructor=repr(constructor)
+                ), self.assertRaisesRegex(
+                    AssertionError,
+                    "hybrid_test_network_forbidden:socket.__new__",
+                ):
+                    constructor(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def test_runtime_sentinel_blocks_socket_opened_before_context(self) -> None:
+        """Catches a native socket object surviving into the denial window."""
+
+        from tests.tennis_v1.hybrid_no_network import deny_network
+
+        candidate = socket.SocketType(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            with deny_network(), self.assertRaisesRegex(
+                AssertionError,
+                "hybrid_test_network_forbidden:socket.bind",
+            ):
+                candidate.bind(("127.0.0.1", 0))
+        finally:
+            candidate.close()
+
+    def test_runtime_sentinel_quarantines_precaptured_native_socket_fds(self) -> None:
+        """Catches native send/sendmsg methods bypassing Python-level patches."""
+
+        from tests.tennis_v1.hybrid_no_network import deny_network
+
+        left, right = socket.socketpair()
+        native = socket.SocketType(fileno=left.detach())
+        try:
+            with deny_network():
+                operations = [lambda: native.send(b"x")]
+                if hasattr(native, "sendmsg"):
+                    operations.append(lambda: native.sendmsg([b"y"]))
+                for operation in operations:
+                    with self.subTest(operation=repr(operation)), self.assertRaises(
+                        OSError
+                    ):
+                        operation()
+        finally:
+            native.close()
+            right.close()
+
     def test_main_installs_sentinel_before_loading_test_modules(self) -> None:
         """Catches import-time network access escaping before suite execution."""
 

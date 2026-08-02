@@ -3,7 +3,8 @@
 This store detects non-racing at-rest corruption and requires cooperative writers
 to honor its advisory lock.  Durable reads are finite: epoch and commit files are
 limited to 1 KiB, pending descriptors to 32 KiB, each raw body to the transport's
-8 MiB maximum, and the ledger to 64 MiB, 10,000 rows, and 64 KiB per row.  It
+8 MiB maximum, and the ledger to 64 MiB, 10,000 rows, and 64 KiB per row.  One
+audit may read at most 1 GiB in aggregate, including recovery revalidation.  It
 does not defend against a malicious same-UID process racing checks, bypassing
 locks, changing process memory or descriptors, or coherently rolling back or
 deleting the state root.  Reverification of the held source lease narrows, but
@@ -42,11 +43,12 @@ _COMMIT_SCHEMA = "inci-tennis-shadow-settlement-commit-v1"
 _ROW_SCHEMA = "inci-tennis-shadow-settlement-row-v1"
 _ZERO_DIGEST = "0" * 64
 _DIGEST_RE = pattern_compile(r"[0-9a-f]{64}\Z")
-_DECIMAL_RE = pattern_compile(r"(?:0|[1-9]\d*)(?:\.\d+)?\Z")
+_DECIMAL_RE = pattern_compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
 _TICKER_RE = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
 _TOKEN_RE = pattern_compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _RFC3339_RE = pattern_compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z"
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z\Z"
 )
 _RECOGNIZED_STATUSES = frozenset(
     {"initialized", "inactive", "active", "closed", "determined", "disputed", "amended", "finalized"}
@@ -69,6 +71,7 @@ _MAX_LEDGER_BYTES = 64 * 1024 * 1024
 _MAX_LEDGER_LINE_BYTES = 64 * 1024
 _MAX_LEDGER_ROWS = 10_000
 _MAX_RAW_FILES = _MAX_LEDGER_ROWS * 2
+_MAX_AUDIT_BYTES = 1_073_741_824
 _ROW_KEYS = frozenset(
     {
         "schema",
@@ -141,6 +144,34 @@ class _Audit:
     recovery: Literal["advance", "cleanup"] | None
     ledger_bytes: int
     raw_files: int
+    audit_bytes: int
+
+
+@dataclass(slots=True)
+class _AuditByteBudget:
+    consumed: int = 0
+
+    def read(
+        self,
+        path: Path,
+        *,
+        maximum_bytes: int,
+        empty: bool = False,
+    ) -> bytes:
+        info = _safe_regular(path, empty=empty)
+        if info.st_size < 0 or self.consumed + info.st_size > _MAX_AUDIT_BYTES:
+            raise ShadowSettlementError(
+                "shadow_settlement_audit_capacity_invalid"
+            )
+        payload = _read_safe(
+            path, maximum_bytes=maximum_bytes, empty=empty
+        )
+        if self.consumed + len(payload) > _MAX_AUDIT_BYTES:
+            raise ShadowSettlementError(
+                "shadow_settlement_audit_capacity_invalid"
+            )
+        self.consumed += len(payload)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +510,7 @@ def _validate_row(
     row_number: int,
     previous_digest: str,
     raw_inventory: set[Path],
+    read_safe: Callable[..., bytes] = _read_safe,
 ) -> ShadowSettlementResult:
     if set(row) != _ROW_KEYS:
         raise ShadowSettlementError("shadow_settlement_row_fields_invalid")
@@ -555,7 +587,7 @@ def _validate_row(
             raise ShadowSettlementError("shadow_settlement_market_binding_invalid")
         if raw_path not in raw_inventory:
             raise ShadowSettlementError("shadow_settlement_raw_missing")
-        payload = _read_safe(raw_path, maximum_bytes=_MAX_RAW_BODY_BYTES)
+        payload = read_safe(raw_path, maximum_bytes=_MAX_RAW_BODY_BYTES)
         if sha256(payload).hexdigest() != market["raw_sha256"]:
             raise ShadowSettlementError("shadow_settlement_raw_digest_invalid")
         state_value = KalshiFinalMarketState(
@@ -590,7 +622,11 @@ def _validate_row(
 
 
 def _validate_pending(
-    value: dict[str, object], *, root: Path, tail: dict[str, object]
+    value: dict[str, object],
+    *,
+    root: Path,
+    tail: dict[str, object],
+    read_safe: Callable[..., bytes] = _read_safe,
 ) -> None:
     if set(value) != {
         "schema",
@@ -628,7 +664,7 @@ def _validate_pending(
         if (
             path.parent != root / "raw"
             or sha256(
-                _read_safe(path, maximum_bytes=_MAX_RAW_BODY_BYTES)
+                read_safe(path, maximum_bytes=_MAX_RAW_BODY_BYTES)
             ).hexdigest()
             != item["sha256"]
         ):
@@ -638,6 +674,7 @@ def _validate_pending(
 def _audit_root(root: Path) -> _Audit:
     _validate_root_configuration(root)
     _safe_directory(root)
+    budget = _AuditByteBudget()
     names: set[str] = set()
     for entry in root.iterdir():
         if entry.name not in _ROOT_NAMES or len(names) >= len(_ROOT_NAMES):
@@ -647,7 +684,7 @@ def _audit_root(root: Path) -> _Audit:
         raise ShadowSettlementError("shadow_settlement_inventory_invalid")
     raw_root = root / "raw"
     _safe_directory(raw_root)
-    _read_safe(root / "settlement.lock", maximum_bytes=0, empty=True)
+    budget.read(root / "settlement.lock", maximum_bytes=0, empty=True)
     raw_inventory: set[Path] = set()
     for path in raw_root.iterdir():
         if len(raw_inventory) >= _MAX_RAW_FILES:
@@ -661,7 +698,8 @@ def _audit_root(root: Path) -> _Audit:
     if epoch_path.exists() or epoch_path.is_symlink():
         _validate_epoch(
             _parse_canonical(
-                _read_safe(epoch_path, maximum_bytes=_MAX_EPOCH_BYTES), name="epoch"
+                budget.read(epoch_path, maximum_bytes=_MAX_EPOCH_BYTES),
+                name="epoch",
             )
         )
 
@@ -669,7 +707,9 @@ def _audit_root(root: Path) -> _Audit:
     ledger_bytes = 0
     ledger_path = root / "settlements.jsonl"
     if ledger_path.exists() or ledger_path.is_symlink():
-        payload = _read_safe(ledger_path, maximum_bytes=_MAX_LEDGER_BYTES)
+        payload = budget.read(
+            ledger_path, maximum_bytes=_MAX_LEDGER_BYTES
+        )
         ledger_bytes = len(payload)
         if not payload:
             raise ShadowSettlementError("shadow_settlement_ledger_empty")
@@ -689,6 +729,7 @@ def _audit_root(root: Path) -> _Audit:
                 row_number=index,
                 previous_digest=previous,
                 raw_inventory=raw_inventory,
+                read_safe=budget.read,
             )
             identity = _row_source_identity(row)
             history = source_histories.setdefault(identity, [])
@@ -728,7 +769,8 @@ def _audit_root(root: Path) -> _Audit:
     commit_path = root / "settlement.commit"
     if commit_path.exists() or commit_path.is_symlink():
         commit = _parse_canonical(
-            _read_safe(commit_path, maximum_bytes=_MAX_COMMIT_BYTES), name="commit"
+            budget.read(commit_path, maximum_bytes=_MAX_COMMIT_BYTES),
+            name="commit",
         )
         _validate_commit(commit)
     elif rows and not (root / "settlement.pending").exists():
@@ -743,9 +785,15 @@ def _audit_root(root: Path) -> _Audit:
         if not rows:
             raise ShadowSettlementError("shadow_settlement_pending_without_row")
         pending = _parse_canonical(
-            _read_safe(pending_path, maximum_bytes=_MAX_PENDING_BYTES), name="pending"
+            budget.read(pending_path, maximum_bytes=_MAX_PENDING_BYTES),
+            name="pending",
         )
-        _validate_pending(pending, root=root, tail=rows[-1])
+        _validate_pending(
+            pending,
+            root=root,
+            tail=rows[-1],
+            read_safe=budget.read,
+        )
         tail_number = len(rows)
         tail_digest = rows[-1]["row_sha256"]
         if commit is not None and commit == {
@@ -781,7 +829,14 @@ def _audit_root(root: Path) -> _Audit:
 
     if not rows and names - {"raw", "settlement.lock", "settlement.epoch"}:
         raise ShadowSettlementError("shadow_settlement_empty_inventory_invalid")
-    return _Audit(tuple(rows), pending, recovery, ledger_bytes, len(raw_inventory))
+    return _Audit(
+        tuple(rows),
+        pending,
+        recovery,
+        ledger_bytes,
+        len(raw_inventory),
+        budget.consumed,
+    )
 
 
 def _market_object(state: KalshiFinalMarketState, raw_path: Path) -> dict[str, object]:
@@ -1005,7 +1060,7 @@ class ShadowSettlementLabelStore:
         if initial.state == "pending":
             return initial
         prepared = self._prepare_commit(
-            _Audit((), None, None, 0, 0),
+            _Audit((), None, None, 0, 0, 0),
             source,
             states,
             initial,
@@ -1247,6 +1302,18 @@ class ShadowSettlementLabelStore:
         commit_payload = _commit_bytes(next_row_number, row["row_sha256"])  # type: ignore[arg-type]
         if len(commit_payload) > _MAX_COMMIT_BYTES:
             raise ShadowSettlementError("shadow_settlement_commit_size_invalid")
+        prospective_audit_bytes = (
+            audit.audit_bytes
+            + 2 * sum(len(state.raw_body) for state in states)
+            + len(row_line)
+            + len(pending_payload)
+            + len(epoch_payload)
+            + len(commit_payload)
+        )
+        if prospective_audit_bytes > _MAX_AUDIT_BYTES:
+            raise ShadowSettlementError(
+                "shadow_settlement_audit_capacity_invalid"
+            )
         return _PreparedCommit(
             transaction_id=transaction_id,
             reconciled_wall_ns=wall_ns,

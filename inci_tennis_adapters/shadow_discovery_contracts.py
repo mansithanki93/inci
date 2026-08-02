@@ -69,6 +69,7 @@ class KalshiCatalogExclusion:
     event_ticker: str
     reason: str
     provenance: KalshiCompetitionProvenance | None
+    diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

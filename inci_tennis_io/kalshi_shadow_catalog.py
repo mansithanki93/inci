@@ -33,13 +33,17 @@ _API_PREFIX = "/trade-api/v2"
 _MAXIMUM_BODY_BYTES = 8_388_608
 _STREAM_CHUNK_BYTES = 65_536
 _MAXIMUM_PAGES = 20
+_MAXIMUM_COMPETITIONS = 256
+_MAXIMUM_AGGREGATE_ROWS = 100_000
+_MAXIMUM_DISCOVERY_REQUEST_ATTEMPTS = 2_048
+_MAXIMUM_DISCOVERY_SECONDS = 120.0
 _MAXIMUM_SIGNED_64 = 9_223_372_036_854_775_807
 _PUBLIC_METADATA_MIN_INTERVAL_SECONDS = 0.05
 _GET_429_DELAYS = (0.25, 0.5, 1.0, 2.0)
 _TICKER = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
 _CURSOR = pattern_compile(r"[A-Za-z0-9._~+/=-]{1,2048}\Z")
-_FIXED_POINT = pattern_compile(r"-?\d+(?:\.\d+)?\Z")
-_QUANTITY = pattern_compile(r"\d+\.\d{2}\Z")
+_FIXED_POINT = pattern_compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
+_QUANTITY = pattern_compile(r"(?:0|[1-9][0-9]*)\.[0-9]{2}\Z")
 _MARKET_STATUSES = frozenset(
     {
         "initialized",
@@ -74,12 +78,44 @@ def _text(value: object, *, allow_empty: bool = False) -> str:
     return value
 
 
+def _identity_text(value: object, *, maximum: int = 256) -> str:
+    text = _text(value)
+    if (
+        len(text) > maximum
+        or text != text.strip()
+        or any(ord(character) < 32 for character in text)
+    ):
+        raise ValueError("kalshi_catalog_schema_invalid")
+    return text
+
+
+def _valid_identity_text(value: object, *, maximum: int = 256) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and len(value) <= maximum
+        and value == value.strip()
+        and not any(ord(character) < 32 for character in value)
+    )
+
+
 def _string_tuple(
     value: object, *, require_nonempty: bool = False
 ) -> tuple[str, ...]:
     if type(value) is not list or (require_nonempty and not value):
         raise ValueError("kalshi_catalog_schema_invalid")
     result = tuple(_text(item) for item in value)
+    if len(set(result)) != len(result):
+        raise ValueError("kalshi_catalog_schema_invalid")
+    return result
+
+
+def _identity_tuple(
+    value: object, *, require_nonempty: bool = False
+) -> tuple[str, ...]:
+    if type(value) is not list or (require_nonempty and not value):
+        raise ValueError("kalshi_catalog_schema_invalid")
+    result = tuple(_identity_text(item) for item in value)
     if len(set(result)) != len(result):
         raise ValueError("kalshi_catalog_schema_invalid")
     return result
@@ -124,12 +160,12 @@ def _timestamp(value: object) -> float:
 
 def _parse_filters(value: object) -> dict[str, object]:
     raw_sports = _required(value, "filters_by_sports")
-    ordering = _string_tuple(
+    ordering = _identity_tuple(
         _required(value, "sport_ordering"), require_nonempty=True
     )
     if type(raw_sports) is not dict:
         raise ValueError("kalshi_catalog_schema_invalid")
-    names = tuple(_text(name) for name in raw_sports)
+    names = tuple(_identity_text(name) for name in raw_sports)
     if (
         set(names) != set(ordering)
         or len({name.casefold() for name in names}) != len(names)
@@ -138,15 +174,15 @@ def _parse_filters(value: object) -> dict[str, object]:
     sports: dict[str, object] = {}
     for sport in ordering:
         details = raw_sports[sport]
-        scopes = frozenset(_string_tuple(_required(details, "scopes")))
+        scopes = frozenset(_identity_tuple(_required(details, "scopes")))
         raw_competitions = _required(details, "competitions")
         if type(raw_competitions) is not dict:
             raise ValueError("kalshi_catalog_schema_invalid")
         competitions: dict[str, frozenset[str]] = {}
         for name, competition in raw_competitions.items():
-            canonical_name = _text(name)
+            canonical_name = _identity_text(name)
             competitions[canonical_name] = frozenset(
-                _string_tuple(_required(competition, "scopes"))
+                _identity_tuple(_required(competition, "scopes"))
             )
         sports[sport] = {
             "scopes": scopes,
@@ -162,16 +198,16 @@ def _parse_series(value: object) -> tuple[dict[str, object], ...]:
     result: list[dict[str, object]] = []
     tickers: set[str] = set()
     for row in rows:
-        ticker = _text(_required(row, "ticker"))
+        ticker = _identity_text(_required(row, "ticker"), maximum=128)
         if ticker in tickers:
             raise ValueError("kalshi_catalog_schema_invalid")
         tickers.add(ticker)
         raw_tags = row.get("tags")
-        tags = () if raw_tags is None else _string_tuple(raw_tags)
+        tags = () if raw_tags is None else _identity_tuple(raw_tags)
         result.append(
             {
                 "series_ticker": ticker,
-                "category": _text(_required(row, "category")),
+                "category": _identity_text(_required(row, "category")),
                 "tags": tags,
             }
         )
@@ -197,29 +233,29 @@ def _parse_milestone(row: object) -> dict[str, object]:
 
     def optional_detail(field: str) -> str | None:
         raw = details.get(field)
-        return None if raw is None else _text(raw)
+        return None if raw is None else _identity_text(raw)
 
     return {
-        "milestone_id": _text(_required(row, "id")),
-        "category": _text(_required(row, "category")),
-        "type": _text(_required(row, "type")),
+        "milestone_id": _identity_text(_required(row, "id")),
+        "category": _identity_text(_required(row, "category")),
+        "type": _identity_text(_required(row, "type")),
         "start_ts": _timestamp(_required(row, "start_date")),
-        "title": _text(_required(row, "title")),
+        "title": _identity_text(_required(row, "title"), maximum=512),
         "league": optional_detail("league"),
         "main_game_event_ticker": optional_detail("main_game_event_ticker"),
-        "primary_event_tickers": _string_tuple(
+        "primary_event_tickers": _identity_tuple(
             _required(row, "primary_event_tickers")
         ),
-        "related_event_tickers": _string_tuple(
+        "related_event_tickers": _identity_tuple(
             _required(row, "related_event_tickers")
         ),
     }
 
 
 def _parse_market(row: object) -> tuple[dict[str, object] | None, str | None]:
-    ticker = _text(_required(row, "ticker"))
-    event_ticker = _text(_required(row, "event_ticker"))
-    market_type = _text(_required(row, "market_type"))
+    ticker = _identity_text(_required(row, "ticker"), maximum=128)
+    event_ticker = _identity_text(_required(row, "event_ticker"), maximum=128)
+    market_type = _identity_text(_required(row, "market_type"), maximum=64)
     if market_type not in {"binary", "scalar"}:
         raise ValueError("kalshi_catalog_schema_invalid")
     if market_type == "scalar":
@@ -237,7 +273,7 @@ def _parse_market(row: object) -> tuple[dict[str, object] | None, str | None]:
         if raw_title is None
         else _text(raw_title, allow_empty=True)
     )
-    status = _text(_required(row, "status"))
+    status = _identity_text(_required(row, "status"), maximum=64)
     if status not in _MARKET_STATUSES:
         raise ValueError("kalshi_catalog_schema_invalid")
     close_ts = _timestamp(_required(row, "close_time"))
@@ -287,7 +323,7 @@ def _parse_market(row: object) -> tuple[dict[str, object] | None, str | None]:
 
 
 def _parse_event(row: object) -> dict[str, object]:
-    event_ticker = _text(_required(row, "event_ticker"))
+    event_ticker = _identity_text(_required(row, "event_ticker"), maximum=128)
     raw_markets = _required(row, "markets")
     if type(raw_markets) is not list:
         raise ValueError("kalshi_catalog_schema_invalid")
@@ -296,7 +332,7 @@ def _parse_event(row: object) -> dict[str, object]:
     for raw_market in raw_markets:
         market, skip_type = _parse_market(raw_market)
         if market is None:
-            raw_event_ticker = _text(
+            raw_event_ticker = _identity_text(
                 _required(raw_market, "event_ticker")
             )
             if raw_event_ticker != event_ticker or skip_type is None:
@@ -308,8 +344,8 @@ def _parse_event(row: object) -> dict[str, object]:
         markets.append(market)
     return {
         "event_ticker": event_ticker,
-        "series_ticker": _text(_required(row, "series_ticker")),
-        "category": _text(_required(row, "category")),
+        "series_ticker": _identity_text(_required(row, "series_ticker"), maximum=128),
+        "category": _identity_text(_required(row, "category")),
         "title": _text(_required(row, "title")),
         "markets": tuple(markets),
         "market_skips": dict(sorted(skips.items())),
@@ -423,6 +459,7 @@ def _catalog_digest(
                 "event_ticker": row.event_ticker,
                 "reason": row.reason,
                 "provenance": provenance(row.provenance),
+                "diagnostics": row.diagnostics,
             }
             for row in excluded
         ],
@@ -532,6 +569,10 @@ class KalshiShadowCatalogTransport:
     """Public Sports metadata client with no account or mutation authority."""
 
     __slots__ = (
+        "_closed",
+        "_discovery_deadline",
+        "_discovery_requests_remaining",
+        "_discovery_rows",
         "_last_public_metadata_at",
         "_monotonic",
         "_session",
@@ -542,14 +583,85 @@ class KalshiShadowCatalogTransport:
         try:
             session = requests.Session()
             session.trust_env = False
+        except KalshiShadowCatalogError:
+            raise
         except Exception:
             _fail("kalshi_catalog_transport_invalid")
         self._session = session
+        self._closed = False
         self._sleep = time.sleep
         self._monotonic = time.monotonic
         self._last_public_metadata_at: float | None = None
+        self._discovery_deadline: float | None = None
+        self._discovery_requests_remaining: int | None = None
+        self._discovery_rows: int | None = None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._session.close()
+        except BaseException as error:
+            if isinstance(error, Exception):
+                _fail("kalshi_catalog_session_close_invalid")
+            raise
+        self._closed = True
+
+    def _clock(self) -> float:
+        try:
+            value = self._monotonic()
+        except Exception:
+            _fail("kalshi_catalog_transport_invalid")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            _fail("kalshi_catalog_transport_invalid")
+        return float(value)
+
+    def _begin_discovery(self) -> None:
+        if self._discovery_deadline is not None:
+            _fail("kalshi_catalog_transport_invalid")
+        self._discovery_deadline = self._clock() + _MAXIMUM_DISCOVERY_SECONDS
+        self._discovery_requests_remaining = (
+            _MAXIMUM_DISCOVERY_REQUEST_ATTEMPTS
+        )
+        self._discovery_rows = 0
+
+    def _end_discovery(self) -> None:
+        self._discovery_deadline = None
+        self._discovery_requests_remaining = None
+        self._discovery_rows = None
+
+    def _check_discovery_deadline(self) -> None:
+        deadline = self._discovery_deadline
+        if deadline is not None and self._clock() >= deadline:
+            _fail("kalshi_catalog_capacity_exceeded")
+
+    def _consume_discovery_request(self) -> None:
+        remaining = self._discovery_requests_remaining
+        if remaining is None:
+            return
+        self._check_discovery_deadline()
+        if remaining <= 0:
+            _fail("kalshi_catalog_capacity_exceeded")
+        self._discovery_requests_remaining = remaining - 1
+
+    def _consume_discovery_rows(self, count: int) -> None:
+        current = self._discovery_rows
+        if current is None:
+            return
+        self._check_discovery_deadline()
+        if type(count) is not int or count < 0:
+            _fail("kalshi_catalog_schema_invalid")
+        total = current + count
+        if total > _MAXIMUM_AGGREGATE_ROWS:
+            _fail("kalshi_catalog_capacity_exceeded")
+        self._discovery_rows = total
 
     def _pace(self) -> None:
+        self._check_discovery_deadline()
         if self._last_public_metadata_at is None:
             return
         try:
@@ -558,6 +670,9 @@ class KalshiShadowCatalogTransport:
             )
             if remaining > 0:
                 self._sleep(remaining)
+                self._check_discovery_deadline()
+        except KalshiShadowCatalogError:
+            raise
         except Exception:
             _fail("kalshi_catalog_transport_invalid")
 
@@ -578,8 +693,7 @@ class KalshiShadowCatalogTransport:
                 if primary_error is None:
                     raise
 
-    @staticmethod
-    def _stream_body(response: object) -> bytes:
+    def _stream_body(self, response: object) -> bytes:
         try:
             headers = response.headers  # type: ignore[attr-defined]
             content_type = headers.get("Content-Type")
@@ -617,12 +731,14 @@ class KalshiShadowCatalogTransport:
                 chunk_size=_STREAM_CHUNK_BYTES
             )
             for chunk in iterator:
+                self._check_discovery_deadline()
                 if type(chunk) is not bytes or not chunk:
                     _fail("kalshi_catalog_body_invalid")
                 size += len(chunk)
                 if size > _MAXIMUM_BODY_BYTES:
                     _fail("kalshi_catalog_body_too_large")
                 chunks.append(chunk)
+                self._check_discovery_deadline()
         except KalshiShadowCatalogError:
             raise
         except Exception:
@@ -632,9 +748,12 @@ class KalshiShadowCatalogTransport:
         return b"".join(chunks)
 
     def _read(self, path: str, params: dict[str, object]) -> dict[str, object]:
+        if self._closed:
+            _fail("kalshi_catalog_transport_invalid")
         self._pace()
         body: bytes | None = None
         for attempt in range(len(_GET_429_DELAYS) + 1):
+            self._consume_discovery_request()
             try:
                 response = self._session.request(
                     "GET",
@@ -667,11 +786,15 @@ class KalshiShadowCatalogTransport:
                 response,
                 disposition,
             )
+            self._check_discovery_deadline()
             if status == 429:
                 if attempt == len(_GET_429_DELAYS):
                     _fail("kalshi_catalog_rate_limited")
                 try:
                     self._sleep(_GET_429_DELAYS[attempt])
+                    self._check_discovery_deadline()
+                except KalshiShadowCatalogError:
+                    raise
                 except Exception:
                     _fail("kalshi_catalog_transport_invalid")
                 continue
@@ -748,12 +871,14 @@ class KalshiShadowCatalogTransport:
         if not _safe_ticker(event_ticker):
             _fail("kalshi_catalog_query_invalid")
         try:
-            return _parse_event_response(
+            result = _parse_event_response(
                 self._read(
                     _API_PREFIX + "/events/" + event_ticker,
                     {"with_nested_markets": "true"},
                 )
             )
+            self._consume_discovery_rows(1)
+            return result
         except KalshiShadowCatalogError:
             raise
         except Exception:
@@ -775,6 +900,7 @@ class KalshiShadowCatalogTransport:
                 raise
             except Exception:
                 _fail("kalshi_catalog_schema_invalid")
+            self._consume_discovery_rows(len(page_rows))
             rows.extend(page_rows)
             if cursor == "":
                 return tuple(rows), {
@@ -792,9 +918,20 @@ class KalshiShadowCatalogTransport:
     def discover_tennis_catalog(
         self, *, now: datetime | None = None
     ) -> KalshiShadowCatalogSnapshot:
+        self._begin_discovery()
+        try:
+            return self._discover_tennis_catalog(now=now)
+        finally:
+            self._end_discovery()
+
+    def _discover_tennis_catalog(
+        self, *, now: datetime | None = None
+    ) -> KalshiShadowCatalogSnapshot:
         try:
             filters = self.get_sports_filters()
             tennis, competitions = _tennis_scope(filters)
+            if len(competitions) > _MAXIMUM_COMPETITIONS:
+                _fail("kalshi_catalog_capacity_exceeded")
             day_start, day_end = _local_day_bounds(now)
             minimum_start_date = datetime.fromtimestamp(
                 day_start, tz=timezone.utc
@@ -887,9 +1024,30 @@ class KalshiShadowCatalogTransport:
                 raw_markets = event["markets"]
                 if type(raw_markets) is not tuple:
                     raise ValueError("kalshi_catalog_schema_invalid")
+                market_skips = event["market_skips"]
+                if (
+                    type(market_skips) is not dict
+                    or any(
+                        type(key) is not str
+                        or type(count) is not int
+                        or count <= 0
+                        for key, count in market_skips.items()
+                    )
+                ):
+                    raise ValueError("kalshi_catalog_schema_invalid")
                 markets = _active_binary_markets(event)
+                exclusion_diagnostics = (
+                    f"raw_market_count={len(raw_markets)}",
+                    f"active_binary_market_count={len(markets)}",
+                    *(
+                        f"market_skip:{key}={market_skips[key]}"
+                        for key in sorted(market_skips)
+                    ),
+                )
                 if reason is None and (
-                    len(markets) != 2
+                    len(raw_markets) != 2
+                    or bool(market_skips)
+                    or len(markets) != 2
                     or any(market["notional_value"] != Decimal(1) for market in markets)
                 ):
                     reason = "active_binary_sibling_count_invalid"
@@ -912,10 +1070,15 @@ class KalshiShadowCatalogTransport:
                         or not _safe_title(game_title)
                         or not _safe_ticker(first_ticker)
                         or not _safe_ticker(second_ticker)
-                        or type(first_player) is not str
-                        or type(second_player) is not str
+                        or not _valid_identity_text(first_player)
+                        or not _valid_identity_text(second_player)
                     ):
-                        reason = "event_identity_invalid"
+                        reason = (
+                            "player_identity_invalid"
+                            if not _valid_identity_text(first_player)
+                            or not _valid_identity_text(second_player)
+                            else "event_identity_invalid"
+                        )
                     if reason is None:
                         try:
                             first_name = normalize_player_name(first_player)
@@ -964,7 +1127,14 @@ class KalshiShadowCatalogTransport:
                             )
                         )
                 if reason is not None:
-                    excluded.append(KalshiCatalogExclusion(event_ticker, reason, provenance))
+                    excluded.append(
+                        KalshiCatalogExclusion(
+                            event_ticker,
+                            reason,
+                            provenance,
+                            exclusion_diagnostics,
+                        )
+                    )
             result = tuple(
                 sorted(
                     games,

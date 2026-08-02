@@ -5,6 +5,8 @@ import io
 from hashlib import sha256
 import json
 from pathlib import Path
+import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 
@@ -370,6 +372,8 @@ class _ChooserEvidence(_Context):
         if self.terminal_row_sha256 is None:
             self.terminal_row_sha256 = "d" * 64
 
+    ensure_setup_terminal = ensure_halted_terminal
+
 
 class _Collector:
     def __init__(self, **values: object) -> None:
@@ -490,6 +494,125 @@ class LiveShadowCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(events, ["catalog"])
         self.assertEqual(errors.getvalue(), "HALTED: kalshi_catalog_unavailable\n")
+
+    def test_catalog_transport_is_closed_and_primary_failure_wins(self) -> None:
+        """Catches leaking discovery HTTP state or cleanup masking catalog evidence."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        class ClosableCatalog(_HybridCatalog):
+            def __init__(
+                self,
+                *,
+                body_error: BaseException | None = None,
+                close_error: BaseException | None = None,
+            ) -> None:
+                super().__init__(error=body_error)
+                self.close_error = close_error
+                self.close_count = 0
+
+            def close(self) -> None:
+                self.close_count += 1
+                if self.close_error is not None:
+                    raise self.close_error
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        scenarios = (
+            (None, None, 0, ""),
+            (
+                ShadowCollectorError("kalshi_catalog_status_invalid"),
+                RuntimeError("kalshi_catalog_session_close_invalid"),
+                1,
+                "HALTED: kalshi_catalog_status_invalid\n",
+            ),
+            (
+                None,
+                RuntimeError("kalshi_catalog_session_close_invalid"),
+                1,
+                "HALTED: kalshi_catalog_session_close_invalid\n",
+            ),
+        )
+        for body_error, close_error, expected, expected_stderr in scenarios:
+            with self.subTest(body_error=body_error, close_error=close_error):
+                catalog = ClosableCatalog(
+                    body_error=body_error, close_error=close_error
+                )
+                stderr = io.StringIO()
+                code = run_cli(
+                    ["--choose"],
+                    environ={},
+                    stdin=io.StringIO("q\n"),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                    dependencies=LiveShadowCliDependencies(
+                        kalshi_only_credential_loader=lambda _: material,
+                        catalog_transport_factory=lambda: catalog,
+                    ),
+                )
+                self.assertEqual(code, expected)
+                self.assertEqual(stderr.getvalue(), expected_stderr)
+                self.assertEqual(catalog.close_count, 1)
+
+    def test_stop_during_catalog_prevents_new_provider_work(self) -> None:
+        """Catches a stop request still spending optional provider quota after discovery."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _StopState,
+            _run_choose,
+        )
+
+        stop = _StopState()
+        events: list[str] = []
+
+        class StoppingCatalog(_HybridCatalog):
+            def discover_tennis_catalog(self) -> object:
+                result = super().discover_tennis_catalog()
+                stop.request()
+                return result
+
+        def ledger_factory() -> object:
+            events.append("ledger")
+            return _ChooserLedger()
+
+        def provider_factory(**_: object) -> object:
+            events.append("provider")
+            return _ChooserProvider()
+
+        services = LiveShadowCliDependencies(
+            trial_ledger_factory=ledger_factory,
+            sportradar_transport_factory=provider_factory,
+            catalog_transport_factory=StoppingCatalog,
+        )
+        material = SimpleNamespace(
+            sportradar_api_key="secret",
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+
+        with self.assertRaises(KeyboardInterrupt):
+            asyncio.run(
+                _run_choose(
+                    duration_seconds=10,
+                    poll_seconds=1,
+                    material=material,
+                    environ={"SPORTRADAR_API_KEY": "secret"},
+                    stdin=io.StringIO("q\n"),
+                    stdout=io.StringIO(),
+                    output=_DashboardOutput(io.StringIO()),
+                    services=services,
+                    stop=stop,
+                )
+            )
+        self.assertEqual(events, [])
 
     def test_discovery_absence_quota_transport_parser_stale_and_empty_downgrade(self) -> None:
         """Catches optional discovery failures removing the Kalshi choice."""
@@ -963,6 +1086,8 @@ class LiveShadowCliTests(unittest.TestCase):
                 3_000_000_000,
                 12_200_000_000,
                 12_200_000_000,
+                12_200_000_000,
+                12_200_000_000,
             )
         )
         kalshi_transports = iter((ReadOnlyKalshi(), object()))
@@ -1025,6 +1150,657 @@ class LiveShadowCliTests(unittest.TestCase):
             "sportradar_ledger",
         }
         self.assertTrue(forbidden_names.isdisjoint(price_collectors[0].values))
+
+    def test_failover_rechecks_absolute_deadline_after_evidence_audit(self) -> None:
+        """Catches setup time restarting a stale failover duration below ten seconds."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _ProviderDiscovery,
+            _StopState,
+            _VerifiedCollectionHalt,
+            _discovery_state,
+            _price_session,
+            _run_price_choice,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceStore,
+            ShadowResolutionEvidence,
+        )
+
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
+        row = snapshot.rows[0]
+        discovery = _ProviderDiscovery(
+            None,
+            _discovery_state(
+                "unavailable", "provider_credentials_missing"
+            ),
+        )
+        clock = {"monotonic": 12_200_000_000}
+
+        class PriceCollector:
+            def __init__(self) -> None:
+                self.run_calls = 0
+
+            async def run(self, *, duration_seconds: int) -> str:
+                del duration_seconds
+                self.run_calls += 1
+                return "duration_elapsed"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            provider_capture = (Path(directory) / "provider.json").resolve()
+            provider_payload = b'{"provider":"discovery"}'
+            provider_capture.write_bytes(provider_payload)
+            provider_capture.chmod(0o600)
+            with ShadowEvidenceStore(root) as prior:
+                prior_ledger = prior.ledger_path
+                prior.append_resolution(
+                    ShadowResolutionEvidence(
+                        selected_wall_ns=GENERATED_NS + 1_000_000_000,
+                        provider_match_id=MATCH_ID,
+                        provider_start_wall_ns=GENERATED_NS,
+                        event_ticker=row.game.event_ticker,
+                        home_player_name="Player Home",
+                        away_player_name="Player Away",
+                        market_tickers=row.market_tickers,
+                        provider_discovery_raw_path=str(provider_capture),
+                        provider_discovery_raw_sha256=sha256(
+                            provider_payload
+                        ).hexdigest(),
+                        kalshi_catalog_sha256=snapshot.catalog_sha256,
+                        resolver_snapshot_sha256=(
+                            snapshot.resolver_snapshot_sha256
+                        ),
+                        resolver_rule_version="strict-name-start-v1",
+                    )
+                )
+                prior.append_terminal(
+                    reason="halted",
+                    code="sportradar_transport_unavailable",
+                    ended_wall_ns=GENERATED_NS + 5_000_000_000,
+                    ended_monotonic_ns=12_000_000_000,
+                    provider_match_id=MATCH_ID,
+                    market_tickers=row.market_tickers,
+                    sportradar_captures=0,
+                    kalshi_frames=0,
+                )
+                predecessor = _VerifiedCollectionHalt(
+                    "sportradar_transport_unavailable",
+                    prior.session_id,
+                    prior.terminal_row_sha256 or "",
+                )
+            collector = PriceCollector()
+
+            def slow_evidence() -> ShadowEvidenceStore:
+                store = ShadowEvidenceStore(root)
+                clock["monotonic"] = 22_000_000_000
+                return store
+
+            services = LiveShadowCliDependencies(
+                evidence_store_factory=slow_evidence,
+                kalshi_transport_factory=lambda *_: object(),
+                projector_factory=lambda _: object(),
+                price_only_collector_factory=lambda **_: collector,
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: clock["monotonic"],
+            )
+            with self.assertRaisesRegex(
+                ShadowCollectorError, "^sportradar_transport_unavailable$"
+            ):
+                asyncio.run(
+                    _run_price_choice(
+                        row=row,
+                        snapshot=snapshot,
+                        discovery=discovery,
+                        duration_seconds=18,
+                        material=object(),
+                        output=_DashboardOutput(io.StringIO()),
+                        services=services,
+                        stop=_StopState(),
+                        selected_wall_ns=GENERATED_NS + 6_000_000_000,
+                        selected_monotonic_ns=12_200_000_000,
+                        predecessor=predecessor,
+                        deadline_monotonic_ns=31_000_000_000,
+                    )
+                )
+            self.assertEqual(collector.run_calls, 0)
+            first_ledger = next(
+                path
+                for path in root.glob("session-*.jsonl")
+                if path != prior_ledger
+            )
+            first_rows = [
+                json.loads(line)
+                for line in first_ledger.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [row["kind"] for row in first_rows],
+                ["price_only_session", "price_only_terminal"],
+            )
+            self.assertEqual(
+                first_rows[-1]["code"],
+                "sportradar_transport_unavailable",
+            )
+            durable_session = _price_session(
+                row=row,
+                snapshot=snapshot,
+                discovery=discovery,
+                selected_wall_ns=GENERATED_NS + 6_000_000_000,
+                selected_monotonic_ns=12_200_000_000,
+                predecessor_session_id=(
+                    predecessor.predecessor_session_id
+                ),
+                predecessor_terminal_row_sha256=(
+                    predecessor.predecessor_terminal_row_sha256
+                ),
+            )
+            with ShadowEvidenceStore(root) as reopened:
+                reopened.append_price_only_session(durable_session)
+                reopened.ensure_price_only_halted_terminal(
+                    code="shadow_internal_error"
+                )
+
+    def test_price_setup_failures_never_leave_an_empty_ledger(self) -> None:
+        """Catches pre-run constructor errors permanently poisoning the root."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _ProviderDiscovery,
+            _StopState,
+            _discovery_state,
+            _price_session,
+            _run_price_choice,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
+        row = snapshot.rows[0]
+        discovery = _ProviderDiscovery(
+            None,
+            _discovery_state(
+                "unavailable", "provider_credentials_missing"
+            ),
+        )
+        durable_session = _price_session(
+            row=row,
+            snapshot=snapshot,
+            discovery=discovery,
+            selected_wall_ns=GENERATED_NS + 6_000_000_000,
+            selected_monotonic_ns=12_200_000_000,
+            predecessor_session_id=None,
+            predecessor_terminal_row_sha256=None,
+        )
+
+        def failure(code: str):
+            def fail(*_: object, **__: object) -> object:
+                raise ShadowCollectorError(code)
+
+            return fail
+
+        cases = (
+            (
+                "kalshi",
+                failure("kalshi_transport_unavailable"),
+                lambda _: object(),
+                lambda **_: object(),
+                "kalshi_transport_unavailable",
+            ),
+            (
+                "projector",
+                lambda *_: object(),
+                failure("shadow_projector_invalid"),
+                lambda **_: object(),
+                "shadow_projector_invalid",
+            ),
+            (
+                "collector",
+                lambda *_: object(),
+                lambda _: object(),
+                failure("shadow_price_collector_invalid"),
+                "shadow_price_collector_invalid",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            for (
+                label,
+                kalshi_factory,
+                projector_factory,
+                collector_factory,
+                expected_code,
+            ) in cases:
+                with self.subTest(label=label):
+                    root = (parent / label).resolve()
+                    services = LiveShadowCliDependencies(
+                        evidence_store_factory=lambda root=root: (
+                            ShadowEvidenceStore(root)
+                        ),
+                        kalshi_transport_factory=kalshi_factory,
+                        projector_factory=projector_factory,
+                        price_only_collector_factory=collector_factory,
+                        wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                        monotonic_ns=lambda: 12_200_000_000,
+                    )
+                    with self.assertRaisesRegex(
+                        ShadowCollectorError, f"^{expected_code}$"
+                    ):
+                        asyncio.run(
+                            _run_price_choice(
+                                row=row,
+                                snapshot=snapshot,
+                                discovery=discovery,
+                                duration_seconds=18,
+                                material=object(),
+                                output=_DashboardOutput(io.StringIO()),
+                                services=services,
+                                stop=_StopState(),
+                                selected_wall_ns=(
+                                    GENERATED_NS + 6_000_000_000
+                                ),
+                                selected_monotonic_ns=12_200_000_000,
+                            )
+                        )
+                    existing = tuple(root.glob("session-*.jsonl"))
+                    if label == "collector":
+                        self.assertEqual(len(existing), 1)
+                        rows = [
+                            json.loads(line)
+                            for line in existing[0]
+                            .read_text(encoding="utf-8")
+                            .splitlines()
+                        ]
+                        self.assertEqual(
+                            [item["kind"] for item in rows],
+                            ["price_only_session", "price_only_terminal"],
+                        )
+                    else:
+                        self.assertEqual(existing, ())
+                    with ShadowEvidenceStore(root) as reopened:
+                        reopened.append_price_only_session(durable_session)
+                        reopened.ensure_price_only_halted_terminal(
+                            code="shadow_internal_error"
+                        )
+
+    def test_every_selectable_row_passes_durable_session_admission_first(self) -> None:
+        """Catches resolver values reaching IO before exact ledger validation."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            ProviderDiscoveryState,
+        )
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceError
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _ProviderDiscovery,
+            _StopState,
+            _run_price_choice,
+        )
+
+        invalid_book = _hybrid_game(initial_book_state="empty")
+        invalid_decimal = _hybrid_game("KXTENNIS-DECIMAL")
+        object.__setattr__(
+            invalid_decimal.markets[0], "initial_yes_bid", "00.40"
+        )
+        cases = (
+            (
+                "book_state",
+                resolve_hybrid_shadow_matches(
+                    _hybrid_catalog(invalid_book)
+                ),
+                ProviderDiscoveryState(
+                    "unavailable", "provider_credentials_missing"
+                ),
+            ),
+            (
+                "decimal_grammar",
+                resolve_hybrid_shadow_matches(
+                    _hybrid_catalog(invalid_decimal)
+                ),
+                ProviderDiscoveryState(
+                    "unavailable", "provider_credentials_missing"
+                ),
+            ),
+            (
+                "discovery_state",
+                resolve_hybrid_shadow_matches(_hybrid_catalog()),
+                ProviderDiscoveryState("mystery", "synthetic"),
+            ),
+        )
+        for label, snapshot, state in cases:
+            with self.subTest(label=label):
+                row = snapshot.rows[0]
+                self.assertTrue(row.selectable)
+                calls: list[str] = []
+                services = LiveShadowCliDependencies(
+                    evidence_store_factory=lambda: calls.append("evidence"),
+                    kalshi_transport_factory=lambda *_: calls.append("kalshi"),
+                    projector_factory=lambda _: calls.append("projector"),
+                    price_only_collector_factory=lambda **_: calls.append(
+                        "collector"
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError, "^shadow_evidence_row_invalid$"
+                ):
+                    asyncio.run(
+                        _run_price_choice(
+                            row=row,
+                            snapshot=snapshot,
+                            discovery=_ProviderDiscovery(None, state),
+                            duration_seconds=18,
+                            material=object(),
+                            output=_DashboardOutput(io.StringIO()),
+                            services=services,
+                            stop=_StopState(),
+                            selected_wall_ns=(
+                                GENERATED_NS + 6_000_000_000
+                            ),
+                            selected_monotonic_ns=12_200_000_000,
+                        )
+                    )
+                self.assertEqual(calls, [])
+
+    def test_price_setup_interrupts_write_their_exact_terminal_reason(self) -> None:
+        """Catches setup cancellation becoming an unshielded generic halt."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _ProviderDiscovery,
+            _StopState,
+            _discovery_state,
+            _run_price_choice,
+        )
+
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
+        row = snapshot.rows[0]
+        discovery = _ProviderDiscovery(
+            None,
+            _discovery_state(
+                "unavailable", "provider_credentials_missing"
+            ),
+        )
+
+        def raising(error: BaseException):
+            def fail(**_: object) -> object:
+                raise error
+
+            return fail
+
+        cases = (
+            ("cancelled", asyncio.CancelledError(), asyncio.CancelledError),
+            ("operator_interrupt", KeyboardInterrupt(), KeyboardInterrupt),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for label, error, expected in cases:
+                with self.subTest(label=label):
+                    root = (Path(directory) / label).resolve()
+                    services = LiveShadowCliDependencies(
+                        evidence_store_factory=lambda root=root: (
+                            ShadowEvidenceStore(root)
+                        ),
+                        kalshi_transport_factory=lambda *_: object(),
+                        projector_factory=lambda _: object(),
+                        price_only_collector_factory=raising(error),
+                    )
+                    with self.assertRaises(expected):
+                        asyncio.run(
+                            _run_price_choice(
+                                row=row,
+                                snapshot=snapshot,
+                                discovery=discovery,
+                                duration_seconds=18,
+                                material=object(),
+                                output=_DashboardOutput(io.StringIO()),
+                                services=services,
+                                stop=_StopState(),
+                                selected_wall_ns=(
+                                    GENERATED_NS + 6_000_000_000
+                                ),
+                                selected_monotonic_ns=12_200_000_000,
+                            )
+                        )
+                    ledger = next(root.glob("session-*.jsonl"))
+                    rows = [
+                        json.loads(line)
+                        for line in ledger.read_text(encoding="utf-8").splitlines()
+                    ]
+                    self.assertEqual(rows[-1]["kind"], "price_only_terminal")
+                    self.assertEqual(rows[-1]["reason"], label)
+                    self.assertIsNone(rows[-1]["code"])
+
+    def test_price_setup_durability_failure_preserves_retained_cancellation(
+        self,
+    ) -> None:
+        """Catches a failed durable append wrapping retained cancellation."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _ProviderDiscovery,
+            _StopState,
+            _discovery_state,
+            _run_price_choice,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class Evidence(_Context):
+            def append_price_only_session(self, _: object) -> None:
+                started.set()
+                if not release.wait(5):
+                    raise AssertionError("test release timed out")
+                raise OSError("injected append failure")
+
+            def ensure_price_only_setup_terminal(self, **_: object) -> None:
+                raise AssertionError("terminal must not replace cancellation")
+
+        class Transport:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
+        discovery = _ProviderDiscovery(
+            None,
+            _discovery_state("unavailable", "provider_credentials_missing"),
+        )
+        transport = Transport()
+
+        async def scenario() -> None:
+            exception_contexts: list[dict[str, object]] = []
+            loop = asyncio.get_running_loop()
+            loop.set_debug(True)
+            loop.set_exception_handler(
+                lambda _loop, context: exception_contexts.append(context)
+            )
+            task = asyncio.create_task(
+                _run_price_choice(
+                    row=snapshot.rows[0],
+                    snapshot=snapshot,
+                    discovery=discovery,
+                    duration_seconds=18,
+                    material=object(),
+                    output=_DashboardOutput(io.StringIO()),
+                    services=LiveShadowCliDependencies(
+                        evidence_store_factory=Evidence,
+                        kalshi_transport_factory=lambda *_: transport,
+                        projector_factory=lambda _: object(),
+                        price_only_collector_factory=lambda **_: (
+                            (_ for _ in ()).throw(
+                                ShadowCollectorError(
+                                    "shadow_price_collector_invalid"
+                                )
+                            )
+                        ),
+                    ),
+                    stop=_StopState(),
+                    selected_wall_ns=GENERATED_NS + 6_000_000_000,
+                    selected_monotonic_ns=12_200_000_000,
+                )
+            )
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            task.cancel()
+            await asyncio.sleep(0)
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+            self.assertEqual(exception_contexts, [])
+
+        asyncio.run(scenario())
+        self.assertTrue(transport.closed)
+
+    def test_stale_provider_choice_forms_a_durable_price_session(self) -> None:
+        """Catches the required stale downgrade being rejected at admission."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            ProviderDiscoveryState,
+        )
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_runtime.live_shadow_cli import (
+            _ProviderDiscovery,
+            _price_session,
+        )
+
+        snapshot = resolve_hybrid_shadow_matches(
+            _hybrid_catalog(),
+            provider_state=ProviderDiscoveryState(
+                "stale",
+                "sportradar_source_stale",
+                "a" * 64,
+                GENERATED_NS + 5_000_000_000,
+            ),
+        )
+        row = snapshot.rows[0]
+        self.assertTrue(row.selectable)
+        self.assertEqual(row.status.value, "PRICE_ONLY")
+        session = _price_session(
+            row=row,
+            snapshot=snapshot,
+            discovery=_ProviderDiscovery(
+                None,
+                ProviderDiscoveryState(
+                    "stale",
+                    "sportradar_source_stale",
+                    "a" * 64,
+                    GENERATED_NS + 5_000_000_000,
+                ),
+                "/private/tmp/provider-stale.json",
+                "a" * 64,
+            ),
+            selected_wall_ns=GENERATED_NS + 6_000_000_000,
+            selected_monotonic_ns=12_200_000_000,
+        )
+        self.assertEqual(session.provider_discovery_state, "stale")
+
+    def test_external_cancellation_during_setup_fsync_is_retained(self) -> None:
+        """Catches shielded durability swallowing a later task cancellation."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _ProviderDiscovery,
+            _StopState,
+            _discovery_state,
+            _run_price_choice,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
+        row = snapshot.rows[0]
+        discovery = _ProviderDiscovery(
+            None,
+            _discovery_state(
+                "unavailable", "provider_credentials_missing"
+            ),
+        )
+        started = threading.Event()
+        release = threading.Event()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+
+            class BlockingEvidence(ShadowEvidenceStore):
+                def append_price_only_session(self, record: object) -> None:
+                    started.set()
+                    if not release.wait(timeout=2):
+                        raise AssertionError("test release timed out")
+                    super().append_price_only_session(record)
+
+            def fail_collector(**_: object) -> object:
+                raise ShadowCollectorError("shadow_price_collector_invalid")
+
+            services = LiveShadowCliDependencies(
+                evidence_store_factory=lambda: BlockingEvidence(root),
+                kalshi_transport_factory=lambda *_: object(),
+                projector_factory=lambda _: object(),
+                price_only_collector_factory=fail_collector,
+            )
+
+            async def scenario() -> None:
+                task = asyncio.create_task(
+                    _run_price_choice(
+                        row=row,
+                        snapshot=snapshot,
+                        discovery=discovery,
+                        duration_seconds=18,
+                        material=object(),
+                        output=_DashboardOutput(io.StringIO()),
+                        services=services,
+                        stop=_StopState(),
+                        selected_wall_ns=GENERATED_NS + 6_000_000_000,
+                        selected_monotonic_ns=12_200_000_000,
+                    )
+                )
+                ready = await asyncio.to_thread(started.wait, 2)
+                self.assertTrue(ready)
+                task.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+            asyncio.run(scenario())
+            ledger = next(root.glob("session-*.jsonl"))
+            rows = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [item["kind"] for item in rows],
+                ["price_only_session", "price_only_terminal"],
+            )
 
     def test_nonprovider_and_short_remainder_never_start_failover(self) -> None:
         """Catches generic prefix matching or fabricated minimum-duration runs."""
@@ -1616,6 +2392,29 @@ class LiveShadowCliTests(unittest.TestCase):
                         stop=stop,
                     )
 
+    def test_overlong_numeric_choice_is_reprompted_without_integer_conversion(self) -> None:
+        """Catches hostile digit input escaping the local invalid-choice loop."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_runtime.live_shadow_cli import (
+            _StopState,
+            _prompt_choice,
+        )
+
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
+        output = io.StringIO()
+        result = _prompt_choice(
+            snapshot,
+            stdin=io.StringIO("9" * 5_000 + "\nQ\n"),
+            stdout=output,
+            stop=_StopState(),
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(output.getvalue().count("Invalid selection"), 1)
+
     def test_tty_ready_screen_retains_safety_claim_and_unavailable_rows(self) -> None:
         """Catches the in-place refresh erasing the chooser's safety label."""
 
@@ -1879,6 +2678,365 @@ class LiveShadowCliTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_verified_blocked_resolution_append_retains_repeated_cancellation(
+        self,
+    ) -> None:
+        """Catches cancellation abandoning resolution or terminal durability."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _StopState,
+            _run_collection,
+        )
+
+        started = threading.Event()
+        release = threading.Event()
+        evidence = _ChooserEvidence()
+        ledger = _ChooserLedger()
+        kalshi_calls: list[str] = []
+
+        def append_resolution(value: object) -> None:
+            started.set()
+            if not release.wait(5):
+                raise AssertionError("test release timed out")
+            evidence.resolutions.append(value)
+
+        evidence.append_resolution = append_resolution  # type: ignore[method-assign]
+
+        async def scenario() -> None:
+            task = asyncio.create_task(
+                _run_collection(
+                    match_id=MATCH_ID,
+                    tickers=TICKERS,
+                    duration_seconds=10,
+                    poll_seconds=1,
+                    material=object(),
+                    output=_DashboardOutput(io.StringIO()),
+                    services=LiveShadowCliDependencies(
+                        evidence_store_factory=lambda: evidence,
+                        kalshi_transport_factory=lambda *_: kalshi_calls.append(
+                            "kalshi"
+                        ),
+                    ),
+                    stop=_StopState(),
+                    trial_ledger=ledger,
+                    provider=_Context(),
+                    mapping_mode="auto_matched",
+                    resolution=object(),
+                )
+            )
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+        self.assertEqual(len(evidence.resolutions), 1)
+        self.assertEqual(
+            evidence.halted,
+            [
+                {
+                    "reason": "cancelled",
+                    "code": None,
+                    "provider_match_id": MATCH_ID,
+                    "market_tickers": TICKERS,
+                    "sportradar_captures": 0,
+                    "kalshi_frames": 0,
+                }
+            ],
+        )
+        self.assertEqual(kalshi_calls, [])
+        self.assertEqual(ledger.terminals[-1]["reason"], "cancelled")
+        self.assertEqual(
+            ledger.terminals[-1]["code"],
+            "sportradar_shadow_task_cancelled",
+        )
+
+    def test_verified_setup_interrupt_and_factory_failures_close_transport(
+        self,
+    ) -> None:
+        """Catches false halt reasons and orphaned pre-collector transports."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _StopState,
+            _run_collection,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        class Transport:
+            def __init__(self, *, close_error: BaseException | None = None) -> None:
+                self.close_error = close_error
+                self.closed = 0
+
+            async def close(self) -> None:
+                self.closed += 1
+                if self.close_error is not None:
+                    raise self.close_error
+
+        def run_case(
+            error: BaseException,
+            *,
+            collector_failure: bool,
+            close_error: BaseException | None = None,
+        ) -> tuple[_ChooserEvidence, _ChooserLedger, Transport]:
+            evidence = _ChooserEvidence()
+            ledger = _ChooserLedger()
+            transport = Transport(close_error=close_error)
+
+            def raise_error(*_: object, **__: object) -> object:
+                raise error
+
+            services = LiveShadowCliDependencies(
+                evidence_store_factory=lambda: evidence,
+                kalshi_transport_factory=lambda *_: transport,
+                projector_factory=(
+                    (lambda _: object())
+                    if collector_failure
+                    else raise_error
+                ),
+                collector_factory=raise_error if collector_failure else _Collector,
+            )
+            with self.assertRaises(type(error)) as raised:
+                asyncio.run(
+                    _run_collection(
+                        match_id=MATCH_ID,
+                        tickers=TICKERS,
+                        duration_seconds=10,
+                        poll_seconds=1,
+                        material=object(),
+                        output=_DashboardOutput(io.StringIO()),
+                        services=services,
+                        stop=_StopState(),
+                        trial_ledger=ledger,
+                        provider=_Context(),
+                        mapping_mode="auto_matched",
+                        resolution=object(),
+                    )
+                )
+            self.assertIs(raised.exception, error)
+            return evidence, ledger, transport
+
+        for label, collector_failure in (("projector", False), ("collector", True)):
+            with self.subTest(label=label):
+                original = ShadowCollectorError(f"shadow_{label}_invalid")
+                evidence, ledger, transport = run_case(
+                    original,
+                    collector_failure=collector_failure,
+                    close_error=OSError("injected close failure"),
+                )
+                self.assertEqual(transport.closed, 1)
+                self.assertEqual(evidence.halted[-1]["reason"], "halted")
+                self.assertEqual(evidence.halted[-1]["code"], original.code)
+                self.assertEqual(ledger.terminals[-1]["reason"], "halted")
+
+        evidence, ledger, transport = run_case(
+            KeyboardInterrupt(), collector_failure=False
+        )
+        self.assertEqual(transport.closed, 1)
+        self.assertEqual(evidence.halted[-1]["reason"], "operator_interrupt")
+        self.assertIsNone(evidence.halted[-1]["code"])
+        self.assertEqual(ledger.terminals[-1]["reason"], "operator_interrupt")
+        self.assertEqual(
+            ledger.terminals[-1]["code"], "sportradar_operator_interrupt"
+        )
+
+    def test_verified_real_store_setup_terminals_remain_auditable(self) -> None:
+        """Catches writing setup terminals after the real store has closed."""
+
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceStore,
+            ShadowResolutionEvidence,
+        )
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _StopState,
+            _run_collection,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
+        row = snapshot.rows[0]
+
+        class Transport:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            capture = (parent / "provider.json").resolve()
+            payload = b'{"provider":"discovery"}'
+            capture.write_bytes(payload)
+            capture.chmod(0o600)
+            resolution = ShadowResolutionEvidence(
+                selected_wall_ns=GENERATED_NS + 1_000_000_000,
+                provider_match_id=MATCH_ID,
+                provider_start_wall_ns=GENERATED_NS,
+                event_ticker=row.game.event_ticker,
+                home_player_name="Player Home",
+                away_player_name="Player Away",
+                market_tickers=row.market_tickers,
+                provider_discovery_raw_path=str(capture),
+                provider_discovery_raw_sha256=sha256(payload).hexdigest(),
+                kalshi_catalog_sha256=snapshot.catalog_sha256,
+                resolver_snapshot_sha256=snapshot.resolver_snapshot_sha256,
+                resolver_rule_version="strict-name-start-v1",
+            )
+            cases = (
+                (
+                    "halted",
+                    ShadowCollectorError("shadow_projector_invalid"),
+                    "shadow_projector_invalid",
+                ),
+                ("operator_interrupt", KeyboardInterrupt(), None),
+            )
+            for reason, error, expected_code in cases:
+                with self.subTest(reason=reason):
+                    root = (parent / reason).resolve()
+                    transport = Transport()
+
+                    def fail_projector(
+                        _: object, error: BaseException = error
+                    ) -> object:
+                        raise error
+
+                    services = LiveShadowCliDependencies(
+                        evidence_store_factory=lambda root=root: (
+                            ShadowEvidenceStore(root)
+                        ),
+                        kalshi_transport_factory=lambda *_: transport,
+                        projector_factory=fail_projector,
+                    )
+                    trial_root = (parent / f"{reason}-trial").resolve()
+                    with TrialUsageLedger(trial_root) as trial_ledger:
+                        with self.assertRaises(type(error)):
+                            asyncio.run(
+                                _run_collection(
+                                    match_id=MATCH_ID,
+                                    tickers=row.market_tickers,
+                                    duration_seconds=10,
+                                    poll_seconds=1,
+                                    material=object(),
+                                    output=_DashboardOutput(io.StringIO()),
+                                    services=services,
+                                    stop=_StopState(),
+                                    trial_ledger=trial_ledger,
+                                    provider=_Context(),
+                                    mapping_mode="auto_matched",
+                                    resolution=resolution,
+                                )
+                            )
+                    with TrialUsageLedger(trial_root) as reopened_trial:
+                        self.assertEqual(
+                            reopened_trial.recovered_unclean_sessions, 0
+                        )
+                        reopened_trial.record_session_terminal(
+                            command="shadow",
+                            provider_match_id=None,
+                            reason="list_complete",
+                        )
+                    ledger = next(root.glob("session-*.jsonl"))
+                    rows = [
+                        json.loads(line)
+                        for line in ledger.read_text(encoding="utf-8").splitlines()
+                    ]
+                    self.assertEqual(rows[-1]["kind"], "auto_terminal")
+                    self.assertEqual(rows[-1]["reason"], reason)
+                    self.assertEqual(rows[-1]["code"], expected_code)
+                    self.assertTrue(transport.closed)
+
+                    # Construction audits the prior ledger before opening the
+                    # next session; completing that session proves restartability.
+                    with ShadowEvidenceStore(root) as reopened:
+                        reopened.append_resolution(resolution)
+                        reopened.ensure_halted_terminal(
+                            code="shadow_internal_error",
+                            provider_match_id=MATCH_ID,
+                            market_tickers=row.market_tickers,
+                            sportradar_captures=0,
+                            kalshi_frames=0,
+                        )
+
+    def test_verified_setup_close_retains_repeated_cancellation(self) -> None:
+        """Catches cancellation abandoning an unstarted transport close."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            _DashboardOutput,
+            _StopState,
+            _run_collection,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        evidence = _ChooserEvidence()
+        ledger = _ChooserLedger()
+
+        async def scenario() -> None:
+            close_started = asyncio.Event()
+            close_release = asyncio.Event()
+
+            class Transport:
+                def __init__(self) -> None:
+                    self.closed = False
+
+                async def close(self) -> None:
+                    close_started.set()
+                    await close_release.wait()
+                    self.closed = True
+
+            transport = Transport()
+
+            def fail_projector(_: object) -> object:
+                raise ShadowCollectorError("shadow_projector_invalid")
+
+            task = asyncio.create_task(
+                _run_collection(
+                    match_id=MATCH_ID,
+                    tickers=TICKERS,
+                    duration_seconds=10,
+                    poll_seconds=1,
+                    material=object(),
+                    output=_DashboardOutput(io.StringIO()),
+                    services=LiveShadowCliDependencies(
+                        evidence_store_factory=lambda: evidence,
+                        kalshi_transport_factory=lambda *_: transport,
+                        projector_factory=fail_projector,
+                    ),
+                    stop=_StopState(),
+                    trial_ledger=ledger,
+                    provider=_Context(),
+                    mapping_mode="auto_matched",
+                    resolution=object(),
+                )
+            )
+            await asyncio.wait_for(close_started.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            close_release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(transport.closed)
+
+        asyncio.run(scenario())
+        self.assertEqual(len(evidence.halted), 1)
+        self.assertEqual(evidence.halted[0]["reason"], "halted")
+        self.assertEqual(evidence.halted[0]["code"], "shadow_projector_invalid")
+        self.assertEqual(len(ledger.terminals), 1)
 
     def test_quota_preflight_refuses_before_any_network_capable_factory(self) -> None:
         """Catches starting a partial run that cannot fit the trial budget."""

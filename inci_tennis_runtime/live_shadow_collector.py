@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextvars import copy_context
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -479,21 +480,35 @@ async def _durable_to_thread_result(
 ) -> tuple[object, asyncio.CancelledError | None]:
     """Return a durable result before propagating retained cancellation."""
 
-    worker = asyncio.create_task(
-        asyncio.to_thread(partial(operation, *args, **kwargs))
+    loop = asyncio.get_running_loop()
+    completed = asyncio.Event()
+    outcome: list[tuple[object | None, BaseException | None]] = []
+    call = partial(operation, *args, **kwargs)
+    worker = loop.run_in_executor(
+        None,
+        partial(copy_context().run, call),
     )
-    cancellation: asyncio.CancelledError | None = None
-    while True:
+
+    def retain_outcome(future: asyncio.Future[object]) -> None:
         try:
-            result = await asyncio.shield(worker)
-            break
+            outcome.append((future.result(), None))
+        except BaseException as error:
+            outcome.append((None, error))
+        completed.set()
+
+    worker.add_done_callback(retain_outcome)
+    cancellation: asyncio.CancelledError | None = None
+    while not completed.is_set():
+        try:
+            await completed.wait()
         except asyncio.CancelledError as error:
             if cancellation is None:
                 cancellation = error
-        except Exception as error:
-            if cancellation is not None:
-                raise cancellation from error
-            raise
+    result, error = outcome[0]
+    if error is not None:
+        if cancellation is not None:
+            raise cancellation from error
+        raise error
     if cancellation is not None:
         return result, cancellation
     return result, None
@@ -504,17 +519,32 @@ async def _shielded_task_result(
 ) -> tuple[object | None, asyncio.CancelledError | None, Exception | None]:
     """Await a cleanup task to completion while retaining caller cancellation."""
 
-    cancellation: asyncio.CancelledError | None = None
-    while True:
+    completed = asyncio.Event()
+    outcome: list[tuple[object | None, BaseException | None]] = []
+
+    def retain_outcome(future: asyncio.Future[object]) -> None:
         try:
-            return await asyncio.shield(task), cancellation, None
+            outcome.append((future.result(), None))
+        except BaseException as error:
+            outcome.append((None, error))
+        completed.set()
+
+    task.add_done_callback(retain_outcome)
+    cancellation: asyncio.CancelledError | None = None
+    while not completed.is_set():
+        try:
+            await completed.wait()
         except asyncio.CancelledError as error:
             if cancellation is None:
                 cancellation = error
-            if task.cancelled():
-                return None, cancellation, None
-        except Exception as error:
-            return None, cancellation, error
+    result, error = outcome[0]
+    if isinstance(error, asyncio.CancelledError):
+        return None, cancellation or error, None
+    if isinstance(error, Exception):
+        return None, cancellation, error
+    if error is not None:
+        raise error
+    return result, cancellation, None
 
 
 def _terminal_status(

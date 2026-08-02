@@ -20,6 +20,7 @@ from inci_tennis_adapters.shadow_discovery_contracts import (
     HybridChooserSnapshot,
     HybridMatchRow,
     HybridStatus,
+    KalshiCompetitionProvenance,
     KalshiShadowCatalogSnapshot,
     KalshiShadowGame as HybridKalshiShadowGame,
     KalshiShadowMarket as HybridKalshiShadowMarket,
@@ -34,6 +35,7 @@ from inci_tennis_adapters.shadow_provider_coverage import (
 
 _MAX_NAME_BYTES = 256
 _MAX_TITLE_BYTES = 512
+_MAXIMUM_HYBRID_INPUT_ROWS = 1_024
 _MAX_SIGNED_64 = 9_223_372_036_854_775_807
 _TICKER = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
 _DIGEST = pattern_compile(r"[0-9a-f]{64}\Z")
@@ -125,6 +127,16 @@ def _safe_title(value: object) -> bool:
         return len(value.encode("utf-8")) <= _MAX_TITLE_BYTES
     except UnicodeEncodeError:
         return False
+
+
+def _valid_identity_text(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and len(value) <= 256
+        and value == value.strip()
+        and not any(ord(character) < 32 for character in value)
+    )
 
 
 def _positive_wall_ns(value: object) -> bool:
@@ -515,11 +527,40 @@ def _hybrid_game_candidate(game: object) -> _HybridGameCandidate | None:
     ):
         return None
     first, second = game.markets
+    provenance = game.provenance
     if type(first) is not HybridKalshiShadowMarket or type(second) is not HybridKalshiShadowMarket:
+        return None
+    if (
+        type(provenance) is not KalshiCompetitionProvenance
+        or any(
+            not _valid_identity_text(value)
+            for value in (
+                provenance.sport,
+                provenance.scope,
+                provenance.series_ticker,
+                provenance.milestone_id,
+            )
+        )
+        or type(provenance.queried_competitions) is not tuple
+        or not provenance.queried_competitions
+        or any(
+            not _valid_identity_text(value)
+            for value in provenance.queried_competitions
+        )
+        or provenance.queried_competitions
+        != tuple(sorted(set(provenance.queried_competitions)))
+        or provenance.milestone_league is not None
+        and not _valid_identity_text(provenance.milestone_league)
+    ):
         return None
     if not _safe_ticker(first.ticker) or not _safe_ticker(second.ticker):
         return None
     if first.ticker == second.ticker:
+        return None
+    if (
+        not _valid_identity_text(first.yes_player_name)
+        or not _valid_identity_text(second.yes_player_name)
+    ):
         return None
     try:
         first_name = normalize_player_name(first.yes_player_name)
@@ -544,6 +585,11 @@ def _hybrid_provider_candidate(match: object) -> _HybridProviderCandidate | None
     if not _positive_wall_ns(score.start_wall_ns) or _provider_identity(score.provider_match_id) == "provider_identity_invalid":
         return None
     if type(score.status) is not str or type(score.match_status) is not str:
+        return None
+    if (
+        not _valid_identity_text(score.home_name)
+        or not _valid_identity_text(score.away_name)
+    ):
         return None
     try:
         home = normalize_player_name(score.home_name)
@@ -753,6 +799,16 @@ def resolve_hybrid_shadow_matches(
         or not _valid_digest(provider.payload_sha256)
     ):
         raise ValueError("hybrid_shadow_resolver_input_invalid")
+    if (
+        len(catalog.games) + len(catalog.excluded)
+        > _MAXIMUM_HYBRID_INPUT_ROWS
+        or (
+            provider is not None
+            and len(provider.matches) + len(provider.diagnostics)
+            > _MAXIMUM_HYBRID_INPUT_ROWS
+        )
+    ):
+        raise ValueError("hybrid_shadow_resolver_capacity_exceeded")
     if provider_state is None:
         provider_state = _default_provider_state(provider)
     if (

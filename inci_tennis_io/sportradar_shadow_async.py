@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from contextvars import copy_context
+from functools import partial
 import json
 from pathlib import Path
 from re import compile as pattern_compile
 import time
-from typing import Protocol
+from typing import cast, Protocol, TypeVar
 
 from inci_tennis_io.sportradar_trial_transport import (
     SportradarTrialObserverError,
@@ -30,6 +32,7 @@ _TOTAL_TIMEOUT_SECONDS: float = 15
 _TOTAL_TIMEOUT_NS = 15_000_000_000
 _CONNECT_TIMEOUT_SECONDS: float = 3
 _READ_TIMEOUT_SECONDS: float = 10
+_DurableResult = TypeVar("_DurableResult")
 
 
 def _fail(code: str) -> None:
@@ -197,6 +200,46 @@ def _persist_success(
     return raw_path
 
 
+async def _durable_to_thread(
+    operation: Callable[..., _DurableResult],
+    /,
+    *args: object,
+    **kwargs: object,
+) -> tuple[
+    _DurableResult | None,
+    asyncio.CancelledError | None,
+    BaseException | None,
+]:
+    """Retrieve one worker outcome despite any number of caller cancels."""
+
+    loop = asyncio.get_running_loop()
+    completed = asyncio.Event()
+    outcome: list[tuple[_DurableResult | None, BaseException | None]] = []
+    call = partial(operation, *args, **kwargs)
+    worker = loop.run_in_executor(
+        None,
+        partial(copy_context().run, call),
+    )
+
+    def retain_outcome(future: asyncio.Future[_DurableResult]) -> None:
+        try:
+            outcome.append((future.result(), None))
+        except BaseException as error:
+            outcome.append((None, error))
+        completed.set()
+
+    worker.add_done_callback(retain_outcome)
+    cancellation: asyncio.CancelledError | None = None
+    while not completed.is_set():
+        try:
+            await completed.wait()
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+    result, error = outcome[0]
+    return result, cancellation, error
+
+
 class SportradarShadowAsyncTransport:
     """GET-only async transport with durable trial-attempt disposition."""
 
@@ -326,20 +369,31 @@ class SportradarShadowAsyncTransport:
                     raw_path=raw_path,
                     payload=payload,
                 )
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as error:
                 if not disposition_recorded:
-                    await self._record_interrupted(reservation)
-                raise
+                    cancellation = await self._record_interrupted(
+                        reservation,
+                        error,
+                    )
+                    raise cancellation or error
+                raise error
             except SportradarTrialObserverError as error:
                 if not disposition_recorded:
-                    await self._record_failed(reservation, error.code)
+                    cancellation = await self._record_failed(
+                        reservation,
+                        error.code,
+                    )
+                    if cancellation is not None:
+                        raise cancellation from error
                 raise
-            except Exception:
+            except Exception as error:
                 if not disposition_recorded:
-                    await self._record_failed(
+                    cancellation = await self._record_failed(
                         reservation,
                         "sportradar_transport_unavailable",
                     )
+                    if cancellation is not None:
+                        raise cancellation from error
                 _fail("sportradar_transport_unavailable")
 
     def _enforce_deadline(self, started_monotonic_ns: int) -> None:
@@ -427,16 +481,22 @@ class SportradarShadowAsyncTransport:
             _fail("sportradar_transport_unavailable")
 
     async def _reserve(self, route: str) -> TrialAttemptReservation:
-        task = asyncio.create_task(asyncio.to_thread(self._ledger.reserve, route))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            try:
-                reservation = await asyncio.shield(task)
-            except Exception:
-                raise
-            await self._record_interrupted(reservation)
-            raise
+        result, cancellation, error = await _durable_to_thread(
+            self._ledger.reserve,
+            route,
+        )
+        if error is not None:
+            if cancellation is not None:
+                raise cancellation from error
+            raise error
+        reservation = cast(TrialAttemptReservation, result)
+        if cancellation is not None:
+            retained = await self._record_interrupted(
+                reservation,
+                cancellation,
+            )
+            raise retained or cancellation
+        return reservation
 
     async def _persist(
         self,
@@ -444,31 +504,23 @@ class SportradarShadowAsyncTransport:
         payload: bytes,
         captured_wall_ns: int,
     ) -> Path:
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                _persist_success,
-                self._ledger,
-                reservation,
-                payload,
-                captured_wall_ns,
-            )
+        result, cancellation, error = await _durable_to_thread(
+            _persist_success,
+            self._ledger,
+            reservation,
+            payload,
+            captured_wall_ns,
         )
-        cancellation: asyncio.CancelledError | None = None
-        while True:
-            try:
-                raw_path = await asyncio.shield(task)
-                break
-            except asyncio.CancelledError as error:
-                if cancellation is None:
-                    cancellation = error
-            except Exception as error:
-                if cancellation is not None:
-                    await self._record_failed(
-                        reservation,
-                        "sportradar_transport_unavailable",
-                    )
-                    raise cancellation from error
-                raise
+        if error is not None:
+            if cancellation is not None:
+                retained = await self._record_failed(
+                    reservation,
+                    "sportradar_transport_unavailable",
+                    cancellation,
+                )
+                raise retained or cancellation from error
+            raise error
+        raw_path = cast(Path, result)
         self._completed_captures += 1
         if cancellation is not None:
             raise cancellation
@@ -477,39 +529,52 @@ class SportradarShadowAsyncTransport:
     async def _record_interrupted(
         self,
         reservation: TrialAttemptReservation,
-    ) -> None:
-        await asyncio.shield(
-            asyncio.to_thread(
-                self._ledger.record_interrupted_outcome,
-                reservation,
-            )
+        retained_cancellation: asyncio.CancelledError | None = None,
+    ) -> asyncio.CancelledError | None:
+        _, cancellation, error = await _durable_to_thread(
+            self._ledger.record_interrupted_outcome,
+            reservation,
         )
+        cancellation = retained_cancellation or cancellation
+        if error is not None:
+            if cancellation is not None:
+                raise cancellation from error
+            raise error
+        return cancellation
 
     async def _record_failed(
         self,
         reservation: TrialAttemptReservation,
         code: str,
-    ) -> None:
-        await asyncio.shield(
-            asyncio.to_thread(
-                self._ledger.record_failed_or_uncertain_outcome,
-                reservation,
-                code=code,
-            )
+        retained_cancellation: asyncio.CancelledError | None = None,
+    ) -> asyncio.CancelledError | None:
+        _, cancellation, error = await _durable_to_thread(
+            self._ledger.record_failed_or_uncertain_outcome,
+            reservation,
+            code=code,
         )
+        cancellation = retained_cancellation or cancellation
+        if error is not None:
+            if cancellation is not None:
+                raise cancellation from error
+            raise error
+        return cancellation
 
     async def close(self) -> None:
         async with self._lock:
-            if self._closed:
+            if self._closed and self._session is None:
                 return
             self._closed = True
             session = self._session
+            if session is None:
+                return
+            try:
+                await session.close()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _fail("sportradar_transport_cleanup_failed")
             self._session = None
-            if session is not None:
-                try:
-                    await session.close()
-                except Exception:
-                    pass
 
     async def __aenter__(self) -> SportradarShadowAsyncTransport:
         if self._closed:

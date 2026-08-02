@@ -44,8 +44,17 @@ def _write_complete(stream: object, text: str) -> bool:
             return False
         stream.flush()  # type: ignore[attr-defined]
         return True
+    except KeyboardInterrupt:
+        raise
     except BaseException:
         return False
+
+
+def _write_best_effort(stream: object, text: str) -> None:
+    try:
+        _write_complete(stream, text)
+    except BaseException:
+        pass
 
 
 class _Parser(argparse.ArgumentParser):
@@ -116,7 +125,7 @@ def _safe_code(error: BaseException) -> str:
 
 
 def _halt(error_stream: object, error: BaseException) -> int:
-    _write_complete(error_stream, f"HALTED: {_safe_code(error)}\n")
+    _write_best_effort(error_stream, f"HALTED: {_safe_code(error)}\n")
     return 1
 
 
@@ -134,27 +143,41 @@ def run_cli(
     except _HelpRequested:
         return 0
     except _UsageError:
-        _write_complete(error_stream, "ERROR: invalid command arguments\n")
+        _write_best_effort(error_stream, "ERROR: invalid command arguments\n")
         return 2
     except KeyboardInterrupt:
-        _write_complete(error_stream, "STOPPED: operator interrupt\n")
+        _write_best_effort(error_stream, "STOPPED: operator interrupt\n")
         return 130
     except BaseException as error:
         return _halt(error_stream, error)
+    transport: object | None = None
     try:
         services = ShadowSettlementCliDependencies() if dependencies is None else dependencies
         transport = services.transport_factory()
-        store = services.store_factory()
-        clocks = services.clocks_factory()
-        result = services.reconcile(session_path, transport, store, clocks)
-        state = result.state  # type: ignore[attr-defined]
-        if type(state) is not str or state not in _STATES:
-            raise RuntimeError("shadow_settlement_unavailable")
+        body_error: BaseException | None = None
+        try:
+            store = services.store_factory()
+            clocks = services.clocks_factory()
+            result = services.reconcile(session_path, transport, store, clocks)
+            state = result.state  # type: ignore[attr-defined]
+            if type(state) is not str or state not in _STATES:
+                raise RuntimeError("shadow_settlement_unavailable")
+        except BaseException as error:
+            body_error = error
+            raise
+        finally:
+            try:
+                close = getattr(transport, "close", None)
+                if callable(close):
+                    close()
+            except BaseException:
+                if body_error is None:
+                    raise
         if not _write_complete(output_stream, state + "\n"):
             raise RuntimeError("shadow_settlement_unavailable")
         return 0
     except KeyboardInterrupt:
-        _write_complete(error_stream, "STOPPED: operator interrupt\n")
+        _write_best_effort(error_stream, "STOPPED: operator interrupt\n")
         return 130
     except BaseException as error:
         return _halt(error_stream, error)

@@ -90,6 +90,7 @@ from .shadow_evidence import (
     shadow_monotonic_ns,
     shadow_pause,
     shadow_wall_ns,
+    validate_price_only_session_evidence,
 )
 from .sportradar_shadow_async import SportradarShadowAsyncTransport
 
@@ -173,5 +174,6 @@ __all__ = (
     "shadow_monotonic_ns",
     "shadow_pause",
     "shadow_wall_ns",
+    "validate_price_only_session_evidence",
     "SportradarShadowAsyncTransport",
 )

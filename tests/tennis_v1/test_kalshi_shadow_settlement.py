@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 
 _ORIGIN = "https://external-api.kalshi.com"
@@ -55,16 +56,28 @@ class _Response:
 
 
 class _Session:
-    def __init__(self, responses: list[_Response]) -> None:
+    def __init__(
+        self,
+        responses: list[_Response],
+        *,
+        close_error: BaseException | None = None,
+    ) -> None:
         self.trust_env = True
         self.responses = list(responses)
         self.calls: list[tuple[str, str, dict[str, object]]] = []
+        self.close_count = 0
+        self.close_error = close_error
 
     def request(self, method: str, url: str, **kwargs: object) -> _Response:
         self.calls.append((method, url, kwargs))
         if not self.responses:
             raise AssertionError("unexpected network request")
         return self.responses.pop(0)
+
+    def close(self) -> None:
+        self.close_count += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 def _transport(session: _Session, sleeps: list[float] | None = None):
@@ -76,7 +89,7 @@ _FORBIDDEN_IMPORT_TERMS = frozenset({
     "portfolio", "order", "trade", "account", "credential", "provider",
     "strategy", "signal", "executor", "position", "fill", "fee", "pnl",
 })
-_REVIEWED_TRANSPORT_AST_SHA256 = "00128b2f077dae03c0a62a4c28fa60cd2f704899c50852b13a895c4c6dd7b954"
+_REVIEWED_TRANSPORT_AST_SHA256 = "d08a3c297aa901a98b47f57c15f29259475bb1395b9879f07b2d7d80f33462e3"
 
 
 def _assert_authority_free_ast(tree: ast.AST) -> None:
@@ -99,6 +112,32 @@ def _assert_reviewed_transport_ast(source: str) -> None:
 
 
 class KalshiShadowSettlementTransportTests(unittest.TestCase):
+    def test_settlement_session_close_is_idempotent_loud_and_terminal(self) -> None:
+        """Catches leaking the owned Requests session or reusing it after shutdown."""
+
+        session = _Session([])
+        transport = _transport(session)
+        transport.close()
+        transport.close()
+        self.assertEqual(session.close_count, 1)
+        with self.assertRaisesRegex(
+            ValueError, "^kalshi_settlement_transport_invalid$"
+        ):
+            transport.get_market_result(_TICKER)
+        self.assertEqual(session.calls, [])
+
+        failing = _Session(
+            [], close_error=OSError("private close detail")
+        )
+        retryable = _transport(failing)
+        with self.assertRaisesRegex(
+            ValueError, "^kalshi_settlement_session_close_invalid$"
+        ):
+            retryable.close()
+        failing.close_error = None
+        retryable.close()
+        self.assertEqual(failing.close_count, 2)
+
     def test_current_200_is_authoritative_streamed_and_preserved_exactly(self) -> None:
         """Catches changing the endpoint, request controls, or raw evidence bytes."""
         response = _Response({"market": _market()})
@@ -147,6 +186,29 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
             _transport(_Session(responses), sleeps).get_market_result(_TICKER)
         self.assertEqual(sleeps, [0.25, 0.5, 1.0, 2.0])
         self.assertEqual([response.close_count for response in responses], [1] * 5)
+
+    def test_reconciliation_deadline_is_enforced_between_streamed_chunks(self) -> None:
+        """Catches a drip-fed public response escaping the total deadline."""
+
+        from inci_tennis_io import kalshi_shadow_settlement as settlement
+
+        response = _Response(chunks=[b'{"market":', b'{} }'])
+        transport = _transport(_Session([response]))
+        clock = {"value": 0.0}
+
+        def advancing_clock() -> float:
+            value = clock["value"]
+            clock["value"] += 0.3
+            return value
+
+        transport._monotonic = advancing_clock
+        with patch.object(
+            settlement, "_MAXIMUM_RECONCILIATION_SECONDS", 1.0
+        ), self.assertRaisesRegex(
+            ValueError, "^kalshi_settlement_deadline_exceeded$"
+        ):
+            transport.get_market_result(_TICKER)
+        self.assertEqual(response.close_count, 1)
 
     def test_primary_error_wins_over_close_error_and_successful_close_error_fails(self) -> None:
         """Catches close failures masking primary evidence errors or being ignored."""
@@ -201,6 +263,20 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
             self.assertEqual(len(session.calls), 1)
             self.assertEqual(response.close_count, 1)
 
+    def test_overlong_content_length_is_rejected_with_a_stable_boundary_code(self) -> None:
+        """Catches Python's integer digit limit escaping as a raw exception."""
+
+        response = _Response(
+            {"market": _market()},
+            headers={"Content-Length": "9" * 5_000},
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "^kalshi_settlement_headers_invalid$",
+        ):
+            _transport(_Session([response])).get_market_result(_TICKER)
+        self.assertEqual(response.close_count, 1)
+
     def test_rejects_utf8_nonfinite_nested_duplicates_bad_wrapper_and_identity_drift(self) -> None:
         """Catches JSON ambiguity or an unrelated Market being accepted as requested evidence."""
         bodies = (
@@ -226,7 +302,10 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
         bad = (
             _market(settlement_ts="20260801T183000Z"), _market(settlement_ts="2026-08-01T18:30:00+00:00"),
             _market(settlement_ts="2026-02-30T18:30:00Z"), _market(settlement_value_dollars="01.0"),
-            _market(settlement_value_dollars="1e0"), _market(result=1),
+            _market(settlement_value_dollars="1e0"),
+            _market(settlement_value_dollars="1.٠"),
+            _market(settlement_value_dollars="1.०"),
+            _market(result=1),
             _market(status="determined", result=None, settlement_value_dollars=0, settlement_ts=None),
         )
         for market in bad:

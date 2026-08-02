@@ -22,6 +22,13 @@ import uuid
 
 _MAXIMUM_KALSHI_FRAME_BYTES = 1_048_576
 _MAXIMUM_SPORTRADAR_CAPTURE_BYTES = 8_388_608
+_MAXIMUM_LEDGER_BYTES = 67_108_864
+_MAXIMUM_AUDIT_INVENTORY_ENTRIES = 100_000
+_MAXIMUM_AUDIT_BYTES = 1_073_741_824
+_MAXIMUM_SESSION_RAW_BYTES = 536_870_912
+_AUDIT_SESSION_METADATA_RESERVE_BYTES = 4_096
+_AUDIT_SESSION_METADATA_RESERVE_ENTRIES = 4
+_TERMINAL_LEDGER_RESERVE_BYTES = 16_384
 _ZERO_DIGEST = "0" * 64
 _COMMIT_WATERMARK_SCHEMA = "inci-tennis-shadow-commit-watermark-v1"
 _PROTOCOL_EPOCH_SCHEMA = "inci-tennis-shadow-protocol-epoch-v1"
@@ -110,6 +117,9 @@ _PRICE_ONLY_OBSERVATION_REASONS = frozenset(
     }
 )
 _INITIAL_BOOK_STATES = frozenset({"empty", "one_sided", "two_sided"})
+_PROVIDER_DISCOVERY_STATES = frozenset(
+    {"available", "unavailable", "error", "stale"}
+)
 _PRICE_ONLY_TERMINAL_REASONS = frozenset(
     {"duration_elapsed", "operator_interrupt", "cancelled", "halted"}
 )
@@ -654,12 +664,31 @@ class AuditedShadowSettlementSource:
 @dataclass(frozen=True, slots=True)
 class _StableAuditFile:
     path: Path
-    descriptor: int
+    descriptor: int | None
     identity: tuple[int, int]
     digest: str
+    size: int
     maximum_bytes: int
     directory_fd: int | None = None
     entry_name: str | None = None
+
+
+@dataclass(slots=True)
+class _AuditCapacity:
+    entries: int = 0
+    bytes: int = 0
+
+    def consume(self, info: os.stat_result) -> None:
+        entries = self.entries + 1
+        bytes_used = self.bytes + info.st_size
+        if (
+            info.st_size < 0
+            or entries > _MAXIMUM_AUDIT_INVENTORY_ENTRIES
+            or bytes_used > _MAXIMUM_AUDIT_BYTES
+        ):
+            _fail("shadow_evidence_capacity_exceeded")
+        self.entries = entries
+        self.bytes = bytes_used
 
 
 class _ShadowSettlementSourceAuditLease:
@@ -766,12 +795,25 @@ class _ShadowSettlementSourceAuditLease:
                 or stat.S_IMODE(named_lock.st_mode) != 0o600
                 or _file_identity(named_lock) != self._lock_identity
                 or _file_identity(held_lock) != self._lock_identity
-                or _descriptor_digest(self._lock_fd, 67_108_864)
+                or _descriptor_digest(self._lock_fd, _MAXIMUM_LEDGER_BYTES)
                 != self._lock_digest
             ):
                 _fail("shadow_evidence_source_changed")
-            root_names = frozenset(os.listdir(root_fd))
-            raw_names = frozenset(os.listdir(raw_fd))
+            root_inventory = _bounded_directory_names(
+                root_fd,
+                remaining_entries=_MAXIMUM_AUDIT_INVENTORY_ENTRIES,
+                code="shadow_evidence_source_changed",
+            )
+            raw_inventory = _bounded_directory_names(
+                raw_fd,
+                remaining_entries=(
+                    _MAXIMUM_AUDIT_INVENTORY_ENTRIES
+                    - len(root_inventory)
+                ),
+                code="shadow_evidence_source_changed",
+            )
+            root_names = frozenset(root_inventory)
+            raw_names = frozenset(raw_inventory)
             expected_root_names = frozenset(
                 entry.entry_name
                 for entry in self._files
@@ -821,11 +863,12 @@ class _ShadowSettlementSourceAuditLease:
                     if primary is None:
                         primary = error
         for entry in self._files:
-            try:
-                os.close(entry.descriptor)
-            except BaseException as error:
-                if primary is None:
-                    primary = error
+            if entry.descriptor is not None:
+                try:
+                    os.close(entry.descriptor)
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
         try:
             os.close(lock_fd)
         except BaseException as error:
@@ -1082,34 +1125,54 @@ def _verify_directory_entry(
 
 
 def _verify_stable_audit_file(entry: _StableAuditFile) -> None:
+    descriptor: int | None = None
+    verified = False
     try:
-        if entry.directory_fd is None:
-            named = entry.path.lstat()
-        else:
-            if entry.entry_name is None:
+        try:
+            if entry.directory_fd is None:
+                named = entry.path.lstat()
+                descriptor = _open_existing_private_readonly_file(
+                    entry.path,
+                    code="shadow_evidence_source_changed",
+                )
+            else:
+                if entry.entry_name is None:
+                    _fail("shadow_evidence_source_changed")
+                named = os.stat(
+                    entry.entry_name,
+                    dir_fd=entry.directory_fd,
+                    follow_symlinks=False,
+                )
+                descriptor = _open_existing_private_readonly_file_at(
+                    entry.directory_fd,
+                    entry.entry_name,
+                    code="shadow_evidence_source_changed",
+                )
+            held = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(named.st_mode)
+                or stat.S_ISLNK(named.st_mode)
+                or named.st_uid != os.geteuid()
+                or named.st_nlink != 1
+                or stat.S_IMODE(named.st_mode) != 0o600
+                or _file_identity(named) != entry.identity
+                or _file_identity(held) != entry.identity
+                or _descriptor_digest(descriptor, entry.maximum_bytes)
+                != entry.digest
+            ):
                 _fail("shadow_evidence_source_changed")
-            named = os.stat(
-                entry.entry_name,
-                dir_fd=entry.directory_fd,
-                follow_symlinks=False,
-            )
-        held = os.fstat(entry.descriptor)
-    except ShadowEvidenceError:
-        raise
-    except OSError:
-        _fail("shadow_evidence_source_changed")
-    if (
-        not stat.S_ISREG(named.st_mode)
-        or stat.S_ISLNK(named.st_mode)
-        or named.st_uid != os.geteuid()
-        or named.st_nlink != 1
-        or stat.S_IMODE(named.st_mode) != 0o600
-        or _file_identity(named) != entry.identity
-        or _file_identity(held) != entry.identity
-        or _descriptor_digest(entry.descriptor, entry.maximum_bytes)
-        != entry.digest
-    ):
-        _fail("shadow_evidence_source_changed")
+            verified = True
+        except ShadowEvidenceError:
+            raise
+        except OSError:
+            _fail("shadow_evidence_source_changed")
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                if verified:
+                    _fail("shadow_evidence_source_changed")
 
 
 def _write_all(descriptor: int, payload: bytes, code: str) -> None:
@@ -1488,6 +1551,7 @@ def _validate_price_only_session(value: object) -> PriceOnlySessionEvidence:
         or value.catalog_milestone_league is not None
         and not _valid_identity_text(value.catalog_milestone_league)
         or value.initial_book_state not in _INITIAL_BOOK_STATES
+        or value.provider_discovery_state not in _PROVIDER_DISCOVERY_STATES
         or not _valid_price_only_initial_books(value)
         or (
             not all(item is None for item in raw_reference)
@@ -1519,6 +1583,14 @@ def _validate_price_only_session(value: object) -> PriceOnlySessionEvidence:
     ):
         _fail("shadow_evidence_row_invalid")
     return value
+
+
+def validate_price_only_session_evidence(
+    value: object,
+) -> PriceOnlySessionEvidence:
+    """Validate the complete durable price-only admission contract."""
+
+    return _validate_price_only_session(value)
 
 
 def _validate_price_only_observation(
@@ -1643,6 +1715,62 @@ def _canonical_session_id(value: object) -> str | None:
     except (AttributeError, TypeError, ValueError):
         return None
     return value if value == str(parsed) else None
+
+
+def _valid_root_audit_name(name: object) -> bool:
+    if name in {"raw", "shadow.lock"}:
+        return True
+    if type(name) is not str or not name.startswith("session-"):
+        return False
+    for suffix in (".jsonl", ".pending", ".commit", ".epoch"):
+        if name.endswith(suffix):
+            session_id = name[len("session-") : -len(suffix)]
+            return (
+                name == f"session-{session_id}{suffix}"
+                and _canonical_session_id(session_id) is not None
+            )
+    return False
+
+
+def _valid_raw_audit_name(name: object) -> bool:
+    if (
+        type(name) is not str
+        or not name.endswith("-kalshi.bin")
+        or len(name) != 36 + 1 + 8 + len("-kalshi.bin")
+    ):
+        return False
+    session_id = name[:36]
+    separator = name[36]
+    capture_number = name[37:45]
+    return (
+        separator == "-"
+        and _canonical_session_id(session_id) is not None
+        and capture_number.isascii()
+        and capture_number.isdecimal()
+        and capture_number != "00000000"
+    )
+
+
+def _bounded_directory_names(
+    directory: Path | int,
+    *,
+    remaining_entries: int,
+    code: str,
+) -> tuple[str, ...]:
+    if type(remaining_entries) is not int or remaining_entries < 0:
+        _fail("shadow_evidence_capacity_exceeded")
+    names: list[str] = []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if len(names) >= remaining_entries:
+                    _fail("shadow_evidence_capacity_exceeded")
+                names.append(entry.name)
+    except ShadowEvidenceError:
+        raise
+    except OSError:
+        _fail(code)
+    return tuple(names)
 
 
 def _stored_observation(row: dict[str, object]) -> ShadowEvidenceObservation:
@@ -1985,6 +2113,21 @@ class ShadowEvidenceStore:
             _fail("shadow_evidence_state_unavailable")
         try:
             self._audit_prior_sessions()
+            self._session_reference_inventory: dict[
+                Path, tuple[str, int]
+            ] = {}
+            self._session_validated_references: dict[Path, str] = {}
+            self._session_reference_bytes = 0
+            self._session_audit_byte_limit = max(
+                0,
+                self._audit_bytes_remaining
+                - _AUDIT_SESSION_METADATA_RESERVE_BYTES,
+            )
+            self._session_reference_file_limit = max(
+                0,
+                self._audit_entries_remaining
+                - _AUDIT_SESSION_METADATA_RESERVE_ENTRIES,
+            )
             self._ledger_fd = _open_private_file(
                 self.ledger_path,
                 create=True,
@@ -2098,6 +2241,62 @@ class ShadowEvidenceStore:
             self._poisoned = True
             raise
 
+    def _prepare_audit_inventory(self) -> None:
+        root_names = _bounded_directory_names(
+            self.state_root,
+            remaining_entries=_MAXIMUM_AUDIT_INVENTORY_ENTRIES,
+            code="shadow_evidence_state_unavailable",
+        )
+        raw_names = _bounded_directory_names(
+            self.raw_root,
+            remaining_entries=(
+                _MAXIMUM_AUDIT_INVENTORY_ENTRIES - len(root_names)
+            ),
+            code="shadow_evidence_state_unavailable",
+        )
+        if any(not _valid_root_audit_name(name) for name in root_names):
+            _fail("shadow_evidence_prior_corrupt")
+        if any(not _valid_raw_audit_name(name) for name in raw_names):
+            _fail("shadow_evidence_prior_corrupt")
+        self._audit_root_names = root_names
+        self._audit_raw_names = raw_names
+        self._audit_entries_remaining = (
+            _MAXIMUM_AUDIT_INVENTORY_ENTRIES
+            - len(root_names)
+            - len(raw_names)
+        )
+        self._audit_bytes_remaining = _MAXIMUM_AUDIT_BYTES
+
+    def _read_audit_payload(
+        self,
+        path: Path,
+        *,
+        maximum_bytes: int,
+    ) -> bytes:
+        try:
+            info = path.lstat()
+        except OSError:
+            _fail("shadow_evidence_prior_corrupt")
+        remaining = getattr(self, "_audit_bytes_remaining", None)
+        if (
+            type(remaining) is not int
+            or remaining < 0
+            or info.st_size < 0
+            or info.st_size > remaining
+        ):
+            _fail("shadow_evidence_capacity_exceeded")
+        payload = _validate_existing_regular_file(
+            path,
+            expected_mode=0o600,
+            code="shadow_evidence_prior_corrupt",
+            read_payload=True,
+            maximum_bytes=min(maximum_bytes, remaining),
+        )
+        if payload is None or len(payload) > remaining:
+            _fail("shadow_evidence_capacity_exceeded")
+        self._audit_bytes_remaining = remaining - len(payload)
+        return payload
+
     def _audit_watermark(
         self, path: Path, session_id: str
     ) -> tuple[int, str]:
@@ -2107,13 +2306,7 @@ class ShadowEvidenceStore:
             _fail("shadow_evidence_prior_corrupt")
         if stat.S_ISLNK(info.st_mode):
             _fail("shadow_evidence_prior_corrupt")
-        payload = _validate_existing_regular_file(
-            path,
-            expected_mode=0o600,
-            code="shadow_evidence_prior_corrupt",
-            read_payload=True,
-            maximum_bytes=512,
-        )
+        payload = self._read_audit_payload(path, maximum_bytes=512)
         if payload is None or not payload.endswith(b"\n"):
             _fail("shadow_evidence_prior_corrupt")
         try:
@@ -2149,13 +2342,7 @@ class ShadowEvidenceStore:
             _fail("shadow_evidence_prior_corrupt")
         if stat.S_ISLNK(info.st_mode):
             _fail("shadow_evidence_prior_corrupt")
-        payload = _validate_existing_regular_file(
-            path,
-            expected_mode=0o600,
-            code="shadow_evidence_prior_corrupt",
-            read_payload=True,
-            maximum_bytes=512,
-        )
+        payload = self._read_audit_payload(path, maximum_bytes=512)
         if payload is None or not payload.endswith(b"\n"):
             _fail("shadow_evidence_prior_corrupt")
         try:
@@ -2186,10 +2373,10 @@ class ShadowEvidenceStore:
     ) -> tuple[dict[str, tuple[int, str]], set[str]]:
         commits: dict[str, tuple[int, str]] = {}
         protocol_epochs: set[str] = set()
-        try:
-            entries = sorted(self.state_root.iterdir(), key=lambda path: path.name)
-        except OSError:
-            _fail("shadow_evidence_state_unavailable")
+        entries = tuple(
+            self.state_root / name
+            for name in sorted(self._audit_root_names)
+        )
         for path in entries:
             name = path.name
             if name in {"raw", "shadow.lock"}:
@@ -2237,14 +2424,16 @@ class ShadowEvidenceStore:
         return commits, protocol_epochs
 
     def _audit_prior_sessions(self) -> None:
+        self._prepare_audit_inventory()
         receipts: dict[str, str] = {}
         commits, protocol_epochs = self._audit_marker_inventory()
         audited_tails: dict[str, tuple[int, str]] = {}
         price_only_sessions: set[str] = set()
-        try:
-            ledgers = sorted(self.state_root.glob("session-*.jsonl"))
-        except OSError:
-            _fail("shadow_evidence_state_unavailable")
+        ledgers = tuple(
+            self.state_root / name
+            for name in sorted(self._audit_root_names)
+            if name.startswith("session-") and name.endswith(".jsonl")
+        )
         for path in ledgers:
             name = path.name
             session_id = name[len("session-") : -len(".jsonl")]
@@ -2253,12 +2442,8 @@ class ShadowEvidenceStore:
                 or _canonical_session_id(session_id) is None
             ):
                 _fail("shadow_evidence_prior_corrupt")
-            payload = _validate_existing_regular_file(
-                path,
-                expected_mode=0o600,
-                code="shadow_evidence_prior_corrupt",
-                read_payload=True,
-                maximum_bytes=67_108_864,
+            payload = self._read_audit_payload(
+                path, maximum_bytes=_MAXIMUM_LEDGER_BYTES
             )
             if payload is None or not payload or not payload.endswith(b"\n"):
                 _fail("shadow_evidence_unclean_session")
@@ -2434,26 +2619,31 @@ class ShadowEvidenceStore:
                 or predecessor[1] >= selected_wall_ns
             ):
                 _fail("shadow_evidence_prior_corrupt")
-        try:
-            raw_paths = sorted(self.raw_root.iterdir())
-        except OSError:
-            _fail("shadow_evidence_state_unavailable")
+        current_root_names = _bounded_directory_names(
+            self.state_root,
+            remaining_entries=_MAXIMUM_AUDIT_INVENTORY_ENTRIES,
+            code="shadow_evidence_state_unavailable",
+        )
+        current_raw_names = _bounded_directory_names(
+            self.raw_root,
+            remaining_entries=(
+                _MAXIMUM_AUDIT_INVENTORY_ENTRIES
+                - len(current_root_names)
+            ),
+            code="shadow_evidence_state_unavailable",
+        )
+        if (
+            frozenset(current_root_names) != frozenset(self._audit_root_names)
+            or frozenset(current_raw_names) != frozenset(self._audit_raw_names)
+        ):
+            _fail("shadow_evidence_prior_corrupt")
+        raw_paths = tuple(
+            self.raw_root / name for name in sorted(self._audit_raw_names)
+        )
         if {str(path) for path in raw_paths} != set(receipts):
             _fail("shadow_evidence_unclean_session")
         for raw_path, digest in receipts.items():
-            payload = _validate_existing_regular_file(
-                Path(raw_path),
-                expected_mode=0o600,
-                code="shadow_evidence_prior_corrupt",
-                read_payload=True,
-                maximum_bytes=_MAXIMUM_KALSHI_FRAME_BYTES,
-            )
-            if (
-                payload is None
-                or len(payload) > _MAXIMUM_KALSHI_FRAME_BYTES
-                or sha256(payload).hexdigest() != digest
-            ):
-                _fail("shadow_evidence_prior_corrupt")
+            self._audit_raw_reference(raw_path, digest, kalshi=True)
 
     def _audit_price_only_rows(
         self,
@@ -2642,18 +2832,24 @@ class ShadowEvidenceStore:
         path = Path(raw_path)
         if kalshi and path.parent != self.raw_root:
             _fail("shadow_evidence_prior_corrupt")
+        prior_digest = self._audited_raw_references.get(path)
+        if prior_digest is not None:
+            if prior_digest != raw_digest:
+                _fail("shadow_evidence_prior_corrupt")
+            return
+        if path.parent != self.raw_root:
+            remaining_entries = getattr(
+                self, "_audit_entries_remaining", None
+            )
+            if type(remaining_entries) is not int or remaining_entries <= 0:
+                _fail("shadow_evidence_capacity_exceeded")
+            self._audit_entries_remaining = remaining_entries - 1
         maximum = (
             _MAXIMUM_KALSHI_FRAME_BYTES
             if kalshi
             else _MAXIMUM_SPORTRADAR_CAPTURE_BYTES
         )
-        payload = _validate_existing_regular_file(
-            path,
-            expected_mode=0o600,
-            code="shadow_evidence_prior_corrupt",
-            read_payload=True,
-            maximum_bytes=maximum,
-        )
+        payload = self._read_audit_payload(path, maximum_bytes=maximum)
         if (
             payload is None
             or not payload
@@ -2782,6 +2978,45 @@ class ShadowEvidenceStore:
         path = self.raw_root / (
             f"{self.session_id}-{raw_number:08d}-kalshi.bin"
         )
+        reference = PersistedKalshiFrame(
+            raw_path=str(path),
+            raw_sha256=digest,
+            captured_wall_ns=captured_wall_ns,
+            captured_monotonic_ns=captured_monotonic_ns,
+            clock_uncertainty_ns=clock_uncertainty_ns,
+            physical_connection_generation=generation,
+        )
+        capture_row = {
+            "schema": (
+                "inci-tennis-price-only-kalshi-capture-v1"
+                if self._mode == "price_only"
+                else "inci-tennis-unqualified-shadow-kalshi-capture-v1"
+            ),
+            "kind": (
+                "price_only_kalshi_capture"
+                if self._mode == "price_only"
+                else "kalshi_capture"
+            ),
+            "trust": (
+                "PRICE_ONLY"
+                if self._mode == "price_only"
+                else "unqualified_shadow"
+            ),
+            "reason": "kalshi_raw_capture_persisted",
+            "raw_path": reference.raw_path,
+            "raw_sha256": reference.raw_sha256,
+            "captured_wall_ns": reference.captured_wall_ns,
+            "captured_monotonic_ns": reference.captured_monotonic_ns,
+            "clock_uncertainty_ns": reference.clock_uncertainty_ns,
+            "physical_connection_generation": (
+                reference.physical_connection_generation
+            ),
+        }
+        self._reference_capacity_available(path, digest, len(payload))
+        self._prepare_record(
+            capture_row,
+            additional_reference_bytes=len(payload),
+        )
         try:
             descriptor = _open_private_file(path, create=True, exclusive=True)
         except ShadowEvidenceError:
@@ -2806,43 +3041,10 @@ class ShadowEvidenceStore:
         except ShadowEvidenceError:
             self._poisoned = True
             raise
-        reference = PersistedKalshiFrame(
-            raw_path=str(path),
-            raw_sha256=digest,
-            captured_wall_ns=captured_wall_ns,
-            captured_monotonic_ns=captured_monotonic_ns,
-            clock_uncertainty_ns=clock_uncertainty_ns,
-            physical_connection_generation=generation,
-        )
+        self._register_session_reference(path, digest, len(payload))
+        self._session_validated_references[path] = digest
         try:
-            self._append_record(
-                {
-                    "schema": (
-                        "inci-tennis-price-only-kalshi-capture-v1"
-                        if self._mode == "price_only"
-                        else "inci-tennis-unqualified-shadow-kalshi-capture-v1"
-                    ),
-                    "kind": (
-                        "price_only_kalshi_capture"
-                        if self._mode == "price_only"
-                        else "kalshi_capture"
-                    ),
-                    "trust": (
-                        "PRICE_ONLY"
-                        if self._mode == "price_only"
-                        else "unqualified_shadow"
-                    ),
-                    "reason": "kalshi_raw_capture_persisted",
-                    "raw_path": reference.raw_path,
-                    "raw_sha256": reference.raw_sha256,
-                    "captured_wall_ns": reference.captured_wall_ns,
-                    "captured_monotonic_ns": reference.captured_monotonic_ns,
-                    "clock_uncertainty_ns": reference.clock_uncertainty_ns,
-                    "physical_connection_generation": (
-                        reference.physical_connection_generation
-                    ),
-                }
-            )
+            self._append_record(capture_row)
         except ShadowEvidenceError:
             self._poisoned = True
             raise
@@ -2892,6 +3094,46 @@ class ShadowEvidenceStore:
         self._resolution_identity = _resolution_identity(value)
         self._resolution_row_sha256 = self._previous_row_sha256
 
+    def _reference_capacity_available(
+        self,
+        path: Path,
+        digest: str,
+        size: int,
+    ) -> bool:
+        prior = self._session_reference_inventory.get(path)
+        if prior is not None:
+            if prior != (digest, size):
+                _fail("shadow_evidence_reference_invalid")
+            return False
+        try:
+            ledger_size = os.fstat(self._ledger_fd).st_size
+        except OSError:
+            _fail("shadow_evidence_write_failed")
+        if (
+            size < 0
+            or len(self._session_reference_inventory) + 1
+            > self._session_reference_file_limit
+            or self._session_reference_bytes + size
+            > _MAXIMUM_SESSION_RAW_BYTES
+            or ledger_size
+            + self._session_reference_bytes
+            + size
+            + _TERMINAL_LEDGER_RESERVE_BYTES
+            > self._session_audit_byte_limit
+        ):
+            _fail("shadow_evidence_capacity_exceeded")
+        return True
+
+    def _register_session_reference(
+        self,
+        path: Path,
+        digest: str,
+        size: int,
+    ) -> None:
+        if self._reference_capacity_available(path, digest, size):
+            self._session_reference_inventory[path] = (digest, size)
+            self._session_reference_bytes += size
+
     def _validate_reference(
         self,
         raw_path: object,
@@ -2911,6 +3153,11 @@ class ShadowEvidenceStore:
         path = Path(raw_path)
         if kalshi and path.parent != self.raw_root:
             _fail("shadow_evidence_reference_invalid")
+        validated_digest = self._session_validated_references.get(path)
+        if validated_digest is not None:
+            if validated_digest != raw_digest:
+                _fail("shadow_evidence_reference_invalid")
+            return
         payload = _validate_existing_regular_file(
             path,
             expected_mode=0o600,
@@ -2931,8 +3178,15 @@ class ShadowEvidenceStore:
             _fail("shadow_evidence_reference_invalid")
         if sha256(payload).hexdigest() != raw_digest:
             _fail("shadow_evidence_reference_invalid")
+        self._register_session_reference(path, raw_digest, len(payload))
+        self._session_validated_references[path] = raw_digest
 
-    def _append_record(self, row: dict[str, object]) -> None:
+    def _prepare_record(
+        self,
+        row: dict[str, object],
+        *,
+        additional_reference_bytes: int = 0,
+    ) -> tuple[int, str, bytes]:
         if self._closed or self._poisoned:
             _fail("shadow_evidence_closed")
         if type(row) is not dict:
@@ -2963,6 +3217,32 @@ class ShadowEvidenceStore:
         current_digest = _row_digest(persisted)
         persisted["row_sha256"] = current_digest
         payload = _canonical_json(persisted) + b"\n"
+        try:
+            ledger_size = os.fstat(self._ledger_fd).st_size
+        except OSError:
+            _fail("shadow_evidence_write_failed")
+        reserve = (
+            0
+            if kind in {"terminal", "auto_terminal", "price_only_terminal"}
+            else _TERMINAL_LEDGER_RESERVE_BYTES
+        )
+        if (
+            type(additional_reference_bytes) is not int
+            or additional_reference_bytes < 0
+            or ledger_size + len(payload) + reserve > _MAXIMUM_LEDGER_BYTES
+            or ledger_size
+            + len(payload)
+            + reserve
+            + self._session_reference_bytes
+            + additional_reference_bytes
+            > self._session_audit_byte_limit
+        ):
+            _fail("shadow_evidence_capacity_exceeded")
+        return row_number, current_digest, payload
+
+    def _append_record(self, row: dict[str, object]) -> None:
+        row_number, current_digest, payload = self._prepare_record(row)
+        kind = row["kind"]
         self._ensure_protocol_epoch()
         pending_path, _ = self._create_pending_marker(row_number, current_digest)
         try:
@@ -3277,13 +3557,23 @@ class ShadowEvidenceStore:
     def ensure_price_only_halted_terminal(self, *, code: str) -> None:
         """Close a constructed price-only session after an IO-owned failure."""
 
+        self.ensure_price_only_setup_terminal(reason="halted", code=code)
+
+    def ensure_price_only_setup_terminal(
+        self,
+        *,
+        reason: str,
+        code: str | None,
+    ) -> None:
+        """Durably close a price-only session that failed before collector run."""
+
         if self._terminal_recorded:
             return
         session = self._price_only_session
         if session is None:
             _fail("shadow_evidence_terminal_invalid")
         self.append_price_only_terminal(
-            reason="halted",
+            reason=reason,
             code=code,
             ended_wall_ns=time.time_ns(),
             ended_monotonic_ns=time.monotonic_ns(),
@@ -3387,10 +3677,31 @@ class ShadowEvidenceStore:
     ) -> None:
         """Durably close a post-construction failure using IO-owned clocks."""
 
+        self.ensure_setup_terminal(
+            reason="halted",
+            code=code,
+            provider_match_id=provider_match_id,
+            market_tickers=market_tickers,
+            sportradar_captures=sportradar_captures,
+            kalshi_frames=kalshi_frames,
+        )
+
+    def ensure_setup_terminal(
+        self,
+        *,
+        reason: str,
+        code: str | None,
+        provider_match_id: str,
+        market_tickers: tuple[str, str],
+        sportradar_captures: int,
+        kalshi_frames: int,
+    ) -> None:
+        """Durably close a verified session that failed before collector run."""
+
         if self._terminal_recorded:
             return
         self.append_terminal(
-            reason="halted",
+            reason=reason,
             code=code,
             ended_wall_ns=time.time_ns(),
             ended_monotonic_ns=time.monotonic_ns(),
@@ -3428,9 +3739,11 @@ def _snapshot_audit_file(
     descriptor: int,
     *,
     maximum_bytes: int,
+    capacity: _AuditCapacity,
     directory_fd: int | None = None,
     entry_name: str | None = None,
 ) -> _StableAuditFile:
+    snapshotted = False
     try:
         info = os.fstat(descriptor)
         if (
@@ -3440,18 +3753,25 @@ def _snapshot_audit_file(
             or stat.S_IMODE(info.st_mode) != 0o600
         ):
             _fail("shadow_evidence_source_changed")
-        return _StableAuditFile(
+        capacity.consume(info)
+        entry = _StableAuditFile(
             path=path,
-            descriptor=descriptor,
+            descriptor=None,
             identity=_file_identity(info),
             digest=_descriptor_digest(descriptor, maximum_bytes),
+            size=info.st_size,
             maximum_bytes=maximum_bytes,
             directory_fd=directory_fd,
             entry_name=entry_name,
         )
-    except BaseException:
-        os.close(descriptor)
-        raise
+        snapshotted = True
+        return entry
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            if snapshotted:
+                _fail("shadow_evidence_source_changed")
 
 
 def _snapshot_audit_inventory(
@@ -3465,6 +3785,7 @@ def _snapshot_audit_inventory(
     root_fd: int | None = None
     raw_fd: int | None = None
     files: list[_StableAuditFile] = []
+    capacity = _AuditCapacity()
     try:
         parent_fd = _open_existing_private_directory(
             state_root.parent, code="shadow_evidence_source_changed"
@@ -3479,6 +3800,29 @@ def _snapshot_audit_inventory(
             parent_fd, state_root.name, root_fd, expected_mode=0o700
         )
         _verify_directory_entry(root_fd, "raw", raw_fd, expected_mode=0o700)
+        root_names = _bounded_directory_names(
+            root_fd,
+            remaining_entries=_MAXIMUM_AUDIT_INVENTORY_ENTRIES,
+            code="shadow_evidence_source_changed",
+        )
+        raw_names = _bounded_directory_names(
+            raw_fd,
+            remaining_entries=(
+                _MAXIMUM_AUDIT_INVENTORY_ENTRIES - len(root_names)
+            ),
+            code="shadow_evidence_source_changed",
+        )
+        if (
+            len(root_names) + len(raw_names) + len(raw_references)
+            > _MAXIMUM_AUDIT_INVENTORY_ENTRIES
+        ):
+            _fail("shadow_evidence_capacity_exceeded")
+        if any(not _valid_root_audit_name(name) for name in root_names):
+            _fail("shadow_evidence_source_changed")
+        if any(not _valid_raw_audit_name(name) for name in raw_names):
+            _fail("shadow_evidence_source_changed")
+        if "raw" not in root_names or "shadow.lock" not in root_names:
+            _fail("shadow_evidence_source_changed")
         lock_info = os.fstat(lock_fd)
         if (
             not stat.S_ISREG(lock_info.st_mode)
@@ -3487,12 +3831,10 @@ def _snapshot_audit_inventory(
             or stat.S_IMODE(lock_info.st_mode) != 0o600
         ):
             _fail("shadow_evidence_source_changed")
+        capacity.consume(lock_info)
         lock_identity = _file_identity(lock_info)
-        lock_digest = _descriptor_digest(lock_fd, 67_108_864)
-        root_names = sorted(os.listdir(root_fd))
-        if "raw" not in root_names:
-            _fail("shadow_evidence_source_changed")
-        for name in root_names:
+        lock_digest = _descriptor_digest(lock_fd, _MAXIMUM_LEDGER_BYTES)
+        for name in sorted(root_names):
             if name == "raw":
                 continue
             if name == "shadow.lock":
@@ -3504,12 +3846,13 @@ def _snapshot_audit_inventory(
                 _snapshot_audit_file(
                     state_root / name,
                     descriptor,
-                    maximum_bytes=67_108_864,
+                    maximum_bytes=_MAXIMUM_LEDGER_BYTES,
+                    capacity=capacity,
                     directory_fd=root_fd,
                     entry_name=name,
                 )
             )
-        for name in sorted(os.listdir(raw_fd)):
+        for name in sorted(raw_names):
             descriptor = _open_existing_private_readonly_file_at(
                 raw_fd, name, code="shadow_evidence_source_changed"
             )
@@ -3518,6 +3861,7 @@ def _snapshot_audit_inventory(
                     raw_root / name,
                     descriptor,
                     maximum_bytes=_MAXIMUM_KALSHI_FRAME_BYTES,
+                    capacity=capacity,
                     directory_fd=raw_fd,
                     entry_name=name,
                 )
@@ -3533,9 +3877,9 @@ def _snapshot_audit_inventory(
                 path,
                 descriptor,
                 maximum_bytes=_MAXIMUM_SPORTRADAR_CAPTURE_BYTES,
+                capacity=capacity,
             )
             if entry.digest != expected_digest:
-                os.close(entry.descriptor)
                 _fail("shadow_evidence_source_changed")
             files.append(entry)
         return (
@@ -3548,10 +3892,11 @@ def _snapshot_audit_inventory(
         )
     except BaseException:
         for entry in files:
-            try:
-                os.close(entry.descriptor)
-            except BaseException:
-                pass
+            if entry.descriptor is not None:
+                try:
+                    os.close(entry.descriptor)
+                except BaseException:
+                    pass
         for descriptor in (parent_fd, root_fd, raw_fd):
             if descriptor is not None:
                 try:
@@ -3564,9 +3909,13 @@ def _snapshot_audit_inventory(
 def _snapshot_external_audit_references(
     raw_references: Mapping[Path, str],
     root_files: tuple[_StableAuditFile, ...],
+    *,
+    starting_entries: int,
+    starting_bytes: int,
 ) -> tuple[_StableAuditFile, ...]:
     root_paths = {entry.path for entry in root_files}
     external: list[_StableAuditFile] = []
+    capacity = _AuditCapacity(starting_entries, starting_bytes)
     try:
         for path, expected_digest in raw_references.items():
             if path in root_paths:
@@ -3578,18 +3927,19 @@ def _snapshot_external_audit_references(
                 path,
                 descriptor,
                 maximum_bytes=_MAXIMUM_SPORTRADAR_CAPTURE_BYTES,
+                capacity=capacity,
             )
             if entry.digest != expected_digest:
-                os.close(entry.descriptor)
                 _fail("shadow_evidence_source_changed")
             external.append(entry)
         return tuple(external)
     except BaseException:
         for entry in external:
-            try:
-                os.close(entry.descriptor)
-            except BaseException:
-                pass
+            if entry.descriptor is not None:
+                try:
+                    os.close(entry.descriptor)
+                except BaseException:
+                    pass
         raise
 
 
@@ -3600,10 +3950,11 @@ def _close_audit_snapshot(
     files: tuple[_StableAuditFile, ...],
 ) -> None:
     for entry in files:
-        try:
-            os.close(entry.descriptor)
-        except BaseException:
-            pass
+        if entry.descriptor is not None:
+            try:
+                os.close(entry.descriptor)
+            except BaseException:
+                pass
     for descriptor in (parent_fd, root_fd, raw_fd):
         try:
             os.close(descriptor)
@@ -3692,7 +4043,13 @@ def audit_shadow_settlement_source(
             files,
         ) = snapshot
         external_files = _snapshot_external_audit_references(
-            adapter._audited_raw_references, files
+            adapter._audited_raw_references,
+            files,
+            starting_entries=1 + len(files),
+            starting_bytes=(
+                os.fstat(lock_fd).st_size
+                + sum(entry.size for entry in files)
+            ),
         )
         files = files + external_files
         snapshot = (

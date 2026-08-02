@@ -61,7 +61,45 @@ def _resolved_store(root: Path) -> Path:
     return path
 
 
-def _price_only_store(root: Path) -> Path:
+def _price_only_session_for_reopen() -> object:
+    from inci_tennis_io.shadow_evidence import (
+        PriceOnlySessionEvidence,
+        ShadowMarketCandidate,
+    )
+
+    return PriceOnlySessionEvidence(
+        selected_wall_ns=_WALL_NS + 2,
+        selected_monotonic_ns=2,
+        event_ticker="KXTENNIS-MATCH",
+        player_a_name="Player A",
+        player_b_name="Player B",
+        market_tickers=_TICKERS,
+        scheduled_start_wall_ns=_WALL_NS - 10_000_000_000,
+        catalog_sport="tennis",
+        catalog_scope="atp",
+        catalog_queried_competitions=("atp",),
+        catalog_series_ticker="KXATP",
+        catalog_milestone_id="match",
+        catalog_milestone_league="ATP",
+        initial_book_state="empty",
+        initial_market_a=ShadowMarketCandidate(
+            _TICKERS[0], None, None, None, None
+        ),
+        initial_market_b=ShadowMarketCandidate(
+            _TICKERS[1], None, None, None, None
+        ),
+        provider_discovery_state="unavailable",
+        provider_discovery_reason="provider_key_missing",
+        provider_discovery_raw_path=None,
+        provider_discovery_raw_sha256=None,
+        kalshi_catalog_sha256="1" * 64,
+        resolver_snapshot_sha256="2" * 64,
+        resolver_version="kalshi-first-hybrid-v1",
+        registry_digest="3" * 64,
+    )
+
+
+def _price_only_store(root: Path, *, frame_count: int = 1) -> Path:
     from inci_tennis_io.shadow_evidence import (
         PriceOnlyEvidenceObservation,
         PriceOnlySessionEvidence,
@@ -72,45 +110,25 @@ def _price_only_store(root: Path) -> Path:
     root = root.resolve(strict=False)
     with ShadowEvidenceStore(root) as store:
         path = store.ledger_path
-        store.append_price_only_session(
-            PriceOnlySessionEvidence(
-                selected_wall_ns=_WALL_NS + 2,
-                selected_monotonic_ns=2,
-                event_ticker="KXTENNIS-MATCH",
-                player_a_name="Player A",
-                player_b_name="Player B",
-                market_tickers=_TICKERS,
-                scheduled_start_wall_ns=_WALL_NS - 10_000_000_000,
-                catalog_sport="tennis",
-                catalog_scope="atp",
-                catalog_queried_competitions=("atp",),
-                catalog_series_ticker="KXATP",
-                catalog_milestone_id="match",
-                catalog_milestone_league="ATP",
-                initial_book_state="empty",
-                initial_market_a=ShadowMarketCandidate(_TICKERS[0], None, None, None, None),
-                initial_market_b=ShadowMarketCandidate(_TICKERS[1], None, None, None, None),
-                provider_discovery_state="unavailable",
-                provider_discovery_reason="provider_key_missing",
-                provider_discovery_raw_path=None,
-                provider_discovery_raw_sha256=None,
-                kalshi_catalog_sha256="1" * 64,
-                resolver_snapshot_sha256="2" * 64,
-                resolver_version="kalshi-first-hybrid-v1",
-                registry_digest="3" * 64,
+        store.append_price_only_session(_price_only_session_for_reopen())
+        receipt = None
+        for index in range(1, frame_count + 1):
+            frame_payload = json.dumps(
+                {"type": "orderbook_snapshot", "sequence": index},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            receipt = store.persist_kalshi_frame(
+                SimpleNamespace(
+                    payload=frame_payload,
+                    captured_wall_ns=_WALL_NS + 10 + index,
+                    captured_monotonic_ns=10 + index,
+                    clock_uncertainty_ns=3,
+                    physical_connection_generation=1,
+                    raw_sha256=sha256(frame_payload).hexdigest(),
+                )
             )
-        )
-        frame_payload = b'{"type":"orderbook_snapshot"}'
-        receipt = store.persist_kalshi_frame(
-            SimpleNamespace(
-                payload=frame_payload,
-                captured_wall_ns=_WALL_NS + 10,
-                captured_monotonic_ns=10,
-                clock_uncertainty_ns=3,
-                physical_connection_generation=1,
-                raw_sha256=sha256(frame_payload).hexdigest(),
-            )
-        )
+        if receipt is None:
+            raise AssertionError("frame_count must be positive")
         store.append_price_only_observation(
             PriceOnlyEvidenceObservation(
                 observed_wall_ns=_WALL_NS + 20,
@@ -123,7 +141,7 @@ def _price_only_store(root: Path) -> Path:
                 kalshi_captured_wall_ns=receipt.captured_wall_ns,
                 kalshi_captured_monotonic_ns=receipt.captured_monotonic_ns,
                 kalshi_generation=1,
-                kalshi_sequence=1,
+                kalshi_sequence=frame_count,
                 kalshi_age_ns=1,
                 kalshi_status="candidate",
                 market_a=ShadowMarketCandidate(
@@ -133,7 +151,7 @@ def _price_only_store(root: Path) -> Path:
                     _TICKERS[1], "0.66", "0.69", "6.00", "9.00"
                 ),
                 reason="candidate_snapshot_applied",
-                kalshi_frames=1,
+                kalshi_frames=frame_count,
             )
         )
         store.append_price_only_terminal(
@@ -143,12 +161,228 @@ def _price_only_store(root: Path) -> Path:
             ended_monotonic_ns=30,
             event_ticker="KXTENNIS-MATCH",
             market_tickers=_TICKERS,
-            kalshi_frames=1,
+            kalshi_frames=frame_count,
         )
     return path
 
 
 class ShadowSettlementSourceAuditTests(unittest.TestCase):
+    def test_collection_caps_ledger_before_persisting_an_orphan_raw(self) -> None:
+        """Catches collection exceeding its later 64 MiB audit contract."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            with patch.object(
+                shadow_evidence,
+                "_MAXIMUM_LEDGER_BYTES",
+                8_192,
+                create=True,
+            ), patch.object(
+                shadow_evidence,
+                "_TERMINAL_LEDGER_RESERVE_BYTES",
+                1_024,
+                create=True,
+            ):
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError,
+                    "shadow_evidence_capacity_exceeded",
+                ):
+                    _price_only_store(root, frame_count=100)
+
+            ledger = next(root.glob("session-*.jsonl"))
+            capture_rows = sum(
+                json.loads(line)["kind"] == "price_only_kalshi_capture"
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+            )
+            self.assertEqual(
+                len(tuple((root / "raw").glob("*.bin"))),
+                capture_rows,
+            )
+
+    def test_audit_descriptor_use_is_constant_with_many_frames(self) -> None:
+        """Catches retaining one open descriptor per captured frame."""
+
+        from inci_tennis_io.shadow_evidence import (
+            audit_shadow_settlement_source,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = _price_only_store(
+                Path(directory) / "shadow",
+                frame_count=100,
+            ).resolve()
+            descriptors_before = len(os.listdir("/dev/fd"))
+            lease = audit_shadow_settlement_source(ledger)
+            try:
+                descriptors_during = len(os.listdir("/dev/fd"))
+                self.assertLessEqual(
+                    descriptors_during - descriptors_before,
+                    8,
+                )
+                lease.verify_unchanged()
+            finally:
+                lease.close()
+
+    def test_audit_caps_total_inventory_before_opening_entries(self) -> None:
+        """Catches unbounded directory fan-out before hashing file content."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceError
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = _price_only_store(
+                Path(directory) / "shadow"
+            ).resolve()
+            with patch.object(
+                shadow_evidence,
+                "_MAXIMUM_AUDIT_INVENTORY_ENTRIES",
+                1,
+            ), patch.object(
+                shadow_evidence,
+                "_open_existing_private_readonly_file_at",
+                side_effect=AssertionError("entry content opened"),
+            ), self.assertRaisesRegex(
+                ShadowEvidenceError,
+                "shadow_evidence_capacity_exceeded",
+            ):
+                shadow_evidence.audit_shadow_settlement_source(ledger)
+
+    def test_audit_caps_aggregate_bytes_across_inventory(self) -> None:
+        """Catches individually valid files causing unbounded aggregate IO."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            ledger = _price_only_store(root).resolve()
+            with patch.object(
+                shadow_evidence,
+                "_MAXIMUM_AUDIT_BYTES",
+                1,
+            ):
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError,
+                    "shadow_evidence_capacity_exceeded",
+                ):
+                    shadow_evidence.audit_shadow_settlement_source(ledger)
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError,
+                    "shadow_evidence_capacity_exceeded",
+                ):
+                    ShadowEvidenceStore(root)
+
+    def test_terminalized_session_remains_auditable_under_reduced_caps(self) -> None:
+        """Catches persistence admitting more raw evidence than audit can read."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceStore,
+            audit_shadow_settlement_source,
+        )
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            shadow_evidence,
+            "_MAXIMUM_AUDIT_BYTES",
+            262_144,
+        ), patch.object(
+            shadow_evidence,
+            "_MAXIMUM_SESSION_RAW_BYTES",
+            65_536,
+        ):
+            root = (Path(directory) / "shadow").resolve()
+            ledger = _price_only_store(root, frame_count=100).resolve()
+            lease = audit_shadow_settlement_source(ledger)
+            lease.close()
+            with ShadowEvidenceStore(root) as reopened:
+                reopened.append_price_only_session(
+                    _price_only_session_for_reopen()
+                )
+                reopened.ensure_price_only_halted_terminal(
+                    code="shadow_internal_error"
+                )
+
+    def test_external_provider_references_share_the_inventory_cap(self) -> None:
+        """Catches external captures bypassing the aggregate entry budget."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+            ShadowResolutionEvidence,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            _resolved_store(root)
+            second_provider = (Path(directory) / "provider-second.json").resolve()
+            payload = b'{"provider":"second"}'
+            _private_payload(second_provider, payload)
+            with patch.object(
+                shadow_evidence,
+                "_MAXIMUM_AUDIT_INVENTORY_ENTRIES",
+                10,
+            ), ShadowEvidenceStore(root) as reopened:
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError,
+                    "shadow_evidence_capacity_exceeded",
+                ):
+                    reopened.append_resolution(
+                        ShadowResolutionEvidence(
+                            selected_wall_ns=_WALL_NS + 100,
+                            provider_match_id="sr:sport_event:654321",
+                            provider_start_wall_ns=_WALL_NS,
+                            event_ticker="KXTENNIS-SECOND",
+                            home_player_name="Second Home",
+                            away_player_name="Second Away",
+                            market_tickers=(
+                                "KXTENNIS-SECOND-HOME",
+                                "KXTENNIS-SECOND-AWAY",
+                            ),
+                            provider_discovery_raw_path=str(second_provider),
+                            provider_discovery_raw_sha256=sha256(payload).hexdigest(),
+                            kalshi_catalog_sha256="4" * 64,
+                            resolver_snapshot_sha256="5" * 64,
+                            resolver_rule_version="strict-name-start-v1",
+                        )
+                    )
+                reopened.ensure_halted_terminal(
+                    code="shadow_internal_error",
+                    provider_match_id="sr:sport_event:654321",
+                    market_tickers=(
+                        "KXTENNIS-SECOND-HOME",
+                        "KXTENNIS-SECOND-AWAY",
+                    ),
+                    sportradar_captures=0,
+                    kalshi_frames=0,
+                )
+
+    def test_invalid_root_name_is_rejected_before_content_is_opened(self) -> None:
+        """Catches hashing unknown root files before validating their names."""
+
+        from inci_tennis_io import shadow_evidence
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = (Path(directory) / "shadow").resolve()
+            ledger = _price_only_store(root).resolve()
+            _private_payload(root / "000-unknown", b"large-untrusted-payload")
+            with patch.object(
+                shadow_evidence,
+                "_open_existing_private_readonly_file_at",
+                side_effect=AssertionError("invalid content opened"),
+            ), self.assertRaisesRegex(
+                ShadowEvidenceError,
+                "shadow_evidence_source_changed",
+            ):
+                shadow_evidence.audit_shadow_settlement_source(ledger)
+
     def test_audit_rejects_commit_marker_mutation_at_snapshot_boundary(self) -> None:
         """Catches a marker changing after semantic audit becoming the baseline."""
 

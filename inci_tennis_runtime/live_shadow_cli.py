@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+from inspect import isawaitable
 import os
 from re import compile as pattern_compile
 import signal
@@ -31,6 +32,7 @@ from inci_tennis_io.facade import (
     shadow_monotonic_ns,
     shadow_pause,
     shadow_wall_ns,
+    validate_price_only_session_evidence,
 )
 from inci_tennis_runtime.live_shadow_collector import (
     CandidateMarketProjection,
@@ -38,9 +40,11 @@ from inci_tennis_runtime.live_shadow_collector import (
     LiveShadowCollector,
     ShadowCollectorError,
     _durable_to_thread,
+    _durable_to_thread_result,
     _provider_failure_allows_price_only,
     _provider_failure_attestation,
     _provider_failure_attestation_is_valid,
+    _shielded_task_result,
 )
 from inci_tennis_runtime.live_price_only_collector import (
     PriceOnlyShadowCollector,
@@ -67,6 +71,7 @@ _SAFE_CODE = pattern_compile(
 )
 _MAXIMUM_SOURCE_FUTURE_NS = 5_000_000_000
 _MAXIMUM_SOURCE_AGE_NS = 60_000_000_000
+_MAXIMUM_CHOICE_INPUT_CHARS = 64
 
 
 class _UsageError(ValueError):
@@ -844,7 +849,7 @@ def _price_session(
         for market in markets
     )
     provenance = game.provenance
-    return PriceOnlySessionEvidence(
+    return validate_price_only_session_evidence(PriceOnlySessionEvidence(
         selected_wall_ns=selected_wall_ns,
         selected_monotonic_ns=selected_monotonic_ns,
         event_ticker=game.event_ticker,
@@ -873,7 +878,7 @@ def _price_session(
         predecessor_terminal_row_sha256=(
             predecessor_terminal_row_sha256
         ),
-    )
+    ))
 
 
 def _safe_display(value: object, maximum: int = 160) -> str:
@@ -1063,7 +1068,7 @@ def _prompt_choice(
             stop.prompting = True
             if stop():
                 raise KeyboardInterrupt
-            value = stdin.readline()
+            value = stdin.readline(_MAXIMUM_CHOICE_INPUT_CHARS + 2)
             if stop():
                 raise KeyboardInterrupt
         finally:
@@ -1072,12 +1077,26 @@ def _prompt_choice(
             raise ShadowCollectorError("shadow_selection_input_invalid")
         if value == "":
             return None
-        selected = value.strip()
+        overlong = (
+            len(value) > _MAXIMUM_CHOICE_INPUT_CHARS + 1
+            or not value.endswith("\n")
+        )
+        while not value.endswith("\n") and value != "":
+            value = stdin.readline(_MAXIMUM_CHOICE_INPUT_CHARS + 2)
+            if type(value) is not str:
+                raise ShadowCollectorError("shadow_selection_input_invalid")
+            if stop():
+                raise KeyboardInterrupt
+        selected = "" if overlong else value.strip()
         if selected.casefold() == "q":
             return None
-        if selected.isascii() and selected.isdigit():
+        if (
+            selected.isascii()
+            and selected.isdigit()
+            and len(selected) <= len(str(len(choices)))
+        ):
             number = int(selected)
-            if 1 <= number <= len(choices):
+            if str(number) == selected and 1 <= number <= len(choices):
                 return choices[number - 1]
         _write(stdout, "Invalid selection; enter a displayed number or Q.\n")
 
@@ -1099,99 +1118,147 @@ async def _run_collection(
 ) -> str | _VerifiedCollectionHalt:
     collector: object | None = None
     evidence: object | None = None
+    kalshi: object | None = None
     try:
         with services.evidence_store_factory() as evidence:
-            if resolution is not None:
-                append_resolution = getattr(
-                    evidence, "append_resolution", None
-                )
-                if not callable(append_resolution):
-                    raise ShadowCollectorError(
-                        "shadow_evidence_resolution_unavailable"
+            try:
+                if resolution is not None:
+                    append_resolution = getattr(
+                        evidence, "append_resolution", None
                     )
-                await asyncio.to_thread(append_resolution, resolution)
-            kalshi = services.kalshi_transport_factory(material, tickers)
-            projector = services.projector_factory(tickers)
-            collector = services.collector_factory(
-                provider_match_id=match_id,
-                market_tickers=tickers,
-                sportradar_transport=provider,
-                sportradar_ledger=trial_ledger,
-                kalshi_transport=kalshi,
-                market_projector=projector,
-                evidence_store=evidence,
-                wall_ns=services.wall_ns,
-                monotonic_ns=services.monotonic_ns,
-                pause=services.pause,
-                stop_requested=stop,
-                render=output,
-                mapping_mode=mapping_mode,
-            )
-            return await collector.run(
-                duration_seconds=duration_seconds,
-                poll_seconds=poll_seconds,
-            )
-    except BaseException as error:
-        counts = getattr(collector, "evidence_counts", (0, 0))
-        if collector is None:
-            provider_captures = getattr(provider, "completed_captures", 0)
-            if type(provider_captures) is int and provider_captures >= 0:
-                counts = (provider_captures, 0)
-        if (
-            type(counts) is not tuple
-            or len(counts) != 2
-            or any(type(value) is not int or value < 0 for value in counts)
-        ):
-            counts = (0, 0)
-        if evidence is not None:
-            ensure_terminal = getattr(evidence, "ensure_halted_terminal", None)
-            if not callable(ensure_terminal):
-                raise ShadowCollectorError(
-                    "shadow_evidence_terminal_unavailable"
-                ) from error
-            await asyncio.to_thread(
-                ensure_terminal,
-                code=_code(error),
-                provider_match_id=match_id,
-                market_tickers=tickers,
-                sportradar_captures=counts[0],
-                kalshi_frames=counts[1],
-            )
-        if collector is None:
-            await _record_trial_terminal(
-                trial_ledger,
-                provider_match_id=match_id,
-                reason="halted",
-                code="sportradar_shadow_discovery_halted",
-            )
-        code = _code(error)
-        attestation = _provider_failure_attestation(error)
-        if (
-            mapping_mode == "auto_matched"
-            and _provider_failure_attestation_is_valid(
-                attestation, code
-            )
-            and _provider_failure_allows_price_only(code)
-        ):
-            session_id = getattr(evidence, "session_id", None)
-            terminal_digest = getattr(
-                evidence, "terminal_row_sha256", None
-            )
-            if (
-                type(session_id) is not str
-                or not session_id
-                or type(terminal_digest) is not str
-                or pattern_compile(r"[0-9a-f]{64}\Z").fullmatch(
-                    terminal_digest
+                    if not callable(append_resolution):
+                        raise ShadowCollectorError(
+                            "shadow_evidence_resolution_unavailable"
+                        )
+                    _, append_cancellation = await _durable_to_thread_result(
+                        append_resolution, resolution
+                    )
+                    if append_cancellation is not None:
+                        raise append_cancellation
+                kalshi = services.kalshi_transport_factory(material, tickers)
+                projector = services.projector_factory(tickers)
+                collector = services.collector_factory(
+                    provider_match_id=match_id,
+                    market_tickers=tickers,
+                    sportradar_transport=provider,
+                    sportradar_ledger=trial_ledger,
+                    kalshi_transport=kalshi,
+                    market_projector=projector,
+                    evidence_store=evidence,
+                    wall_ns=services.wall_ns,
+                    monotonic_ns=services.monotonic_ns,
+                    pause=services.pause,
+                    stop_requested=stop,
+                    render=output,
+                    mapping_mode=mapping_mode,
                 )
-                is None
+                return await collector.run(
+                    duration_seconds=duration_seconds,
+                    poll_seconds=poll_seconds,
+                )
+            except BaseException as error:
+                counts = getattr(collector, "evidence_counts", (0, 0))
+                if collector is None:
+                    provider_captures = getattr(
+                        provider, "completed_captures", 0
+                    )
+                    if type(provider_captures) is int and provider_captures >= 0:
+                        counts = (provider_captures, 0)
+                if (
+                    type(counts) is not tuple
+                    or len(counts) != 2
+                    or any(
+                        type(value) is not int or value < 0 for value in counts
+                    )
+                ):
+                    counts = (0, 0)
+                reason = (
+                    "cancelled"
+                    if isinstance(error, asyncio.CancelledError)
+                    else "operator_interrupt"
+                    if isinstance(error, KeyboardInterrupt)
+                    else "halted"
+                )
+                terminal_code = _code(error) if reason == "halted" else None
+                ensure_terminal = getattr(
+                    evidence, "ensure_setup_terminal", None
+                )
+                terminal_values: dict[str, object] = {
+                    "reason": reason,
+                    "code": terminal_code,
+                    "provider_match_id": match_id,
+                    "market_tickers": tickers,
+                    "sportradar_captures": counts[0],
+                    "kalshi_frames": counts[1],
+                }
+                if not callable(ensure_terminal) and reason == "halted":
+                    ensure_terminal = getattr(
+                        evidence, "ensure_halted_terminal", None
+                    )
+                    terminal_values.pop("reason")
+                if not callable(ensure_terminal):
+                    raise ShadowCollectorError(
+                        "shadow_evidence_terminal_unavailable"
+                    ) from error
+                _, terminal_cancellation = await _durable_to_thread_result(
+                    ensure_terminal,
+                    **terminal_values,
+                )
+                if collector is None:
+                    await _record_trial_terminal(
+                        trial_ledger,
+                        provider_match_id=match_id,
+                        reason=reason,
+                        code=(
+                            "sportradar_shadow_discovery_halted"
+                            if reason == "halted"
+                            else "sportradar_shadow_task_cancelled"
+                            if reason == "cancelled"
+                            else "sportradar_operator_interrupt"
+                        ),
+                    )
+                if (
+                    terminal_cancellation is not None
+                    and not isinstance(error, asyncio.CancelledError)
+                ):
+                    raise terminal_cancellation from error
+                code = _code(error)
+                attestation = _provider_failure_attestation(error)
+                if (
+                    mapping_mode == "auto_matched"
+                    and _provider_failure_attestation_is_valid(
+                        attestation, code
+                    )
+                    and _provider_failure_allows_price_only(code)
+                ):
+                    session_id = getattr(evidence, "session_id", None)
+                    terminal_digest = getattr(
+                        evidence, "terminal_row_sha256", None
+                    )
+                    if (
+                        type(session_id) is not str
+                        or not session_id
+                        or type(terminal_digest) is not str
+                        or pattern_compile(r"[0-9a-f]{64}\Z").fullmatch(
+                            terminal_digest
+                        )
+                        is None
+                    ):
+                        raise ShadowCollectorError(
+                            "shadow_evidence_reference_invalid"
+                        ) from error
+                    return _VerifiedCollectionHalt(
+                        code, session_id, terminal_digest
+                    )
+                raise
+    except BaseException as error:
+        if kalshi is not None and collector is None:
+            close_cancellation = await _close_unstarted_transport(kalshi)
+            if (
+                close_cancellation is not None
+                and not isinstance(error, asyncio.CancelledError)
             ):
-                raise ShadowCollectorError(
-                    "shadow_evidence_reference_invalid"
-                ) from error
-            return _VerifiedCollectionHalt(
-                code, session_id, terminal_digest
-            )
+                raise close_cancellation from error
         raise
 
 
@@ -1237,6 +1304,26 @@ async def _run_manual(
             )
 
 
+async def _close_unstarted_transport(
+    transport: object,
+) -> asyncio.CancelledError | None:
+    close = getattr(transport, "close", None)
+    if not callable(close):
+        return None
+    try:
+        result = close()
+    except BaseException:
+        return None
+    if not isawaitable(result):
+        return None
+    task = asyncio.ensure_future(result)
+    try:
+        _, cancellation, _ = await _shielded_task_result(task)
+    except BaseException:
+        return None
+    return cancellation
+
+
 async def _run_price_choice(
     *,
     row: HybridMatchRow,
@@ -1250,7 +1337,14 @@ async def _run_price_choice(
     selected_wall_ns: int,
     selected_monotonic_ns: int,
     predecessor: _VerifiedCollectionHalt | None = None,
+    deadline_monotonic_ns: int | None = None,
 ) -> str:
+    if deadline_monotonic_ns is not None and (
+        type(deadline_monotonic_ns) is not int
+        or deadline_monotonic_ns <= selected_monotonic_ns
+        or predecessor is None
+    ):
+        raise ShadowCollectorError("shadow_clock_invalid")
     session = _price_session(
         row=row,
         snapshot=snapshot,
@@ -1266,23 +1360,97 @@ async def _run_price_choice(
             else predecessor.predecessor_terminal_row_sha256
         ),
     )
-    with services.evidence_store_factory() as evidence:
-        kalshi = services.kalshi_transport_factory(
-            material, session.market_tickers
-        )
+    kalshi = services.kalshi_transport_factory(
+        material, session.market_tickers
+    )
+    collector_started = False
+
+    def remaining_duration() -> int:
+        if deadline_monotonic_ns is None:
+            return duration_seconds
+        _, current_monotonic_ns = _clock_pair(services)
+        if current_monotonic_ns < selected_monotonic_ns:
+            raise ShadowCollectorError("shadow_clock_invalid")
+        remaining_seconds = (
+            deadline_monotonic_ns - current_monotonic_ns
+        ) // 1_000_000_000
+        if remaining_seconds < 10:
+            assert predecessor is not None
+            raise ShadowCollectorError(predecessor.code)
+        return min(duration_seconds, int(remaining_seconds))
+
+    try:
         projector = services.projector_factory(session.market_tickers)
-        collector = services.price_only_collector_factory(
-            session_evidence=session,
-            kalshi_transport=kalshi,
-            market_projector=projector,
-            evidence_store=evidence,
-            wall_ns=services.wall_ns,
-            monotonic_ns=services.monotonic_ns,
-            pause=services.pause,
-            stop_requested=stop,
-            render=output,
-        )
-        return await collector.run(duration_seconds=duration_seconds)
+        # Bound non-durable setup before opening a new ledger.  The second
+        # check covers time spent auditing/constructing the store itself.
+        run_duration = remaining_duration()
+        with services.evidence_store_factory() as evidence:
+            try:
+                run_duration = min(run_duration, remaining_duration())
+                collector = services.price_only_collector_factory(
+                    session_evidence=session,
+                    kalshi_transport=kalshi,
+                    market_projector=projector,
+                    evidence_store=evidence,
+                    wall_ns=services.wall_ns,
+                    monotonic_ns=services.monotonic_ns,
+                    pause=services.pause,
+                    stop_requested=stop,
+                    render=output,
+                )
+            except BaseException as error:
+                append_session = getattr(
+                    evidence, "append_price_only_session", None
+                )
+                ensure_terminal = getattr(
+                    evidence, "ensure_price_only_setup_terminal", None
+                )
+                if not callable(append_session) or not callable(ensure_terminal):
+                    raise ShadowCollectorError(
+                        "shadow_evidence_terminal_unavailable"
+                    ) from error
+                try:
+                    _, append_cancellation = await _durable_to_thread_result(
+                        append_session, session
+                    )
+                    reason = (
+                        "cancelled"
+                        if isinstance(error, asyncio.CancelledError)
+                        else "operator_interrupt"
+                        if isinstance(error, KeyboardInterrupt)
+                        else "halted"
+                    )
+                    _, terminal_cancellation = await _durable_to_thread_result(
+                        ensure_terminal,
+                        reason=reason,
+                        code=_code(error) if reason == "halted" else None,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as terminal_error:
+                    raise ShadowCollectorError(
+                        "shadow_evidence_terminal_unavailable"
+                    ) from terminal_error
+                retained_cancellation = (
+                    append_cancellation or terminal_cancellation
+                )
+                if (
+                    retained_cancellation is not None
+                    and not isinstance(error, asyncio.CancelledError)
+                ):
+                    raise retained_cancellation from error
+                raise
+            collector_started = True
+            return await collector.run(duration_seconds=run_duration)
+    except BaseException as error:
+        if not collector_started:
+            close_cancellation = await _close_unstarted_transport(kalshi)
+            if (
+                close_cancellation is not None
+                and not isinstance(error, asyncio.CancelledError)
+            ):
+                raise close_cancellation from error
+        raise
 
 
 async def _run_verified_choice(
@@ -1374,12 +1542,27 @@ async def _run_choose(
     stop: _StopState,
 ) -> str:
     catalog_transport = services.catalog_transport_factory()
-    discover = getattr(catalog_transport, "discover_tennis_catalog", None)
-    if not callable(discover):
-        raise ShadowCollectorError("kalshi_catalog_contract_invalid")
-    catalog = await asyncio.to_thread(discover)
-    if type(catalog) is not KalshiShadowCatalogSnapshot:
-        raise ShadowCollectorError("kalshi_catalog_contract_invalid")
+    catalog_error: BaseException | None = None
+    try:
+        discover = getattr(catalog_transport, "discover_tennis_catalog", None)
+        if not callable(discover):
+            raise ShadowCollectorError("kalshi_catalog_contract_invalid")
+        catalog = await asyncio.to_thread(discover)
+        if type(catalog) is not KalshiShadowCatalogSnapshot:
+            raise ShadowCollectorError("kalshi_catalog_contract_invalid")
+    except BaseException as error:
+        catalog_error = error
+        raise
+    finally:
+        try:
+            close = getattr(catalog_transport, "close", None)
+            if callable(close):
+                close()
+        except BaseException:
+            if catalog_error is None:
+                raise
+    if stop():
+        raise KeyboardInterrupt
     provider_key, absent_reason = _optional_provider_key(environ)
     discovery = await _capture_optional_provider(
         provider_key=provider_key,
@@ -1481,6 +1664,7 @@ async def _run_choose(
         selected_wall_ns=failover_wall_ns,
         selected_monotonic_ns=failover_monotonic_ns,
         predecessor=result,
+        deadline_monotonic_ns=deadline_ns,
     )
 
 

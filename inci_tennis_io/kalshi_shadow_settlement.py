@@ -12,6 +12,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import math
 from re import compile as pattern_compile
 import time
 
@@ -23,11 +24,15 @@ _CURRENT_PATH = "/trade-api/v2/markets/"
 _HISTORICAL_PATH = "/trade-api/v2/historical/markets/"
 _MAXIMUM_BODY_BYTES = 8_388_608
 _STREAM_CHUNK_BYTES = 65_536
+_MAXIMUM_RECONCILIATION_SECONDS = 30.0
 _GET_429_DELAYS = (0.25, 0.5, 1.0, 2.0)
 _TICKER = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
 _TOKEN = pattern_compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
-_FIXED_POINT = pattern_compile(r"(?:0|[1-9]\d*)(?:\.\d+)?\Z")
-_RFC3339_UTC = pattern_compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
+_FIXED_POINT = pattern_compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
+_RFC3339_UTC = pattern_compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z\Z"
+)
 _STATUSES = frozenset({
     "initialized", "inactive", "active", "closed", "determined", "disputed",
     "amended", "finalized",
@@ -117,7 +122,13 @@ class KalshiFinalMarketState:
 class KalshiShadowSettlementTransport:
     """Fixed-origin, public, GET-only Market transport."""
 
-    __slots__ = ("_session", "_sleep")
+    __slots__ = (
+        "_closed",
+        "_deadline",
+        "_monotonic",
+        "_session",
+        "_sleep",
+    )
 
     def __init__(self, *, session: object | None = None, sleep: object | None = None) -> None:
         try:
@@ -127,6 +138,38 @@ class KalshiShadowSettlementTransport:
             _fail("kalshi_settlement_transport_invalid")
         self._session = chosen_session
         self._sleep = time.sleep if sleep is None else sleep
+        self._monotonic = time.monotonic
+        self._deadline: float | None = None
+        self._closed = False
+
+    def _clock(self) -> float:
+        try:
+            value = self._monotonic()
+        except Exception:
+            _fail("kalshi_settlement_transport_invalid")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            _fail("kalshi_settlement_transport_invalid")
+        return float(value)
+
+    def _check_deadline(self) -> None:
+        deadline = self._deadline
+        if deadline is not None and self._clock() >= deadline:
+            _fail("kalshi_settlement_deadline_exceeded")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._session.close()  # type: ignore[union-attr]
+        except BaseException as error:
+            if isinstance(error, Exception):
+                _fail("kalshi_settlement_session_close_invalid")
+            raise
+        self._closed = True
 
     @staticmethod
     def _close_after(response: object, operation: object) -> object:
@@ -146,7 +189,10 @@ class KalshiShadowSettlementTransport:
                     raise
 
     def _request(self, path: str) -> tuple[int, bytes | None]:
+        if self._closed:
+            _fail("kalshi_settlement_transport_invalid")
         for attempt in range(len(_GET_429_DELAYS) + 1):
+            self._check_deadline()
             try:
                 response = self._session.request(  # type: ignore[union-attr]
                     "GET", _ORIGIN + path,
@@ -175,12 +221,14 @@ class KalshiShadowSettlementTransport:
                 _fail("kalshi_settlement_rate_limited")
             try:
                 self._sleep(_GET_429_DELAYS[attempt])  # type: ignore[operator]
+                self._check_deadline()
+            except KalshiShadowSettlementError:
+                raise
             except Exception:
                 _fail("kalshi_settlement_transport_invalid")
         _fail("kalshi_settlement_rate_limited")
 
-    @staticmethod
-    def _stream_body(response: object) -> bytes:
+    def _stream_body(self, response: object) -> bytes:
         try:
             headers = response.headers  # type: ignore[attr-defined]
             content_type = headers.get("Content-Type")
@@ -197,7 +245,12 @@ class KalshiShadowSettlementTransport:
             _fail("kalshi_settlement_content_encoding_invalid")
         expected_size: int | None = None
         if content_length is not None:
-            if type(content_length) is not str or not content_length.isascii() or not content_length.isdigit():
+            if (
+                type(content_length) is not str
+                or not content_length.isascii()
+                or not content_length.isdigit()
+                or len(content_length) > 20
+            ):
                 _fail("kalshi_settlement_headers_invalid")
             expected_size = int(content_length)
             if expected_size > _MAXIMUM_BODY_BYTES:
@@ -207,12 +260,14 @@ class KalshiShadowSettlementTransport:
         try:
             iterator = response.iter_content(chunk_size=_STREAM_CHUNK_BYTES)  # type: ignore[attr-defined]
             for chunk in iterator:
+                self._check_deadline()
                 if type(chunk) is not bytes or not chunk:
                     _fail("kalshi_settlement_body_invalid")
                 size += len(chunk)
                 if size > _MAXIMUM_BODY_BYTES:
                     _fail("kalshi_settlement_body_too_large")
                 chunks.append(chunk)
+                self._check_deadline()
         except KalshiShadowSettlementError:
             raise
         except Exception:
@@ -269,11 +324,17 @@ class KalshiShadowSettlementTransport:
     def get_market_result(self, ticker: str) -> KalshiFinalMarketState:
         if not _safe_ticker(ticker):
             _fail("kalshi_settlement_query_invalid")
-        status, body = self._request(_CURRENT_PATH + ticker)
-        if status == 200 and body is not None:
-            return self._state(ticker, body, "current")
-        # Historical retrieval is permitted only after a fully closed exact 404.
-        status, body = self._request(_HISTORICAL_PATH + ticker)
-        if status != 200 or body is None:
-            _fail("kalshi_settlement_status_invalid")
-        return self._state(ticker, body, "historical")
+        if self._deadline is not None:
+            _fail("kalshi_settlement_transport_invalid")
+        self._deadline = self._clock() + _MAXIMUM_RECONCILIATION_SECONDS
+        try:
+            status, body = self._request(_CURRENT_PATH + ticker)
+            if status == 200 and body is not None:
+                return self._state(ticker, body, "current")
+            # Historical retrieval is permitted only after an exact closed 404.
+            status, body = self._request(_HISTORICAL_PATH + ticker)
+            if status != 200 or body is None:
+                _fail("kalshi_settlement_status_invalid")
+            return self._state(ticker, body, "historical")
+        finally:
+            self._deadline = None
