@@ -65,6 +65,7 @@ class SelectedContract:
     bid_size: Decimal
     ask_size: Decimal
     provenance: ContractProvenance
+    yes_player_name: str | None = None
 
     def __post_init__(self):
         _identity(self.ticker, "ticker")
@@ -76,6 +77,8 @@ class SelectedContract:
         _finite_decimal(self.ask_size, "ask_size")
         if not isinstance(self.provenance, ContractProvenance):
             raise ValueError("provenance must be ContractProvenance")
+        if self.yes_player_name is not None and type(self.yes_player_name) is not str:
+            raise ValueError("yes_player_name must be a string or None")
 
 
 class LocalDayWindow(NamedTuple):
@@ -485,7 +488,8 @@ def _select_event_markets(event, expected, cfg, stats):
                 series_ticker=expected["series_ticker"],
                 milestone_id=expected["milestone_id"],
                 event_ticker=event["event_ticker"],
-                scheduled_start_ts=expected["scheduled_start_ts"])))
+                scheduled_start_ts=expected["scheduled_start_ts"]),
+            yes_player_name=market["yes_sub_title"]))
     return tuple(selected)
 
 
@@ -578,7 +582,8 @@ def _explicit_selected_contract(market, event, expected, cfg):
             series_ticker=expected["series_ticker"],
             milestone_id=expected["milestone_id"],
             event_ticker=event["event_ticker"],
-            scheduled_start_ts=expected["scheduled_start_ts"]))
+            scheduled_start_ts=expected["scheduled_start_ts"]),
+        yes_player_name=market["yes_sub_title"])
 
 
 def _discover_explicit_tickers(cfg, client, *, now=None):
@@ -765,16 +770,13 @@ def _discover_explicit_tickers(cfg, client, *, now=None):
         stats=dict(sorted(stats.items())))
 
 
-def discover_game_contracts(cfg, client, *, now=None):
-    """Prove and select today's Games from one explicit discovery source."""
+def discover_game_inventory(cfg, client, *, now=None):
+    """Return every eligible Sports Games contract before liquidity ranking."""
     has_sports = bool(getattr(cfg, "sports", None))
     has_tickers = bool(getattr(cfg, "tickers", None))
-    if has_sports == has_tickers:
+    if not has_sports or has_tickers:
         raise ValueError(
-            "discover_game_contracts requires exactly one of cfg.sports "
-            "or cfg.tickers")
-    if has_tickers:
-        return _discover_explicit_tickers(cfg, client, now=now)
+            "discover_game_inventory requires cfg.sports and no cfg.tickers")
     for method in ("get_sports_filters", "get_sports_series",
                    "get_sports_milestones", "get_open_events"):
         if not hasattr(client, method):
@@ -904,12 +906,12 @@ def discover_game_contracts(cfg, client, *, now=None):
             if event_ticker not in seen_events:
                 _add_market_skip(stats, "skip_event_not_open")
 
-    stats["candidates"] = len(candidates)
-    ranked = rank_contracts(candidates, Decimal(str(cfg.contracts_per_trade)))
-    max_markets = getattr(cfg, "max_monitored_markets", None)
-    if isinstance(max_markets, bool) or not isinstance(max_markets, int) or max_markets <= 0:
-        raise ValueError("cfg.max_monitored_markets must be a positive integer")
-    contracts = ranked[:max_markets]
+    contracts = tuple(sorted(candidates, key=lambda contract: (
+        contract.provenance.scheduled_start_ts,
+        contract.provenance.event_ticker,
+        contract.ticker,
+    )))
+    stats["candidates"] = len(contracts)
     stats["selected"] = len(contracts)
     return DiscoveryResult(
         contracts=contracts, selected_sports=selected_sports,
@@ -918,4 +920,34 @@ def discover_game_contracts(cfg, client, *, now=None):
         session_end_local=window.session_end_local,
         session_start_utc=window.session_start_utc,
         session_end_utc=window.session_end_utc,
+        stats=dict(sorted(stats.items())))
+
+
+def discover_game_contracts(cfg, client, *, now=None):
+    """Prove and select today's Games from one explicit discovery source."""
+    has_sports = bool(getattr(cfg, "sports", None))
+    has_tickers = bool(getattr(cfg, "tickers", None))
+    if has_sports == has_tickers:
+        raise ValueError(
+            "discover_game_contracts requires exactly one of cfg.sports "
+            "or cfg.tickers")
+    if has_tickers:
+        return _discover_explicit_tickers(cfg, client, now=now)
+
+    inventory = discover_game_inventory(cfg, client, now=now)
+    ranked = rank_contracts(
+        inventory.contracts, Decimal(str(cfg.contracts_per_trade)))
+    max_markets = getattr(cfg, "max_monitored_markets", None)
+    if isinstance(max_markets, bool) or not isinstance(max_markets, int) or max_markets <= 0:
+        raise ValueError("cfg.max_monitored_markets must be a positive integer")
+    contracts = ranked[:max_markets]
+    stats = dict(inventory.stats)
+    stats["selected"] = len(contracts)
+    return DiscoveryResult(
+        contracts=contracts, selected_sports=inventory.selected_sports,
+        local_timezone=inventory.local_timezone,
+        session_start_local=inventory.session_start_local,
+        session_end_local=inventory.session_end_local,
+        session_start_utc=inventory.session_start_utc,
+        session_end_utc=inventory.session_end_utc,
         stats=dict(sorted(stats.items())))

@@ -266,6 +266,12 @@ class SportradarShadowAsyncTransport:
             f"/tennis/trial/v3/en/sport_events/{match}/timeline.json",
         )
 
+    async def fetch_live_summaries(self) -> TrialCapture:
+        return await self._get(
+            "live_summaries",
+            "/tennis/trial/v3/en/schedules/live/summaries.json",
+        )
+
     def _get_session(self) -> _AsyncSession:
         if self._session is None:
             self._session = self._session_factory(

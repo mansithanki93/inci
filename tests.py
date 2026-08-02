@@ -5069,6 +5069,54 @@ def test_api_only_new_sport_works_without_source_change():
     print("PASS API-only Sports metadata supports a newly selected Sport")
 
 
+def test_unranked_game_inventory_preserves_every_eligible_contract():
+    """Catches shadow catalog discovery inheriting the trading top-ten cap."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts, discover_game_inventory
+
+    event = "KXATP-26JUL26-MANY"
+    markets = tuple(
+        dict(
+            _normalized_market(
+                ticker=f"{event}-M{index:02d}",
+                event_ticker=event,
+                bid_size=Decimal(index + 1),
+                ask_size=Decimal(index + 1),
+            ),
+            yes_sub_title=f"Player {index}",
+        )
+        for index in range(12)
+    )
+    client_args = {
+        "sports": ("Tennis",),
+        "series": ({"series_ticker": "KXATP", "category": "Sports", "tags": ("Tennis",)},),
+        "milestones": {"Tennis League": (_normalized_game(milestone_id="many-1", event_ticker=event),)},
+        "events": {"KXATP": (_normalized_event(event_ticker=event, series_ticker="KXATP", markets=markets),)},
+    }
+    now = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+    inventory = discover_game_inventory(
+        _discover_cfg(sports=("Tennis",), max_markets=10),
+        _dynamic_discovery_client(**client_args),
+        now=now,
+    )
+    ranked = discover_game_contracts(
+        _discover_cfg(sports=("Tennis",), max_markets=10),
+        _dynamic_discovery_client(**client_args),
+        now=now,
+    )
+    assert len(inventory.contracts) == inventory.stats["selected"] == 12
+    assert len(ranked.contracts) == ranked.stats["selected"] == 10
+    assert tuple(contract.yes_player_name for contract in inventory.contracts) == tuple(
+        f"Player {index}" for index in range(12)
+    )
+    try:
+        inventory.contracts[0].yes_player_name = "changed"
+        assert False
+    except AttributeError:
+        pass
+    print("PASS unranked game inventory preserves every eligible contract")
+
+
 def test_wimbledon_soccer_is_not_classified_as_tennis():
     """Changing the Series tag, not the Wimbledon title, changes inclusion."""
     from datetime import datetime, timezone
@@ -7292,6 +7340,7 @@ if __name__ == "__main__":
     test_series_resolution_uses_unique_longest_official_prefix()
     test_domain_values_reject_invalid_identity_numeric_and_duplicates()
     test_api_only_new_sport_works_without_source_change()
+    test_unranked_game_inventory_preserves_every_eligible_contract()
     test_wimbledon_soccer_is_not_classified_as_tennis()
     test_series_mapping_uses_every_canonical_api_sport()
     test_main_game_event_is_preferred_over_props()

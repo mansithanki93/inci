@@ -206,6 +206,38 @@ class SportradarShadowAsyncTests(unittest.IsolatedAsyncioTestCase):
                 "sport_events/sr:sport_event:123456/timeline.json",
             )
 
+    async def test_fetch_live_summaries_uses_fixed_durable_route(self) -> None:
+        """Catches live discovery bypassing the quota ledger or fixed route."""
+
+        from inci_tennis_io.sportradar_shadow_async import (
+            SportradarShadowAsyncTransport,
+        )
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = _FakeSession(_FakeRequestContext(_FakeResponse()))
+            with TrialUsageLedger(root) as ledger:
+                transport = SportradarShadowAsyncTransport(
+                    api_key="safe-trial-key",
+                    ledger=ledger,
+                    session=session,
+                )
+                capture = await transport.fetch_live_summaries()
+
+            self.assertEqual(capture.payload, _PAYLOAD)
+            self.assertEqual(
+                session.calls[0]["url"],
+                "https://api.sportradar.com/tennis/trial/v3/en/"
+                "schedules/live/summaries.json",
+            )
+            usage = (root / "usage.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"route":"live_summaries"', usage)
+            self.assertEqual(
+                (_outcome_rows(root)[0]["outcome"], len(list((root / "raw").glob("*.json")))),
+                ("captured", 1),
+            )
+
     async def test_blocked_request_does_not_block_loop_and_timeout_is_recorded(
         self,
     ) -> None:
