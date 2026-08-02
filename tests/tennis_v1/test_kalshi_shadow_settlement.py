@@ -77,6 +77,11 @@ _FORBIDDEN_IMPORT_TERMS = frozenset({
     "portfolio", "order", "trade", "account", "credential", "provider",
     "strategy", "signal", "executor", "position", "fill", "fee", "pnl",
 })
+_APPROVED_TRANSPORT_CONSTANTS = {
+    "_ORIGIN": "https://external-api.kalshi.com",
+    "_CURRENT_PATH": "/trade-api/v2/markets/",
+    "_HISTORICAL_PATH": "/trade-api/v2/historical/markets/",
+}
 
 
 def _assert_authority_free_ast(tree: ast.AST) -> None:
@@ -89,22 +94,49 @@ def _assert_authority_free_ast(tree: ast.AST) -> None:
     assert not any(term in module.casefold() for module in modules for term in _FORBIDDEN_IMPORT_TERMS)
 
 
+def _assert_exact_transport_constants(tree: ast.AST) -> None:
+    assignments: dict[str, str] = {}
+    for node in tree.body:  # type: ignore[attr-defined]
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant) and type(node.value.value) is str:
+            assignments[target.id] = node.value.value
+    assert {name: assignments.get(name) for name in _APPROVED_TRANSPORT_CONSTANTS} == _APPROVED_TRANSPORT_CONSTANTS
+    literals = [node.value for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and type(node.value) is str]
+    assert not any(
+        (value.startswith("/") or "://" in value)
+        and value not in _APPROVED_TRANSPORT_CONSTANTS.values()
+        for value in literals
+    )
+
+
 def _assert_only_get_request_ast(tree: ast.AST) -> None:
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
              and isinstance(node.func, ast.Attribute) and node.func.attr == "request"]
     assert len(calls) == 1
     call = calls[0]
-    assert len(call.args) >= 2
+    assert len(call.args) == 2
     assert isinstance(call.args[0], ast.Constant) and call.args[0].value == "GET"
     assert {keyword.arg for keyword in call.keywords} == {"headers", "allow_redirects", "stream", "timeout"}
     assert isinstance(call.args[1], ast.BinOp) and isinstance(call.args[1].op, ast.Add)
     assert isinstance(call.args[1].left, ast.Name) and call.args[1].left.id == "_ORIGIN"
     headers = next(keyword.value for keyword in call.keywords if keyword.arg == "headers")
     assert isinstance(headers, ast.Dict)
-    assert {(key.value, value.value) for key, value in zip(headers.keys, headers.values)
-            if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)} == {
+    assert len(headers.keys) == 2
+    assert all(isinstance(key, ast.Constant) and type(key.value) is str for key in headers.keys)
+    assert all(isinstance(value, ast.Constant) and type(value.value) is str for value in headers.values)
+    assert {(key.value, value.value) for key, value in zip(headers.keys, headers.values)} == {
                 ("Accept", "application/json"), ("Accept-Encoding", "identity"),
             }
+    values = {keyword.arg: keyword.value for keyword in call.keywords}
+    assert isinstance(values["allow_redirects"], ast.Constant) and values["allow_redirects"].value is False
+    assert isinstance(values["stream"], ast.Constant) and values["stream"].value is True
+    timeout = values["timeout"]
+    assert isinstance(timeout, ast.Tuple) and len(timeout.elts) == 2
+    assert all(isinstance(item, ast.Constant) for item in timeout.elts)
+    assert tuple(item.value for item in timeout.elts) == (3, 10)
 
 
 def _assert_only_market_route_calls(tree: ast.AST) -> None:
@@ -258,6 +290,7 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
         source = Path(__file__).parents[2] / "inci_tennis_io" / "kalshi_shadow_settlement.py"
         tree = ast.parse(source.read_text(encoding="utf-8"))
         _assert_authority_free_ast(tree)
+        _assert_exact_transport_constants(tree)
         _assert_only_get_request_ast(tree)
         _assert_only_market_route_calls(tree)
 
@@ -271,6 +304,19 @@ class KalshiShadowSettlementTransportTests(unittest.TestCase):
             _assert_only_get_request_ast(ast.parse("client.request('GET', origin + path, headers={}, allow_redirects=False, stream=True, timeout=(3, 10), params={})"))
         with self.assertRaises(AssertionError):
             _assert_only_get_request_ast(ast.parse("client.request('GET', origin + path, headers={'Authorization': 'x'}, allow_redirects=False, stream=True, timeout=(3, 10))"))
+
+    def test_ast_policy_rejects_header_spread_and_third_positional_bypasses(self) -> None:
+        """Catches static policy accepting dynamic credentials or a hidden request body."""
+        with self.assertRaises(AssertionError):
+            _assert_only_get_request_ast(ast.parse("client.request('GET', _ORIGIN + path, body, headers={**dynamic_headers, 'Accept': 'application/json', 'Accept-Encoding': 'identity'}, allow_redirects=False, stream=True, timeout=(3, 10))"))
+
+    def test_ast_policy_rejects_extra_route_literal_and_dynamic_authorization_header(self) -> None:
+        """Catches a third endpoint or Authorization smuggled through an AST spread."""
+        constants = "_ORIGIN = 'https://external-api.kalshi.com'\n_CURRENT_PATH = '/trade-api/v2/markets/'\n_HISTORICAL_PATH = '/trade-api/v2/historical/markets/'\n_EXTRA = '/trade-api/v2/portfolio/'"
+        with self.assertRaises(AssertionError):
+            _assert_exact_transport_constants(ast.parse(constants))
+        with self.assertRaises(AssertionError):
+            _assert_only_get_request_ast(ast.parse("client.request('GET', _ORIGIN + path, headers={**authorization, 'Accept': 'application/json', 'Accept-Encoding': 'identity'}, allow_redirects=False, stream=True, timeout=(3, 10))"))
 
 
 if __name__ == "__main__":
