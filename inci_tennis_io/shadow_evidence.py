@@ -636,6 +636,65 @@ class PriceOnlyEvidenceObservation:
     kalshi_frames: int
 
 
+@dataclass(frozen=True, slots=True)
+class AuditedShadowSettlementSource:
+    """An immutable settlement identity derived from a fully audited ledger."""
+
+    session_path: Path
+    ledger_sha256: str
+    session_id: str
+    mode: str
+    event_ticker: str
+    market_tickers: tuple[str, str]
+    player_names: tuple[str, str]
+    first_row_sha256: str
+    terminal_row_sha256: str
+
+
+class _ShadowSettlementSourceAuditLease:
+    """Keep the source root shared-locked while its audit result is used."""
+
+    def __init__(
+        self, source: AuditedShadowSettlementSource, lock_fd: int
+    ) -> None:
+        self.source = source
+        self._lock_fd: int | None = lock_fd
+
+    def close(self) -> None:
+        """Release the audit lock exactly once."""
+
+        descriptor = self._lock_fd
+        if descriptor is None:
+            return
+        self._lock_fd = None
+        primary: BaseException | None = None
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except BaseException as error:
+            primary = error
+        try:
+            os.close(descriptor)
+        except BaseException as error:
+            if primary is None:
+                primary = error
+        if primary is not None:
+            raise primary
+
+    def __enter__(self) -> AuditedShadowSettlementSource:
+        if self._lock_fd is None:
+            _fail("shadow_evidence_closed")
+        return self.source
+
+    def __exit__(self, exc_type: object, *_: object) -> None:
+        if exc_type is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
 def _private_directory(path: Path) -> None:
     if not isinstance(path, Path) or not path.is_absolute():
         _fail("shadow_evidence_state_invalid")
@@ -663,6 +722,20 @@ def _private_directory(path: Path) -> None:
         or stat.S_IMODE(info.st_mode) != 0o700
     ):
         _fail("shadow_evidence_state_unsafe")
+
+
+def _validate_existing_private_directory(path: Path, *, code: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError:
+        _fail(code)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        _fail(code)
 
 
 def _open_private_file(
@@ -707,6 +780,28 @@ def _open_private_file(
             or stat.S_IMODE(info.st_mode) != 0o600
         ):
             _fail("shadow_evidence_state_unsafe")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_existing_private_readonly_file(path: Path, *, code: str) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow | cloexec)
+    except OSError:
+        _fail(code)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            _fail(code)
     except BaseException:
         os.close(descriptor)
         raise
@@ -1560,6 +1655,9 @@ class ShadowEvidenceStore:
         self._kalshi_receipts: dict[str, str] = {}
         self._eligible_predecessor_terminals: dict[str, tuple[str, int]] = {}
         self._audited_price_predecessors: list[tuple[str, str, int]] = []
+        self._audited_settlement_sources: dict[
+            str, AuditedShadowSettlementSource
+        ] = {}
         self._mode: str | None = None
         self._resolution_identity: (
             tuple[str, tuple[str, str], str, str] | None
@@ -1877,7 +1975,13 @@ class ShadowEvidenceStore:
                 price_only_sessions.add(session_id)
                 audited_tails[session_id] = (
                     len(rows),
-                    self._audit_price_only_rows(rows, session_id, receipts),
+                    self._audit_price_only_rows(
+                        rows,
+                        session_id,
+                        receipts,
+                        path=path,
+                        ledger_sha256=sha256(payload).hexdigest(),
+                    ),
                 )
                 continue
             terminal_indexes = [
@@ -1980,6 +2084,24 @@ class ShadowEvidenceStore:
                     previous_digest,
                     rows[-1]["ended_wall_ns"],
                 )
+                if resolution is None or resolution_row_sha256 is None:
+                    _fail("shadow_evidence_prior_corrupt")
+                self._audited_settlement_sources[session_id] = (
+                    AuditedShadowSettlementSource(
+                        session_path=path,
+                        ledger_sha256=sha256(payload).hexdigest(),
+                        session_id=session_id,
+                        mode="VERIFIED",
+                        event_ticker=resolution.event_ticker,
+                        market_tickers=resolution.market_tickers,
+                        player_names=(
+                            resolution.home_player_name,
+                            resolution.away_player_name,
+                        ),
+                        first_row_sha256=resolution_row_sha256,
+                        terminal_row_sha256=previous_digest,
+                    )
+                )
             audited_tails[session_id] = (len(rows), previous_digest)
         current_protocol_sessions = (
             price_only_sessions | set(commits) | protocol_epochs
@@ -2033,6 +2155,9 @@ class ShadowEvidenceStore:
         rows: list[dict[str, Any]],
         session_id: str,
         all_receipts: dict[str, str],
+        *,
+        path: Path,
+        ledger_sha256: str,
     ) -> str:
         terminal_indexes = [
             index
@@ -2135,6 +2260,24 @@ class ShadowEvidenceStore:
                     or row["session_row_sha256"] != session_row_sha256
                 ):
                     _fail("shadow_evidence_prior_corrupt")
+                if session_row_sha256 is None:
+                    _fail("shadow_evidence_prior_corrupt")
+                self._audited_settlement_sources[session_id] = (
+                    AuditedShadowSettlementSource(
+                        session_path=path,
+                        ledger_sha256=ledger_sha256,
+                        session_id=session_id,
+                        mode="PRICE_ONLY",
+                        event_ticker=session.event_ticker,
+                        market_tickers=session.market_tickers,
+                        player_names=(
+                            session.player_a_name,
+                            session.player_b_name,
+                        ),
+                        first_row_sha256=session_row_sha256,
+                        terminal_row_sha256=claimed_digest,
+                    )
+                )
             else:
                 _fail("shadow_evidence_prior_corrupt")
         return previous_digest
@@ -2974,7 +3117,77 @@ class ShadowEvidenceStore:
         self.close()
 
 
+def audit_shadow_settlement_source(
+    session_path: Path,
+) -> _ShadowSettlementSourceAuditLease:
+    """Audit one eligible terminal ledger without creating or changing state."""
+
+    if not isinstance(session_path, Path) or not session_path.is_absolute():
+        _fail("shadow_evidence_state_invalid")
+    try:
+        canonical_path = session_path.resolve(strict=True)
+    except OSError:
+        _fail("shadow_evidence_state_unsafe")
+    if canonical_path != session_path:
+        _fail("shadow_evidence_state_unsafe")
+    name = canonical_path.name
+    if not name.startswith("session-") or not name.endswith(".jsonl"):
+        _fail("shadow_evidence_state_invalid")
+    session_id = name[len("session-") : -len(".jsonl")]
+    if (
+        name != f"session-{session_id}.jsonl"
+        or _canonical_session_id(session_id) is None
+    ):
+        _fail("shadow_evidence_state_invalid")
+    state_root = canonical_path.parent
+    raw_root = state_root / "raw"
+    _validate_existing_private_directory(
+        state_root, code="shadow_evidence_state_unsafe"
+    )
+    _validate_existing_private_directory(
+        raw_root, code="shadow_evidence_state_unsafe"
+    )
+    _validate_existing_regular_file(
+        canonical_path,
+        expected_mode=0o600,
+        code="shadow_evidence_state_unsafe",
+        read_payload=False,
+    )
+    lock_fd = _open_existing_private_readonly_file(
+        state_root / "shadow.lock", code="shadow_evidence_state_unsafe"
+    )
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN}:
+                _fail("shadow_evidence_locked")
+            _fail("shadow_evidence_state_unavailable")
+        adapter = object.__new__(ShadowEvidenceStore)
+        adapter.state_root = state_root
+        adapter.raw_root = raw_root
+        adapter._eligible_predecessor_terminals = {}
+        adapter._audited_price_predecessors = []
+        adapter._audited_settlement_sources = {}
+        adapter._audit_prior_sessions()
+        source = adapter._audited_settlement_sources.get(session_id)
+        if source is None or source.session_path != canonical_path:
+            _fail("shadow_evidence_state_invalid")
+        return _ShadowSettlementSourceAuditLease(source, lock_fd)
+    except BaseException:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except BaseException:
+            pass
+        try:
+            os.close(lock_fd)
+        except BaseException:
+            pass
+        raise
+
+
 __all__ = (
+    "AuditedShadowSettlementSource",
     "KalshiOnlyCredentialMaterial",
     "PersistedKalshiFrame",
     "PriceOnlyEvidenceObservation",
@@ -2985,6 +3198,7 @@ __all__ = (
     "ShadowEvidenceStore",
     "ShadowMarketCandidate",
     "ShadowResolutionEvidence",
+    "audit_shadow_settlement_source",
     "default_shadow_state_root",
     "load_kalshi_only_credential_material",
     "load_shadow_credential_material",
