@@ -1,10 +1,13 @@
 """Durable, public-Kalshi-only labels for finalized tennis shadow sessions.
 
 This store detects non-racing at-rest corruption and requires cooperative writers
-to honor its advisory lock.  It does not defend against a malicious same-UID
-process racing checks, bypassing locks, changing process memory or descriptors,
-or coherently rolling back or deleting the state root.  Reverification of the
-held source lease narrows, but cannot eliminate, that boundary.
+to honor its advisory lock.  Durable reads are finite: epoch and commit files are
+limited to 1 KiB, pending descriptors to 32 KiB, each raw body to the transport's
+8 MiB maximum, and the ledger to 64 MiB, 10,000 rows, and 64 KiB per row.  It
+does not defend against a malicious same-UID process racing checks, bypassing
+locks, changing process memory or descriptors, or coherently rolling back or
+deleting the state root.  Reverification of the held source lease narrows, but
+cannot eliminate, that boundary.
 """
 
 from __future__ import annotations
@@ -40,9 +43,10 @@ _ROW_SCHEMA = "inci-tennis-shadow-settlement-row-v1"
 _ZERO_DIGEST = "0" * 64
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _DECIMAL_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.\d+)?\Z")
-_TICKER_RE = re.compile(r"[A-Z0-9][A-Z0-9._-]{0,255}\Z")
+_TICKER_RE = re.compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _RFC3339_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z"
 )
 _RECOGNIZED_STATUSES = frozenset(
     {"initialized", "inactive", "active", "closed", "determined", "disputed", "amended", "finalized"}
@@ -57,6 +61,14 @@ _ROOT_NAMES = frozenset(
         "settlements.jsonl",
     }
 )
+_MAX_EPOCH_BYTES = 1024
+_MAX_COMMIT_BYTES = 1024
+_MAX_PENDING_BYTES = 32 * 1024
+_MAX_RAW_BODY_BYTES = 8_388_608
+_MAX_LEDGER_BYTES = 64 * 1024 * 1024
+_MAX_LEDGER_LINE_BYTES = 64 * 1024
+_MAX_LEDGER_ROWS = 10_000
+_MAX_RAW_FILES = _MAX_LEDGER_ROWS * 2
 _ROW_KEYS = frozenset(
     {
         "schema",
@@ -231,8 +243,12 @@ def _safe_regular(path: Path, *, empty: bool = False) -> os.stat_result:
     return info
 
 
-def _read_safe(path: Path, *, empty: bool = False) -> bytes:
+def _read_safe(path: Path, *, maximum_bytes: int, empty: bool = False) -> bytes:
+    if type(maximum_bytes) is not int or maximum_bytes < 0:
+        raise ShadowSettlementError("shadow_settlement_size_policy_invalid")
     expected = _safe_regular(path, empty=empty)
+    if expected.st_size > maximum_bytes:
+        raise ShadowSettlementError("shadow_settlement_file_size_invalid")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     primary: BaseException | None = None
@@ -240,16 +256,20 @@ def _read_safe(path: Path, *, empty: bool = False) -> bytes:
         actual = os.fstat(descriptor)
         if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
             raise ShadowSettlementError("shadow_settlement_file_replaced")
-        chunks: list[bytes] = []
+        if actual.st_size > maximum_bytes:
+            raise ShadowSettlementError("shadow_settlement_file_size_invalid")
+        payload = bytearray()
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            remaining = maximum_bytes - len(payload)
+            chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
             if not chunk:
                 break
-            chunks.append(chunk)
-        payload = b"".join(chunks)
+            payload.extend(chunk)
+            if len(payload) > maximum_bytes:
+                raise ShadowSettlementError("shadow_settlement_file_size_invalid")
         if empty and payload:
             raise ShadowSettlementError("shadow_settlement_lock_nonempty")
-        return payload
+        return bytes(payload)
     except BaseException as exc:
         primary = exc
         raise
@@ -444,7 +464,7 @@ def _validate_row(
     row_number: int,
     previous_digest: str,
     raw_inventory: set[Path],
-) -> None:
+) -> ShadowSettlementResult:
     if set(row) != _ROW_KEYS:
         raise ShadowSettlementError("shadow_settlement_row_fields_invalid")
     if (
@@ -501,6 +521,7 @@ def _validate_row(
     markets = row["markets"]
     if type(markets) is not list or len(markets) != 2:
         raise ShadowSettlementError("shadow_settlement_markets_invalid")
+    persisted_states: list[KalshiFinalMarketState] = []
     for index, market in enumerate(markets):
         if type(market) is not dict or set(market) != _MARKET_KEYS:
             raise ShadowSettlementError("shadow_settlement_market_fields_invalid")
@@ -514,20 +535,43 @@ def _validate_row(
         if (
             raw_path != root / "raw" / expected_name
             or raw_path.resolve(strict=False) != raw_path
-            or market["ticker"] != tickers[index]
-            or market["event_ticker"] != row["event_ticker"]
             or not _is_digest(market["raw_sha256"])
         ):
             raise ShadowSettlementError("shadow_settlement_market_binding_invalid")
         if raw_path not in raw_inventory:
             raise ShadowSettlementError("shadow_settlement_raw_missing")
-        payload = _read_safe(raw_path)
+        payload = _read_safe(raw_path, maximum_bytes=_MAX_RAW_BODY_BYTES)
         if sha256(payload).hexdigest() != market["raw_sha256"]:
             raise ShadowSettlementError("shadow_settlement_raw_digest_invalid")
+        state_value = KalshiFinalMarketState(
+            ticker=market["ticker"],
+            event_ticker=market["event_ticker"],
+            market_type=market["market_type"],
+            status=market["status"],
+            result=market["result"],
+            settlement_value_dollars=market["settlement_value_dollars"],
+            settlement_ts=market["settlement_ts"],
+            raw_body=payload,
+            raw_sha256=market["raw_sha256"],
+            route_tier=market["route_tier"],
+        )
+        _validate_market_state_syntax(state_value)
+        persisted_states.append(state_value)
     candidate = dict(row)
     digest = candidate.pop("row_sha256")
     if sha256(_canonical_json(candidate)).hexdigest() != digest:
         raise ShadowSettlementError("shadow_settlement_row_digest_invalid")
+    evidence = _classify_values(
+        event_ticker=row["event_ticker"],  # type: ignore[arg-type]
+        market_tickers=tuple(tickers),  # type: ignore[arg-type]
+        player_names=tuple(players),  # type: ignore[arg-type]
+        states=persisted_states,
+    )
+    if state == "final" and evidence != ShadowSettlementResult(
+        "final", winner_ticker, winner_player  # type: ignore[arg-type]
+    ):
+        raise ShadowSettlementError("shadow_settlement_final_semantics_invalid")
+    return evidence
 
 
 def _validate_pending(
@@ -566,21 +610,33 @@ def _validate_pending(
         if type(item) is not dict:
             raise ShadowSettlementError("shadow_settlement_pending_raw_invalid")
         path = Path(item["path"])  # type: ignore[arg-type]
-        if path.parent != root / "raw" or sha256(_read_safe(path)).hexdigest() != item["sha256"]:
+        if (
+            path.parent != root / "raw"
+            or sha256(
+                _read_safe(path, maximum_bytes=_MAX_RAW_BODY_BYTES)
+            ).hexdigest()
+            != item["sha256"]
+        ):
             raise ShadowSettlementError("shadow_settlement_pending_raw_invalid")
 
 
 def _audit_root(root: Path) -> _Audit:
     _validate_root_configuration(root)
     _safe_directory(root)
-    names = {entry.name for entry in root.iterdir()}
-    if not names <= _ROOT_NAMES or "raw" not in names or "settlement.lock" not in names:
+    names: set[str] = set()
+    for entry in root.iterdir():
+        if entry.name not in _ROOT_NAMES or len(names) >= len(_ROOT_NAMES):
+            raise ShadowSettlementError("shadow_settlement_inventory_invalid")
+        names.add(entry.name)
+    if "raw" not in names or "settlement.lock" not in names:
         raise ShadowSettlementError("shadow_settlement_inventory_invalid")
     raw_root = root / "raw"
     _safe_directory(raw_root)
-    _read_safe(root / "settlement.lock", empty=True)
+    _read_safe(root / "settlement.lock", maximum_bytes=0, empty=True)
     raw_inventory: set[Path] = set()
     for path in raw_root.iterdir():
+        if len(raw_inventory) >= _MAX_RAW_FILES:
+            raise ShadowSettlementError("shadow_settlement_raw_count_invalid")
         _safe_regular(path)
         if path.name.startswith(".") or path.suffix != ".json":
             raise ShadowSettlementError("shadow_settlement_raw_inventory_invalid")
@@ -588,20 +644,29 @@ def _audit_root(root: Path) -> _Audit:
 
     epoch_path = root / "settlement.epoch"
     if epoch_path.exists() or epoch_path.is_symlink():
-        _validate_epoch(_parse_canonical(_read_safe(epoch_path), name="epoch"))
+        _validate_epoch(
+            _parse_canonical(
+                _read_safe(epoch_path, maximum_bytes=_MAX_EPOCH_BYTES), name="epoch"
+            )
+        )
 
     rows: list[dict[str, object]] = []
     ledger_path = root / "settlements.jsonl"
     if ledger_path.exists() or ledger_path.is_symlink():
-        payload = _read_safe(ledger_path)
+        payload = _read_safe(ledger_path, maximum_bytes=_MAX_LEDGER_BYTES)
         if not payload:
             raise ShadowSettlementError("shadow_settlement_ledger_empty")
+        lines = payload.splitlines(keepends=True)
+        if len(lines) > _MAX_LEDGER_ROWS:
+            raise ShadowSettlementError("shadow_settlement_ledger_row_count_invalid")
+        if any(len(line) > _MAX_LEDGER_LINE_BYTES for line in lines):
+            raise ShadowSettlementError("shadow_settlement_ledger_line_size_invalid")
         previous = _ZERO_DIGEST
-        seen_conflicts: set[tuple[object, ...]] = set()
         consumed_raw: set[Path] = set()
-        for index, line in enumerate(payload.splitlines(keepends=True), start=1):
+        source_histories: dict[tuple[object, ...], list[dict[str, object]]] = {}
+        for index, line in enumerate(lines, start=1):
             row = _parse_canonical(line, name="row")
-            _validate_row(
+            evidence = _validate_row(
                 row,
                 root=root,
                 row_number=index,
@@ -609,14 +674,27 @@ def _audit_root(root: Path) -> _Audit:
                 raw_inventory=raw_inventory,
             )
             identity = _row_source_identity(row)
-            if identity in seen_conflicts:
-                raise ShadowSettlementError("shadow_settlement_conflict_not_terminal")
-            if row["state"] == "conflict":
-                seen_conflicts.add(identity)
-            if row["supersedes_row_sha256"] is not None:
-                prior = [candidate for candidate in rows if _row_source_identity(candidate) == identity]
-                if not prior or row["supersedes_row_sha256"] != prior[-1]["row_sha256"]:
-                    raise ShadowSettlementError("shadow_settlement_supersedes_invalid")
+            history = source_histories.setdefault(identity, [])
+            if not history:
+                if row["supersedes_row_sha256"] is not None:
+                    raise ShadowSettlementError("shadow_settlement_first_supersedes_invalid")
+                if row["state"] == "final":
+                    if evidence.state != "final":
+                        raise ShadowSettlementError("shadow_settlement_first_final_invalid")
+                elif evidence.state != "conflict":
+                    raise ShadowSettlementError("shadow_settlement_first_conflict_invalid")
+            else:
+                first = history[0]
+                if (
+                    len(history) != 1
+                    or first["state"] != "final"
+                    or row["state"] != "conflict"
+                    or row["supersedes_row_sha256"] != first["row_sha256"]
+                ):
+                    raise ShadowSettlementError("shadow_settlement_history_invalid")
+                if _row_normalized_markets(row) == _row_normalized_markets(first):
+                    raise ShadowSettlementError("shadow_settlement_conflict_unchanged")
+            history.append(row)
             for market in row["markets"]:  # type: ignore[assignment]
                 consumed_raw.add(Path(market["raw_path"]))
             rows.append(row)
@@ -632,7 +710,9 @@ def _audit_root(root: Path) -> _Audit:
     commit: dict[str, object] | None = None
     commit_path = root / "settlement.commit"
     if commit_path.exists() or commit_path.is_symlink():
-        commit = _parse_canonical(_read_safe(commit_path), name="commit")
+        commit = _parse_canonical(
+            _read_safe(commit_path, maximum_bytes=_MAX_COMMIT_BYTES), name="commit"
+        )
         _validate_commit(commit)
     elif rows and not (root / "settlement.pending").exists():
         raise ShadowSettlementError("shadow_settlement_commit_missing")
@@ -645,7 +725,9 @@ def _audit_root(root: Path) -> _Audit:
     if pending_path.exists() or pending_path.is_symlink():
         if not rows:
             raise ShadowSettlementError("shadow_settlement_pending_without_row")
-        pending = _parse_canonical(_read_safe(pending_path), name="pending")
+        pending = _parse_canonical(
+            _read_safe(pending_path, maximum_bytes=_MAX_PENDING_BYTES), name="pending"
+        )
         _validate_pending(pending, root=root, tail=rows[-1])
         tail_number = len(rows)
         tail_digest = rows[-1]["row_sha256"]
@@ -725,11 +807,63 @@ def _valid_rfc3339(value: object) -> bool:
     if type(value) is not str or _RFC3339_RE.fullmatch(value) is None:
         return False
     try:
-        parsed = value[:-1] + "+00:00" if value.endswith("Z") else value
-        datetime.fromisoformat(parsed)
+        datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
         return False
     return True
+
+
+def _validate_market_state_syntax(state: KalshiFinalMarketState) -> None:
+    if (
+        type(state.ticker) is not str
+        or _TICKER_RE.fullmatch(state.ticker) is None
+        or type(state.event_ticker) is not str
+        or _TICKER_RE.fullmatch(state.event_ticker) is None
+        or type(state.market_type) is not str
+        or _TOKEN_RE.fullmatch(state.market_type) is None
+        or type(state.status) is not str
+        or state.status not in _RECOGNIZED_STATUSES
+        or type(state.route_tier) is not str
+        or state.route_tier not in ("current", "historical")
+    ):
+        raise ShadowSettlementError("shadow_settlement_market_syntax_invalid")
+    result = state.result
+    if (
+        result is not None
+        and (
+            type(result) is not str
+            or (result != "" and _TOKEN_RE.fullmatch(result) is None)
+        )
+    ):
+        raise ShadowSettlementError("shadow_settlement_result_syntax_invalid")
+    value = state.settlement_value_dollars
+    if (
+        value is not None
+        and (
+            type(value) is not str
+            or (value != "" and _DECIMAL_RE.fullmatch(value) is None)
+        )
+    ):
+        raise ShadowSettlementError("shadow_settlement_decimal_syntax_invalid")
+    timestamp = state.settlement_ts
+    if (
+        timestamp is not None
+        and (
+            type(timestamp) is not str
+            or (timestamp != "" and not _valid_rfc3339(timestamp))
+        )
+    ):
+        raise ShadowSettlementError("shadow_settlement_timestamp_syntax_invalid")
+    if state.status == "finalized" and not (result and value and timestamp):
+        raise ShadowSettlementError("shadow_settlement_final_fields_missing")
+    if type(state.raw_body) is not bytes or not state.raw_body:
+        raise ShadowSettlementError("shadow_settlement_raw_evidence_invalid")
+    if len(state.raw_body) > _MAX_RAW_BODY_BYTES:
+        raise ShadowSettlementError("shadow_settlement_raw_body_size_invalid")
+    if not _is_digest(state.raw_sha256):
+        raise ShadowSettlementError("shadow_settlement_raw_evidence_invalid")
+    if sha256(state.raw_body).hexdigest() != state.raw_sha256:
+        raise ShadowSettlementError("shadow_settlement_raw_digest_invalid")
 
 
 def _validate_fetched(states: Sequence[KalshiFinalMarketState]) -> None:
@@ -740,24 +874,23 @@ def _validate_fetched(states: Sequence[KalshiFinalMarketState]) -> None:
             raise ShadowSettlementError("shadow_settlement_market_state_invalid")
         if state.status not in _RECOGNIZED_STATUSES:
             raise ValueError("shadow_settlement_status_unknown")
-        if type(state.raw_body) is not bytes or not _is_digest(state.raw_sha256):
-            raise ShadowSettlementError("shadow_settlement_raw_evidence_invalid")
-        if sha256(state.raw_body).hexdigest() != state.raw_sha256:
-            raise ShadowSettlementError("shadow_settlement_raw_digest_invalid")
+        _validate_market_state_syntax(state)
 
 
-def _classify(
-    source: AuditedShadowSettlementSource,
+def _classify_values(
+    *,
+    event_ticker: str,
+    market_tickers: tuple[str, str],
+    player_names: tuple[str, str],
     states: Sequence[KalshiFinalMarketState],
 ) -> ShadowSettlementResult:
-    _validate_fetched(states)
     if any(state.status != "finalized" for state in states):
         return ShadowSettlementResult("pending", None, None)
     valid = True
     values: list[Decimal] = []
     for index, state in enumerate(states):
-        valid = valid and state.ticker == source.market_tickers[index]
-        valid = valid and state.event_ticker == source.event_ticker
+        valid = valid and state.ticker == market_tickers[index]
+        valid = valid and state.event_ticker == event_ticker
         valid = valid and state.market_type == "binary"
         valid = valid and _valid_rfc3339(state.settlement_ts)
         text = state.settlement_value_dollars
@@ -785,7 +918,20 @@ def _classify(
     if not valid:
         return ShadowSettlementResult("conflict", None, None)
     return ShadowSettlementResult(
-        "final", source.market_tickers[winner], source.player_names[winner]
+        "final", market_tickers[winner], player_names[winner]
+    )
+
+
+def _classify(
+    source: AuditedShadowSettlementSource,
+    states: Sequence[KalshiFinalMarketState],
+) -> ShadowSettlementResult:
+    _validate_fetched(states)
+    return _classify_values(
+        event_ticker=source.event_ticker,
+        market_tickers=source.market_tickers,
+        player_names=source.player_names,
+        states=states,
     )
 
 
@@ -823,13 +969,14 @@ class ShadowSettlementLabelStore:
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else default_shadow_settlement_state_root()
 
-    def reconcile(
+    def _reconcile_with_lease(
         self,
-        source: AuditedShadowSettlementSource,
+        lease: object,
         transport: KalshiShadowSettlementTransport,
         clocks: ShadowSettlementClocks,
-        verify_source: Callable[[], None],
     ) -> ShadowSettlementResult:
+        source = _source_from_lease(lease)
+        verify_source = lease.verify_unchanged  # type: ignore[attr-defined]
         _validate_root_configuration(self.root)
         if self.root.exists() or self.root.is_symlink():
             return self._under_lock(source, transport, clocks, verify_source, None)
@@ -1067,8 +1214,7 @@ def reconcile_shadow_settlement(
     clocks: ShadowSettlementClocks,
 ) -> ShadowSettlementResult:
     with audit_shadow_settlement_source(session_path) as lease:
-        source = _source_from_lease(lease)
-        return store.reconcile(source, transport, clocks, lease.verify_unchanged)
+        return store._reconcile_with_lease(lease, transport, clocks)
 
 
 __all__ = (

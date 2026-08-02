@@ -12,6 +12,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from inci_tennis_io.kalshi_shadow_settlement import KalshiFinalMarketState
 
@@ -138,6 +139,55 @@ def _rows(root: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in (root / "settlements.jsonl").read_text().splitlines()]
 
 
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _rewrite_rows(root: Path, rows: list[dict[str, object]]) -> None:
+    previous = "0" * 64
+    for index, row in enumerate(rows, start=1):
+        row["row_number"] = index
+        row["previous_row_sha256"] = previous
+        without_digest = {key: value for key, value in row.items() if key != "row_sha256"}
+        row["row_sha256"] = sha256(_canonical(without_digest)).hexdigest()
+        previous = row["row_sha256"]  # type: ignore[assignment]
+    ledger = b"".join(_canonical(row) + b"\n" for row in rows)
+    (root / "settlements.jsonl").write_bytes(ledger)
+    (root / "settlements.jsonl").chmod(0o600)
+    commit = {
+        "schema": "inci-tennis-shadow-settlement-commit-v1",
+        "row_number": len(rows),
+        "row_sha256": rows[-1]["row_sha256"],
+    }
+    (root / "settlement.commit").write_bytes(_canonical(commit) + b"\n")
+    (root / "settlement.commit").chmod(0o600)
+
+
+def _append_forged_row(
+    root: Path,
+    mutate: object,
+) -> list[dict[str, object]]:
+    rows = _rows(root)
+    row = json.loads(json.dumps(rows[-1]))
+    transaction_id = str(uuid4())
+    row["transaction_id"] = transaction_id
+    for index, market in enumerate(row["markets"]):
+        old_path = Path(market["raw_path"])
+        new_path = root / "raw" / (
+            f"settlement-{transaction_id}-{index:02d}-{row['market_tickers'][index]}.json"
+        )
+        new_path.write_bytes(old_path.read_bytes())
+        new_path.chmod(0o600)
+        market["raw_path"] = str(new_path)
+    mutate(row)
+    rows.append(row)
+    _rewrite_rows(root, rows)
+    return rows
+
+
 def _snapshot(root: Path) -> dict[str, tuple[bytes, int, int, int, int]]:
     return {
         str(path.relative_to(root)): (
@@ -153,6 +203,18 @@ def _snapshot(root: Path) -> dict[str, tuple[bytes, int, int, int, int]]:
 
 
 class ShadowSettlementLabelContractTests(unittest.TestCase):
+    def test_store_has_no_public_reconciliation_bypass(self) -> None:
+        """Catches callers persisting a fabricated source with a no-op verifier."""
+        from inci_tennis_io.shadow_settlement_labels import ShadowSettlementLabelStore
+
+        store = ShadowSettlementLabelStore(Path("/canonical/configuration-only"))
+        self.assertFalse(hasattr(store, "reconcile"))
+        public_methods = {
+            name for name in dir(ShadowSettlementLabelStore)
+            if not name.startswith("_")
+        }
+        self.assertEqual(public_methods, set())
+
     def test_result_is_frozen_and_default_root_uses_os_account_only(self) -> None:
         """Catches mutable results or HOME/Path.home controlling durable authority."""
         from inci_tennis_io.shadow_settlement_labels import (
@@ -263,13 +325,6 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
             "event": (_market(0, event_ticker="OTHER"), _market(1)),
             "scalar": (_market(0, market_type="scalar"), _market(1)),
             "void": (_market(0, result="void"), _market(1)),
-            "missing_result": (_market(0, result=None), _market(1)),
-            "missing_value": (_market(0, settlement_value_dollars=None), _market(1)),
-            "missing_timestamp": (_market(0, settlement_ts=None), _market(1)),
-            "bad_timestamp": (_market(0, settlement_ts="2026-02-30T18:30:00Z"), _market(1)),
-            "exponent": (_market(0, settlement_value_dollars="1e0"), _market(1)),
-            "sign": (_market(0, settlement_value_dollars="+1"), _market(1)),
-            "leading_zero": (_market(0, settlement_value_dollars="01.0"), _market(1)),
             "wrong_yes_value": (_market(0, settlement_value_dollars="0"), _market(1)),
             "noncomplementary": (_market(0, settlement_value_dollars="1.1"), _market(1)),
         }
@@ -282,6 +337,32 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
                 self.assertEqual((result.state, result.winning_market_ticker,
                                   result.winning_player_name), ("conflict", None, None))
                 self.assertEqual(_rows(root)[0]["state"], "conflict")
+                no_network = _Transport((_market(0), _market(1)))
+                self.assertEqual(
+                    _reconcile(source, root, no_network, _Clocks()).state,
+                    "conflict",
+                )
+                self.assertEqual(no_network.calls, [])
+
+    def test_transport_impossible_finalized_fields_fail_closed_without_writes(self) -> None:
+        """Catches hand-built schema-invalid states being persisted as conflicts."""
+        cases = {
+            "missing_result": (_market(0, result=None), _market(1)),
+            "missing_value": (_market(0, settlement_value_dollars=None), _market(1)),
+            "missing_timestamp": (_market(0, settlement_ts=None), _market(1)),
+            "bad_timestamp": (_market(0, settlement_ts="2026-02-30T18:30:00Z"), _market(1)),
+            "exponent": (_market(0, settlement_value_dollars="1e0"), _market(1)),
+            "sign": (_market(0, settlement_value_dollars="+1"), _market(1)),
+            "leading_zero": (_market(0, settlement_value_dollars="01.0"), _market(1)),
+        }
+        for name, states in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                with self.assertRaises(RuntimeError):
+                    _reconcile(source, root, _Transport(states), _Clocks())
+                self.assertFalse(root.exists())
 
     def test_unknown_status_is_error_and_never_pending_or_durable(self) -> None:
         """Catches unknown lifecycle values being mislabeled as an ordinary pending state."""
@@ -532,6 +613,248 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
                 _reconcile(source, root, transport, _Clocks())
             self.assertEqual(transport.calls, [])
             self.assertEqual(len(_rows(root)), 1)
+
+    def test_full_audit_rejects_forbidden_per_source_histories(self) -> None:
+        """Catches second finals, missing/wrong supersession, and post-conflict rows."""
+        def second_final(row: dict[str, object]) -> None:
+            row["supersedes_row_sha256"] = None
+
+        def missing_supersedes(row: dict[str, object]) -> None:
+            row["state"] = "conflict"
+            row["winning_market_ticker"] = None
+            row["winning_player_name"] = None
+            row["markets"][0]["status"] = "determined"  # type: ignore[index]
+            row["supersedes_row_sha256"] = None
+
+        def wrong_supersedes(row: dict[str, object]) -> None:
+            missing_supersedes(row)
+            row["supersedes_row_sha256"] = "f" * 64
+
+        for name, mutate in (
+            ("second_final", second_final),
+            ("missing_supersedes", missing_supersedes),
+            ("wrong_supersedes", wrong_supersedes),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                states = (_market(0), _market(1))
+                _reconcile(source, root, _Transport(states), _Clocks())
+                _append_forged_row(root, mutate)
+                transport = _Transport(states)
+                with self.assertRaises(RuntimeError):
+                    _reconcile(source, root, transport, _Clocks())
+                self.assertEqual(transport.calls, [])
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = _source(base / "source")
+            root = base / "labels"
+            states = (_market(0), _market(1))
+            _reconcile(source, root, _Transport(states), _Clocks())
+
+            def valid_second_conflict(row: dict[str, object]) -> None:
+                row["state"] = "conflict"
+                row["winning_market_ticker"] = None
+                row["winning_player_name"] = None
+                row["markets"][0]["status"] = "determined"  # type: ignore[index]
+                row["supersedes_row_sha256"] = _rows(root)[0]["row_sha256"]
+
+            second = _append_forged_row(root, valid_second_conflict)[-1]
+
+            def third_after_conflict(row: dict[str, object]) -> None:
+                row["state"] = "conflict"
+                row["winning_market_ticker"] = None
+                row["winning_player_name"] = None
+                row["supersedes_row_sha256"] = second["row_sha256"]
+
+            _append_forged_row(root, third_after_conflict)
+            transport = _Transport(states)
+            with self.assertRaises(RuntimeError):
+                _reconcile(source, root, transport, _Clocks())
+            self.assertEqual(transport.calls, [])
+
+    def test_full_audit_revalidates_normalized_market_and_row_semantics(self) -> None:
+        """Catches digest-consistent malformed Markets or unsupported row meanings."""
+        def route(row: dict[str, object]) -> None:
+            row["markets"][0]["route_tier"] = "archive"  # type: ignore[index]
+
+        def token(row: dict[str, object]) -> None:
+            row["markets"][0]["market_type"] = "binary/type"  # type: ignore[index]
+
+        def status(row: dict[str, object]) -> None:
+            row["markets"][0]["status"] = "mystery"  # type: ignore[index]
+
+        def result_type(row: dict[str, object]) -> None:
+            row["markets"][0]["result"] = 1  # type: ignore[index]
+
+        def decimal(row: dict[str, object]) -> None:
+            row["markets"][0]["settlement_value_dollars"] = "1e0"  # type: ignore[index]
+
+        def timestamp(row: dict[str, object]) -> None:
+            row["markets"][0]["settlement_ts"] = "2026-08-01T18:30:00+00:00"  # type: ignore[index]
+
+        def both_yes_final(row: dict[str, object]) -> None:
+            row["markets"][1]["result"] = "yes"  # type: ignore[index]
+            row["markets"][1]["settlement_value_dollars"] = "1"  # type: ignore[index]
+
+        def first_conflict_valid_pair(row: dict[str, object]) -> None:
+            row["state"] = "conflict"
+            row["winning_market_ticker"] = None
+            row["winning_player_name"] = None
+
+        def first_conflict_nonfinal(row: dict[str, object]) -> None:
+            first_conflict_valid_pair(row)
+            row["markets"][0]["status"] = "determined"  # type: ignore[index]
+            row["markets"][0]["result"] = None  # type: ignore[index]
+            row["markets"][0]["settlement_value_dollars"] = None  # type: ignore[index]
+            row["markets"][0]["settlement_ts"] = None  # type: ignore[index]
+
+        mutations = (
+            ("route", route), ("token", token), ("status", status),
+            ("result_type", result_type), ("decimal", decimal),
+            ("timestamp", timestamp), ("both_yes_final", both_yes_final),
+            ("first_conflict_valid_pair", first_conflict_valid_pair),
+            ("first_conflict_nonfinal", first_conflict_nonfinal),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                states = (_market(0), _market(1))
+                _reconcile(source, root, _Transport(states), _Clocks())
+                rows = _rows(root)
+                mutate(rows[0])
+                _rewrite_rows(root, rows)
+                transport = _Transport(states)
+                with self.assertRaises(RuntimeError):
+                    _reconcile(source, root, transport, _Clocks())
+                self.assertEqual(transport.calls, [])
+
+    def test_semantically_valid_conflict_history_boundaries_are_accepted(self) -> None:
+        """Catches an overstrict audit rejecting allowed finalized/nonfinal changes."""
+        cases = (
+            (_market(0, result="no", settlement_value_dollars="0"),
+             _market(1, result="yes", settlement_value_dollars="1")),
+            (_market(0), _market(1, result="yes", settlement_value_dollars="1")),
+            (_market(0, status="determined", result=None,
+                     settlement_value_dollars=None, settlement_ts=None), _market(1)),
+        )
+        for states in cases:
+            with self.subTest(states=states), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                _reconcile(source, root, _Transport((_market(0), _market(1))), _Clocks())
+                result = _reconcile(source, root, _Transport(states), _Clocks())
+                self.assertEqual(result.state, "conflict")
+                no_network = _Transport((_market(0), _market(1)))
+                self.assertEqual(_reconcile(source, root, no_network, _Clocks()).state, "conflict")
+                self.assertEqual(no_network.calls, [])
+
+    def test_all_durable_reads_enforce_finite_caps_with_exact_boundaries(self) -> None:
+        """Catches control, raw, ledger, or line reads allocating without a bound."""
+        from inci_tennis_io import shadow_settlement_labels as labels
+
+        self.assertEqual(labels._MAX_RAW_BODY_BYTES, 8_388_608)
+        self.assertLessEqual(labels._MAX_EPOCH_BYTES, 4096)
+        self.assertLessEqual(labels._MAX_COMMIT_BYTES, 4096)
+        self.assertLessEqual(labels._MAX_PENDING_BYTES, 65_536)
+        self.assertGreater(labels._MAX_LEDGER_BYTES, labels._MAX_LEDGER_LINE_BYTES)
+        self.assertGreater(labels._MAX_LEDGER_ROWS, 1)
+
+        cap_cases = (
+            ("_MAX_EPOCH_BYTES", "settlement.epoch"),
+            ("_MAX_COMMIT_BYTES", "settlement.commit"),
+            ("_MAX_RAW_BODY_BYTES", "raw"),
+            ("_MAX_LEDGER_BYTES", "settlements.jsonl"),
+        )
+        for constant, artifact in cap_cases:
+            with self.subTest(constant=constant), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                states = (_market(0), _market(1))
+                _reconcile(source, root, _Transport(states), _Clocks())
+                path = next((root / "raw").iterdir()) if artifact == "raw" else root / artifact
+                exact = path.stat().st_size
+                with patch.object(labels, constant, exact):
+                    self.assertEqual(_reconcile(source, root, _Transport(states), _Clocks()).state, "final")
+                transport = _Transport(states)
+                with patch.object(labels, constant, exact - 1):
+                    with self.assertRaisesRegex(RuntimeError, "size"):
+                        _reconcile(source, root, transport, _Clocks())
+                self.assertEqual(transport.calls, [])
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = _source(base / "source")
+            root = base / "labels"
+            states = (_market(0), _market(1))
+            _reconcile(source, root, _Transport(states), _Clocks())
+            ledger = root / "settlements.jsonl"
+            line_size = len(ledger.read_bytes())
+            with patch.object(labels, "_MAX_LEDGER_LINE_BYTES", line_size):
+                self.assertEqual(_reconcile(source, root, _Transport(states), _Clocks()).state, "final")
+            with patch.object(labels, "_MAX_LEDGER_LINE_BYTES", line_size - 1):
+                with self.assertRaisesRegex(RuntimeError, "line"):
+                    _reconcile(source, root, _Transport(states), _Clocks())
+            with patch.object(labels, "_MAX_LEDGER_ROWS", 1):
+                self.assertEqual(_reconcile(source, root, _Transport(states), _Clocks()).state, "final")
+            with patch.object(labels, "_MAX_LEDGER_ROWS", 0):
+                with self.assertRaisesRegex(RuntimeError, "row"):
+                    _reconcile(source, root, _Transport(states), _Clocks())
+
+        for cap_delta, should_pass in ((0, True), (-1, False)):
+            with self.subTest(pending_cap_delta=cap_delta), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                states = (_market(0), _market(1))
+                real_unlink = labels.os.unlink
+
+                def retain_pending(path: object, *args: object, **kwargs: object) -> None:
+                    if Path(path).name == "settlement.pending":
+                        raise OSError("retain pending")
+                    real_unlink(path, *args, **kwargs)
+
+                with patch.object(labels.os, "unlink", side_effect=retain_pending):
+                    with self.assertRaisesRegex(OSError, "retain pending"):
+                        _reconcile(source, root, _Transport(states), _Clocks())
+                exact = (root / "settlement.pending").stat().st_size
+                transport = _Transport(states)
+                with patch.object(labels, "_MAX_PENDING_BYTES", exact + cap_delta):
+                    if should_pass:
+                        self.assertEqual(_reconcile(source, root, transport, _Clocks()).state, "final")
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "size"):
+                            _reconcile(source, root, transport, _Clocks())
+                        self.assertEqual(transport.calls, [])
+
+    def test_raw_body_accepts_transport_maximum_and_rejects_one_byte_over(self) -> None:
+        """Catches a settlement-specific raw cap drifting from the reviewed transport."""
+        from inci_tennis_io import shadow_settlement_labels as labels
+
+        for size, should_pass in ((8_388_608, True), (8_388_609, False)):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                body = b"x" * size
+                states = (
+                    replace(_market(0), raw_body=body, raw_sha256=sha256(body).hexdigest()),
+                    _market(1),
+                )
+                if should_pass:
+                    self.assertEqual(_reconcile(source, root, _Transport(states), _Clocks()).state, "final")
+                    self.assertEqual(next(path for path in (root / "raw").iterdir() if "-00-" in path.name).stat().st_size,
+                                     labels._MAX_RAW_BODY_BYTES)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "size"):
+                        _reconcile(source, root, _Transport(states), _Clocks())
+                    self.assertFalse(root.exists())
 
     def test_transaction_phase_fault_matrix_never_returns_false_or_duplicates(self) -> None:
         """Catches durability boundary failures returning a label or duplicating a row."""
