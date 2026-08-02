@@ -103,10 +103,14 @@ bounded bodies, duplicate-key rejection, bounded pagination, redirect refusal,
 and sanitized diagnostics. Catalog incompleteness or schema drift halts the
 chooser because the exchange census is the primary boundary.
 
-Every exact Series row whose structured tag is `Tennis` is scanned. The
-Event's explicit `series_ticker` must agree with the Series query. Deriving a
-Series by matching an Event ticker prefix is removed; ticker and title text are
-never classification inputs.
+Every exact Series row whose structured tag is `Tennis` is retained as the
+allowed Series set. Each current-day game Milestone supplies its explicit
+Event ticker, which is fetched through the fixed public
+`GET /events/{event_ticker}?with_nested_markets=true` route. The Event's
+explicit `series_ticker` must belong to the allowed set. Deriving a Series by
+matching an Event ticker prefix is removed; ticker and title text are never
+classification inputs. This also avoids paginating every open event in every
+tennis Series merely to retrieve a handful of current-day Milestone Events.
 
 ## Optional Provider Discovery
 
