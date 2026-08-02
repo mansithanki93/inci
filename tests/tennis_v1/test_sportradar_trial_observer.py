@@ -609,6 +609,173 @@ class SportradarTrialLedgerTests(unittest.TestCase):
                 ["shadow", "shadow"],
             )
 
+    def test_shadow_discovery_quit_and_post_discovery_halt_are_restartable(self) -> None:
+        """Catches chooser exits poisoning the next trial-ledger startup."""
+
+        from hashlib import sha256
+        from inci_tennis_io.sportradar_trial_transport import (
+            TrialObservationRecord,
+            TrialUsageLedger,
+        )
+
+        captured = 1_785_607_205_000_000_000
+        for label, reason, code in (
+            ("quit", "list_complete", None),
+            (
+                "catalog_halt",
+                "halted",
+                "sportradar_shadow_discovery_halted",
+            ),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                payload = _live_summaries_payload()
+                with TrialUsageLedger(root) as ledger:
+                    reservation = ledger.reserve("live_summaries")
+                    raw_path = ledger.persist_raw(
+                        reservation, payload, captured_wall_ns=captured
+                    )
+                    ledger.record_attempt_outcome(
+                        reservation,
+                        outcome="captured",
+                        code="sportradar_capture_persisted",
+                    )
+                    ledger.record_observation(
+                        TrialObservationRecord(
+                            command="shadow",
+                            reservation=reservation,
+                            provider_match_id=None,
+                            generated_wall_ns=1_785_607_202_000_000_000,
+                            captured_wall_ns=captured,
+                            status="listed",
+                            match_status=None,
+                            payload_sha256=sha256(payload).hexdigest(),
+                            raw_path=raw_path,
+                            progression="discovery",
+                            last_event_id=None,
+                            terminal_reason=None,
+                        )
+                    )
+                    values: dict[str, object] = {
+                        "command": "shadow",
+                        "provider_match_id": None,
+                        "reason": reason,
+                    }
+                    if code is not None:
+                        values["code"] = code
+                    ledger.record_session_terminal(**values)
+
+                with TrialUsageLedger(root) as reopened:
+                    self.assertEqual(reopened.recovered_unclean_sessions, 0)
+
+    def test_shadow_live_discovery_parser_failure_with_no_selection_restarts(self) -> None:
+        """Catches a malformed chooser response leaving an unauditable terminal."""
+
+        from inci_tennis_io.sportradar_trial_transport import TrialUsageLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with TrialUsageLedger(root) as ledger:
+                reservation = ledger.reserve("live_summaries")
+                ledger.persist_raw(
+                    reservation,
+                    b"{}",
+                    captured_wall_ns=1_785_607_205_000_000_000,
+                )
+                ledger.record_attempt_outcome(
+                    reservation,
+                    outcome="captured",
+                    code="sportradar_capture_persisted",
+                )
+                ledger.record_parser_failure(
+                    command="shadow",
+                    reservation=reservation,
+                    code="sportradar_live_summaries_schema_unknown",
+                )
+                ledger.record_session_terminal(
+                    command="shadow",
+                    provider_match_id=None,
+                    reason="halted",
+                    code="sportradar_live_summaries_schema_unknown",
+                )
+
+            with TrialUsageLedger(root) as reopened:
+                self.assertEqual(reopened.recovered_unclean_sessions, 0)
+
+    def test_selected_shadow_session_restarts_with_discovery_and_collection_routes(self) -> None:
+        """Catches audit rejection of the chooser's one shared provider session."""
+
+        from hashlib import sha256
+        from inci_tennis_io.sportradar_trial_transport import (
+            TrialObservationRecord,
+            TrialUsageLedger,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            captured = 1_785_607_205_000_000_000
+            rows = (
+                (
+                    "live_summaries",
+                    _live_summaries_payload(),
+                    None,
+                    "listed",
+                    None,
+                    "discovery",
+                ),
+                (
+                    "summary",
+                    _summary_payload(),
+                    "sr:sport_event:123456",
+                    "live",
+                    "1st_set",
+                    "initial",
+                ),
+                (
+                    "timeline",
+                    _timeline_payload(),
+                    "sr:sport_event:123456",
+                    "live",
+                    "1st_set",
+                    "initial_timeline",
+                ),
+            )
+            with TrialUsageLedger(root) as ledger:
+                for route, payload, provider_id, status, match_status, progression in rows:
+                    reservation = ledger.reserve(route)
+                    raw_path = ledger.persist_raw(
+                        reservation, payload, captured_wall_ns=captured
+                    )
+                    ledger.record_attempt_outcome(
+                        reservation,
+                        outcome="captured",
+                        code="sportradar_capture_persisted",
+                    )
+                    ledger.record_observation(
+                        TrialObservationRecord(
+                            command="shadow",
+                            reservation=reservation,
+                            provider_match_id=provider_id,
+                            generated_wall_ns=1_785_607_202_000_000_000,
+                            captured_wall_ns=captured,
+                            status=status,
+                            match_status=match_status,
+                            payload_sha256=sha256(payload).hexdigest(),
+                            raw_path=raw_path,
+                            progression=progression,
+                            last_event_id=None,
+                            terminal_reason=None,
+                        )
+                    )
+                ledger.record_session_terminal(
+                    command="shadow",
+                    provider_match_id="sr:sport_event:123456",
+                    reason="duration_elapsed",
+                )
+
+            with TrialUsageLedger(root) as reopened:
+                self.assertEqual(reopened.recovered_unclean_sessions, 0)
+
     def test_existing_check_audit_still_reopens(self) -> None:
         from hashlib import sha256
         from inci_tennis_io.sportradar_trial_transport import (

@@ -222,6 +222,7 @@ class ShadowDashboardView:
     reason: str
     sportradar_captures: int
     kalshi_frames: int
+    mapping_mode: str = "operator_supplied"
 
 
 def _terminal_text(value: object, maximum: int = 128) -> str:
@@ -240,13 +241,21 @@ def _terminal_text(value: object, maximum: int = 128) -> str:
 def render_shadow_dashboard(view: ShadowDashboardView) -> str:
     """Render one dependency-free, explicitly non-trading snapshot."""
 
+    if view.mapping_mode == "auto_matched":
+        mode = "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS"
+        mapping = "AUTO-MATCHED / UNQUALIFIED"
+    elif view.mapping_mode == "operator_supplied":
+        mode = "READ ONLY / UNQUALIFIED / NO ORDERS"
+        mapping = "OPERATOR-SUPPLIED / UNVERIFIED"
+    else:
+        _fail("shadow_mapping_mode_invalid")
     age_sr = "--" if view.sportradar_age_seconds is None else f"{view.sportradar_age_seconds:.1f}s"
     age_kalshi = "--" if view.kalshi_age_seconds is None else f"{view.kalshi_age_seconds:.1f}s"
     generation = "--" if view.kalshi_generation is None else str(view.kalshi_generation)
     sequence = "--" if view.kalshi_sequence is None else str(view.kalshi_sequence)
     rows = (
-        ("MODE", "READ ONLY / UNQUALIFIED / NO ORDERS"),
-        ("TICKER MAPPING", "OPERATOR-SUPPLIED / UNVERIFIED"),
+        ("MODE", mode),
+        ("TICKER MAPPING", mapping),
         ("MATCH", view.provider_match_id),
         ("PLAYERS", view.players),
         ("SCORE", view.score),
@@ -384,6 +393,7 @@ class LiveShadowCollector:
         pause: Callable[[float], Awaitable[None]],
         stop_requested: Callable[[], bool],
         render: Callable[[str], None],
+        mapping_mode: str = "operator_supplied",
     ) -> None:
         if (
             type(provider_match_id) is not str
@@ -406,6 +416,7 @@ class LiveShadowCollector:
                     render,
                 )
             )
+            or mapping_mode not in {"operator_supplied", "auto_matched"}
             or any(
                 not callable(getattr(market_projector, name, None))
                 for name in (
@@ -429,6 +440,7 @@ class LiveShadowCollector:
         self._pause = pause
         self._stop_requested = stop_requested
         self._render = render
+        self._mapping_mode = mapping_mode
         self._score: sportradar_trial_v3.SportradarScoreSnapshot | None = None
         self._timeline: (
             sportradar_trial_v3.SportradarTimelineSnapshot | None
@@ -703,6 +715,7 @@ class LiveShadowCollector:
                 reason=reason,
                 sportradar_captures=self._sportradar_captures,
                 kalshi_frames=self._kalshi_frames,
+                mapping_mode=self._mapping_mode,
             )
         )
 

@@ -86,6 +86,26 @@ def _observation(provider_path: Path, reference: object) -> object:
     )
 
 
+def _resolution(provider_path: Path) -> object:
+    from inci_tennis_io.shadow_evidence import ShadowResolutionEvidence
+
+    payload = provider_path.read_bytes()
+    return ShadowResolutionEvidence(
+        selected_wall_ns=WALL_NS + 2,
+        provider_match_id=MATCH_ID,
+        provider_start_wall_ns=WALL_NS - 10_000_000_000,
+        event_ticker="KXTENNIS-MATCH",
+        home_player_name="Player Home",
+        away_player_name="Player Away",
+        market_tickers=TICKERS,
+        provider_discovery_raw_path=str(provider_path),
+        provider_discovery_raw_sha256=sha256(payload).hexdigest(),
+        kalshi_catalog_sha256="1" * 64,
+        resolver_snapshot_sha256="2" * 64,
+        resolver_rule_version="strict-name-start-v1",
+    )
+
+
 def _terminal(
     store: object,
     *,
@@ -113,6 +133,22 @@ def _complete_session(root: Path) -> tuple[Path, Path]:
         ledger_path = store.ledger_path
         reference = store.persist_kalshi_frame(_frame())
         store.append_observation(_observation(provider_path, reference))
+        _terminal(store)
+    return ledger_path, provider_path
+
+
+def _complete_resolved_session(root: Path) -> tuple[Path, Path]:
+    from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+
+    provider_path = root.parent / "provider-live-summaries.json"
+    _private_payload(provider_path, b'{"provider":"live-summaries"}')
+    summary_path = root.parent / "provider-summary.json"
+    _private_payload(summary_path, b'{"provider":"summary"}')
+    with ShadowEvidenceStore(root) as store:
+        ledger_path = store.ledger_path
+        store.append_resolution(_resolution(provider_path))
+        reference = store.persist_kalshi_frame(_frame())
+        store.append_observation(_observation(summary_path, reference))
         _terminal(store)
     return ledger_path, provider_path
 
@@ -147,6 +183,104 @@ def _rewrite_rows_with_valid_chain(
 
 
 class ShadowEvidenceIntegrityTests(unittest.TestCase):
+    def test_resolution_is_first_durable_row_and_reaudits(self) -> None:
+        """Catches losing the automatic identity proof before market frames."""
+
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            ledger, _ = _complete_resolved_session(root)
+            rows = _read_rows(ledger)
+
+            self.assertEqual(rows[0]["kind"], "resolution")
+            self.assertEqual(rows[0]["row_number"], 1)
+            self.assertEqual(rows[0]["provider_match_id"], MATCH_ID)
+            self.assertEqual(rows[0]["market_tickers"], list(TICKERS))
+            with ShadowEvidenceStore(root) as reopened:
+                _terminal(reopened, sportradar_captures=0, kalshi_frames=0)
+
+    def test_resolution_must_be_once_and_before_every_other_row(self) -> None:
+        """Catches replacing or inserting a chooser binding mid-session."""
+
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "shadow"
+            provider = base / "provider-live-summaries.json"
+            _private_payload(provider, b'{"provider":"live-summaries"}')
+            with ShadowEvidenceStore(root) as store:
+                value = _resolution(provider)
+                store.append_resolution(value)
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError, "shadow_evidence_resolution_invalid"
+                ):
+                    store.append_resolution(value)
+                store.append_terminal(
+                    reason="duration_elapsed",
+                    code=None,
+                    ended_wall_ns=WALL_NS + 30,
+                    ended_monotonic_ns=30,
+                    provider_match_id=MATCH_ID,
+                    market_tickers=TICKERS,
+                    sportradar_captures=0,
+                    kalshi_frames=0,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "shadow"
+            provider = base / "provider-live-summaries.json"
+            _private_payload(provider, b'{"provider":"live-summaries"}')
+            with ShadowEvidenceStore(root) as store:
+                store.persist_kalshi_frame(_frame())
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError, "shadow_evidence_resolution_invalid"
+                ):
+                    store.append_resolution(_resolution(provider))
+                store.append_terminal(
+                    reason="duration_elapsed",
+                    code=None,
+                    ended_wall_ns=WALL_NS + 30,
+                    ended_monotonic_ns=30,
+                    provider_match_id=MATCH_ID,
+                    market_tickers=TICKERS,
+                    sportradar_captures=0,
+                    kalshi_frames=1,
+                )
+
+    def test_resolution_raw_reference_and_selected_identity_are_reaudited(self) -> None:
+        """Catches tampering with discovery bytes or later selected identity."""
+
+        for mutation in ("raw", "observation_identity", "terminal_identity"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "shadow"
+                ledger, provider = _complete_resolved_session(root)
+                if mutation == "raw":
+                    provider.write_bytes(b'{"provider":"tampered"}')
+                else:
+                    rows = _read_rows(ledger)
+                    target = rows[2] if mutation == "observation_identity" else rows[3]
+                    target["market_tickers"] = [TICKERS[1], TICKERS[0]]
+                    _rewrite_rows_with_valid_chain(ledger, rows)
+
+                self._assert_reopen_rejected(root)
+
+    def test_manual_session_without_resolution_remains_compatible(self) -> None:
+        """Catches requiring new chooser evidence for explicit diagnostic mode."""
+
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            _complete_session(root)
+            with ShadowEvidenceStore(root) as reopened:
+                _terminal(reopened, sportradar_captures=0, kalshi_frames=0)
+
     def test_terminal_frame_count_must_equal_durable_capture_rows(self) -> None:
         """Catches a cancellation terminal hiding an already persisted frame."""
 

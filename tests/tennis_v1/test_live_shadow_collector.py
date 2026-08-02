@@ -1463,6 +1463,42 @@ class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_auto_matched_dashboard_keeps_unqualified_read_only_label(self) -> None:
+        """Catches reverting a chooser session to operator-supplied mapping."""
+
+        from inci_tennis_runtime.live_shadow_collector import (
+            ShadowDashboardView,
+            render_shadow_dashboard,
+        )
+
+        rendered = render_shadow_dashboard(
+            ShadowDashboardView(
+                provider_match_id=MATCH_ID,
+                players="Player Home vs Player Away",
+                score="sets 0-0 | games 0-0 | points 0-0",
+                server="--",
+                sportradar_age_seconds=1.0,
+                market_tickers=TICKERS,
+                home_book="--",
+                away_book="--",
+                kalshi_status="waiting",
+                kalshi_generation=None,
+                kalshi_sequence=None,
+                kalshi_age_seconds=None,
+                last_event="--",
+                reason="candidate_book_incomplete",
+                sportradar_captures=1,
+                kalshi_frames=0,
+                mapping_mode="auto_matched",
+            )
+        )
+
+        self.assertIn(
+            "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS", rendered
+        )
+        self.assertIn("AUTO-MATCHED / UNQUALIFIED", rendered)
+        self.assertNotIn("OPERATOR-SUPPLIED", rendered)
+
     def test_dashboard_labels_candidate_data_without_trading_language(self) -> None:
         """Catches presenting unqualified evidence as a signal or execution."""
 

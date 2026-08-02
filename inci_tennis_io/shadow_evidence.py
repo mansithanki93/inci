@@ -181,12 +181,34 @@ _TERMINAL_FIELDS = frozenset(
         "kalshi_frames",
     }
 )
+_RESOLUTION_FIELDS = frozenset(
+    {
+        "schema",
+        "kind",
+        "trust",
+        "reason",
+        "selected_wall_ns",
+        "provider_match_id",
+        "provider_start_wall_ns",
+        "event_ticker",
+        "home_player_name",
+        "away_player_name",
+        "market_tickers",
+        "provider_discovery_raw_path",
+        "provider_discovery_raw_sha256",
+        "kalshi_catalog_sha256",
+        "resolver_snapshot_sha256",
+        "resolver_rule_version",
+    }
+)
 _FIELDS_BY_KIND = {
+    "resolution": _RESOLUTION_FIELDS | _CHAIN_FIELDS,
     "kalshi_capture": _KALSHI_CAPTURE_FIELDS | _CHAIN_FIELDS,
     "observation": _OBSERVATION_FIELDS | _CHAIN_FIELDS,
     "terminal": _TERMINAL_FIELDS | _CHAIN_FIELDS,
 }
 _SCHEMA_BY_KIND = {
+    "resolution": "inci-tennis-unqualified-shadow-resolution-v1",
     "observation": "inci-tennis-unqualified-shadow-observation-v1",
     "kalshi_capture": "inci-tennis-unqualified-shadow-kalshi-capture-v1",
     "terminal": "inci-tennis-unqualified-shadow-terminal-v1",
@@ -359,6 +381,22 @@ class ShadowEvidenceObservation:
     reason: str
     sportradar_captures: int
     kalshi_frames: int
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowResolutionEvidence:
+    selected_wall_ns: int
+    provider_match_id: str
+    provider_start_wall_ns: int
+    event_ticker: str
+    home_player_name: str
+    away_player_name: str
+    market_tickers: tuple[str, str]
+    provider_discovery_raw_path: str
+    provider_discovery_raw_sha256: str
+    kalshi_catalog_sha256: str
+    resolver_snapshot_sha256: str
+    resolver_rule_version: str
 
 
 def _private_directory(path: Path) -> None:
@@ -536,6 +574,55 @@ def _valid_market(value: object, ticker: str) -> bool:
     return (value.yes_bid is None) == (value.bid_depth is None) and (
         value.yes_ask is None
     ) == (value.ask_depth is None)
+
+
+def _valid_identity_text(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and len(value) <= 256
+        and value == value.strip()
+        and not any(ord(character) < 32 for character in value)
+    )
+
+
+def _validate_resolution(value: object) -> ShadowResolutionEvidence:
+    if (
+        type(value) is not ShadowResolutionEvidence
+        or type(value.selected_wall_ns) is not int
+        or value.selected_wall_ns <= 0
+        or type(value.provider_match_id) is not str
+        or _MATCH_PATTERN.fullmatch(value.provider_match_id) is None
+        or type(value.provider_start_wall_ns) is not int
+        or value.provider_start_wall_ns <= 0
+        or type(value.event_ticker) is not str
+        or _TICKER_PATTERN.fullmatch(value.event_ticker) is None
+        or not _valid_identity_text(value.home_player_name)
+        or not _valid_identity_text(value.away_player_name)
+        or value.home_player_name == value.away_player_name
+        or type(value.market_tickers) is not tuple
+        or len(value.market_tickers) != 2
+        or value.market_tickers[0] == value.market_tickers[1]
+        or any(
+            type(item) is not str
+            or _TICKER_PATTERN.fullmatch(item) is None
+            for item in value.market_tickers
+        )
+        or type(value.provider_discovery_raw_path) is not str
+        or not os.path.isabs(value.provider_discovery_raw_path)
+        or type(value.provider_discovery_raw_sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(
+            value.provider_discovery_raw_sha256
+        )
+        is None
+        or type(value.kalshi_catalog_sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(value.kalshi_catalog_sha256) is None
+        or type(value.resolver_snapshot_sha256) is not str
+        or _DIGEST_PATTERN.fullmatch(value.resolver_snapshot_sha256) is None
+        or value.resolver_rule_version != "strict-name-start-v1"
+    ):
+        _fail("shadow_evidence_resolution_invalid")
+    return value
 
 
 def _validate_observation(value: object) -> ShadowEvidenceObservation:
@@ -769,6 +856,45 @@ def _stored_observation(row: dict[str, object]) -> ShadowEvidenceObservation:
         _fail("shadow_evidence_prior_corrupt")
 
 
+def _stored_resolution(row: dict[str, object]) -> ShadowResolutionEvidence:
+    if type(row.get("market_tickers")) is not list:
+        _fail("shadow_evidence_prior_corrupt")
+    try:
+        return _validate_resolution(
+            ShadowResolutionEvidence(
+                selected_wall_ns=row["selected_wall_ns"],
+                provider_match_id=row["provider_match_id"],
+                provider_start_wall_ns=row["provider_start_wall_ns"],
+                event_ticker=row["event_ticker"],
+                home_player_name=row["home_player_name"],
+                away_player_name=row["away_player_name"],
+                market_tickers=tuple(row["market_tickers"]),
+                provider_discovery_raw_path=row[
+                    "provider_discovery_raw_path"
+                ],
+                provider_discovery_raw_sha256=row[
+                    "provider_discovery_raw_sha256"
+                ],
+                kalshi_catalog_sha256=row["kalshi_catalog_sha256"],
+                resolver_snapshot_sha256=row["resolver_snapshot_sha256"],
+                resolver_rule_version=row["resolver_rule_version"],
+            )
+        )
+    except (KeyError, TypeError, ShadowEvidenceError):
+        _fail("shadow_evidence_prior_corrupt")
+
+
+def _resolution_identity(
+    value: ShadowResolutionEvidence,
+) -> tuple[str, tuple[str, str], str, str]:
+    return (
+        value.provider_match_id,
+        value.market_tickers,
+        value.home_player_name,
+        value.away_player_name,
+    )
+
+
 def _valid_terminal_row(row: dict[str, object]) -> bool:
     reason = row.get("reason")
     code = row.get("code")
@@ -819,6 +945,9 @@ class ShadowEvidenceStore:
         self._raw_number = 0
         self._previous_row_sha256 = _ZERO_DIGEST
         self._kalshi_receipts: dict[str, str] = {}
+        self._resolution_identity: (
+            tuple[str, tuple[str, str], str, str] | None
+        ) = None
         self._terminal_recorded = False
         self._lock_fd = _open_private_file(root / "shadow.lock", create=True)
         try:
@@ -891,6 +1020,7 @@ class ShadowEvidenceStore:
             session_receipts: dict[str, str] = {}
             capture_number = 0
             prior_sportradar_captures = 0
+            resolution: ShadowResolutionEvidence | None = None
             for row_number, row in enumerate(rows, start=1):
                 kind = row.get("kind")
                 expected_fields = _FIELDS_BY_KIND.get(kind)
@@ -914,7 +1044,11 @@ class ShadowEvidenceStore:
                 if _row_digest(unhashed) != claimed_digest:
                     _fail("shadow_evidence_prior_corrupt")
                 previous_digest = claimed_digest
-                if kind == "kalshi_capture":
+                if kind == "resolution":
+                    if row_number != 1 or resolution is not None:
+                        _fail("shadow_evidence_prior_corrupt")
+                    resolution = self._audit_resolution_row(row)
+                elif kind == "kalshi_capture":
                     capture_number += 1
                     self._audit_capture_row(
                         row,
@@ -925,6 +1059,17 @@ class ShadowEvidenceStore:
                     )
                 elif kind == "observation":
                     self._audit_observation_row(row, session_receipts)
+                    if resolution is not None and (
+                        row["provider_match_id"]
+                        != resolution.provider_match_id
+                        or tuple(row["market_tickers"])
+                        != resolution.market_tickers
+                        or row["home_player_name"]
+                        != resolution.home_player_name
+                        or row["away_player_name"]
+                        != resolution.away_player_name
+                    ):
+                        _fail("shadow_evidence_prior_corrupt")
                     if (
                         row["kalshi_frames"] != capture_number
                         or row["sportradar_captures"]
@@ -934,13 +1079,21 @@ class ShadowEvidenceStore:
                     prior_sportradar_captures = row[
                         "sportradar_captures"
                     ]
-                elif (
-                    not _valid_terminal_row(row)
-                    or row["kalshi_frames"] != capture_number
-                    or row["sportradar_captures"]
-                    < prior_sportradar_captures
-                ):
-                    _fail("shadow_evidence_prior_corrupt")
+                else:
+                    if (
+                        not _valid_terminal_row(row)
+                        or row["kalshi_frames"] != capture_number
+                        or row["sportradar_captures"]
+                        < prior_sportradar_captures
+                        or resolution is not None
+                        and (
+                            row["provider_match_id"]
+                            != resolution.provider_match_id
+                            or tuple(row["market_tickers"])
+                            != resolution.market_tickers
+                        )
+                    ):
+                        _fail("shadow_evidence_prior_corrupt")
         try:
             raw_paths = sorted(self.raw_root.iterdir())
         except OSError:
@@ -998,6 +1151,23 @@ class ShadowEvidenceStore:
             or sha256(payload).hexdigest() != raw_digest
         ):
             _fail("shadow_evidence_prior_corrupt")
+
+    def _audit_resolution_row(
+        self, row: dict[str, object]
+    ) -> ShadowResolutionEvidence:
+        if (
+            row.get("schema")
+            != "inci-tennis-unqualified-shadow-resolution-v1"
+            or row.get("reason") != "strict_name_start_selected"
+        ):
+            _fail("shadow_evidence_prior_corrupt")
+        value = _stored_resolution(row)
+        self._audit_raw_reference(
+            value.provider_discovery_raw_path,
+            value.provider_discovery_raw_sha256,
+            kalshi=False,
+        )
+        return value
 
     def _audit_capture_row(
         self,
@@ -1134,6 +1304,43 @@ class ShadowEvidenceStore:
         self._kalshi_receipts[reference.raw_path] = reference.raw_sha256
         return reference
 
+    def append_resolution(self, record: ShadowResolutionEvidence) -> None:
+        if self._row_number != 0 or self._resolution_identity is not None:
+            _fail("shadow_evidence_resolution_invalid")
+        value = _validate_resolution(record)
+        self._validate_reference(
+            value.provider_discovery_raw_path,
+            value.provider_discovery_raw_sha256,
+            kalshi=False,
+        )
+        self._append_record(
+            {
+                "schema": "inci-tennis-unqualified-shadow-resolution-v1",
+                "kind": "resolution",
+                "trust": "unqualified_shadow",
+                "reason": "strict_name_start_selected",
+                "selected_wall_ns": value.selected_wall_ns,
+                "provider_match_id": value.provider_match_id,
+                "provider_start_wall_ns": value.provider_start_wall_ns,
+                "event_ticker": value.event_ticker,
+                "home_player_name": value.home_player_name,
+                "away_player_name": value.away_player_name,
+                "market_tickers": list(value.market_tickers),
+                "provider_discovery_raw_path": (
+                    value.provider_discovery_raw_path
+                ),
+                "provider_discovery_raw_sha256": (
+                    value.provider_discovery_raw_sha256
+                ),
+                "kalshi_catalog_sha256": value.kalshi_catalog_sha256,
+                "resolver_snapshot_sha256": (
+                    value.resolver_snapshot_sha256
+                ),
+                "resolver_rule_version": value.resolver_rule_version,
+            }
+        )
+        self._resolution_identity = _resolution_identity(value)
+
     def _validate_reference(
         self,
         raw_path: object,
@@ -1169,7 +1376,7 @@ class ShadowEvidenceStore:
             if kalshi
             else _MAXIMUM_SPORTRADAR_CAPTURE_BYTES
         )
-        if payload is None or len(payload) > maximum:
+        if payload is None or not payload or len(payload) > maximum:
             _fail("shadow_evidence_reference_invalid")
         if sha256(payload).hexdigest() != raw_digest:
             _fail("shadow_evidence_reference_invalid")
@@ -1215,6 +1422,13 @@ class ShadowEvidenceStore:
 
     def append_observation(self, record: ShadowEvidenceObservation) -> None:
         value = _validate_observation(record)
+        if self._resolution_identity is not None and (
+            value.provider_match_id,
+            value.market_tickers,
+            value.home_player_name,
+            value.away_player_name,
+        ) != self._resolution_identity:
+            _fail("shadow_evidence_resolution_invalid")
         self._validate_reference(
             value.provider_raw_path,
             value.provider_raw_sha256,
@@ -1333,6 +1547,12 @@ class ShadowEvidenceStore:
             or type(kalshi_frames) is not int
             or kalshi_frames < 0
             or kalshi_frames != self._raw_number
+            or self._resolution_identity is not None
+            and (
+                provider_match_id,
+                market_tickers,
+            )
+            != self._resolution_identity[:2]
         ):
             _fail("shadow_evidence_terminal_invalid")
         self._append_record(
@@ -1405,6 +1625,7 @@ __all__ = (
     "ShadowEvidenceError",
     "ShadowEvidenceStore",
     "ShadowMarketCandidate",
+    "ShadowResolutionEvidence",
     "default_shadow_state_root",
     "load_shadow_credential_material",
     "shadow_monotonic_ns",

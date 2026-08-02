@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from hashlib import sha256
 from re import compile as pattern_compile
 import signal
 import sys
@@ -16,7 +17,9 @@ from inci_tennis_io.facade import (
     KalshiReadOnlyCredentials,
     KalshiReadOnlyTransport,
     ShadowEvidenceStore,
+    ShadowResolutionEvidence,
     SportradarShadowAsyncTransport,
+    TrialObservationRecord,
     TrialUsageLedger,
     default_shadow_state_root,
     load_shadow_credential_material,
@@ -31,6 +34,12 @@ from inci_tennis_runtime.live_shadow_collector import (
     LiveShadowCollector,
     ShadowCollectorError,
 )
+from inci_tennis_adapters.shadow_match_chooser import (
+    ShadowChooserSnapshot,
+    ShadowMatchChoice,
+    resolve_shadow_matches,
+)
+import inci_tennis_adapters.sportradar_trial_v3 as trial_wire
 
 
 _MATCH = pattern_compile(r"sr:sport_event:[1-9][0-9]*\Z")
@@ -38,6 +47,8 @@ _TICKER = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
 _SAFE_CODE = pattern_compile(
     r"(?:shadow|kalshi|sportradar)_[a-z0-9_]{1,96}\Z"
 )
+_MAXIMUM_SOURCE_FUTURE_NS = 5_000_000_000
+_MAXIMUM_SOURCE_AGE_NS = 60_000_000_000
 
 
 class _UsageError(ValueError):
@@ -56,6 +67,14 @@ class _Parser(argparse.ArgumentParser):
 
 def _async_provider(**values: object) -> object:
     return SportradarShadowAsyncTransport(**values)
+
+
+def _catalog_transport() -> object:
+    from inci_tennis_io.kalshi_shadow_catalog import (
+        KalshiShadowCatalogTransport,
+    )
+
+    return KalshiShadowCatalogTransport()
 
 
 def _decimal_text(value: object) -> str | None:
@@ -194,6 +213,7 @@ class LiveShadowCliDependencies:
     sportradar_transport_factory: Callable[..., object] = (
         _async_provider
     )
+    catalog_transport_factory: Callable[[], object] = _catalog_transport
     evidence_store_factory: Callable[[], object] = ShadowEvidenceStore
     evidence_root: Callable[[], object] = default_shadow_state_root
     kalshi_transport_factory: Callable[[object, tuple[str, str]], object] = (
@@ -216,22 +236,53 @@ def _parser() -> _Parser:
         ),
         allow_abbrev=False,
     )
-    parser.add_argument("--match-id", required=True)
-    parser.add_argument("--home-ticker", required=True)
-    parser.add_argument("--away-ticker", required=True)
-    parser.add_argument("--duration-seconds", required=True, type=int)
+    parser.add_argument("--choose", action="store_true")
+    parser.add_argument("--match-id")
+    parser.add_argument("--home-ticker")
+    parser.add_argument("--away-ticker")
+    parser.add_argument("--duration-seconds", type=int, default=600)
     parser.add_argument("--poll-seconds", type=int, default=10)
     return parser
 
 
-def _arguments(argv: list[str] | None) -> tuple[str, tuple[str, str], int, int]:
+@dataclass(frozen=True, slots=True)
+class _CliArguments:
+    choose: bool
+    match_id: str | None
+    tickers: tuple[str, str] | None
+    duration_seconds: int
+    poll_seconds: int
+
+
+def _arguments(argv: list[str] | None) -> _CliArguments:
     value = _parser().parse_args(argv)
-    tickers = (value.home_ticker, value.away_ticker)
+    manual_values = (
+        value.match_id,
+        value.home_ticker,
+        value.away_ticker,
+    )
+    manual_complete = all(item is not None for item in manual_values)
+    manual_empty = all(item is None for item in manual_values)
+    tickers = (
+        None
+        if not manual_complete
+        else (value.home_ticker, value.away_ticker)
+    )
     if (
-        type(value.match_id) is not str
-        or _MATCH.fullmatch(value.match_id) is None
-        or any(type(item) is not str or _TICKER.fullmatch(item) is None for item in tickers)
-        or tickers[0] == tickers[1]
+        type(value.choose) is not bool
+        or (value.choose and not manual_empty)
+        or (not value.choose and not manual_complete)
+        or manual_complete
+        and (
+            type(value.match_id) is not str
+            or _MATCH.fullmatch(value.match_id) is None
+            or tickers is None
+            or any(
+                type(item) is not str or _TICKER.fullmatch(item) is None
+                for item in tickers
+            )
+            or tickers[0] == tickers[1]
+        )
         or type(value.duration_seconds) is not int
         or value.duration_seconds < 10
         or value.duration_seconds > 3_600
@@ -240,7 +291,13 @@ def _arguments(argv: list[str] | None) -> tuple[str, tuple[str, str], int, int]:
         or value.poll_seconds > value.duration_seconds
     ):
         raise _UsageError("invalid command arguments")
-    return value.match_id, tickers, value.duration_seconds, value.poll_seconds
+    return _CliArguments(
+        choose=value.choose,
+        match_id=None if value.choose else value.match_id,
+        tickers=None if value.choose else tickers,
+        duration_seconds=value.duration_seconds,
+        poll_seconds=value.poll_seconds,
+    )
 
 
 def _write(stream: TextIO, value: str) -> None:
@@ -277,13 +334,16 @@ class _DashboardOutput:
 
 
 class _StopState:
-    __slots__ = ("requested",)
+    __slots__ = ("prompting", "requested")
 
     def __init__(self) -> None:
         self.requested = False
+        self.prompting = False
 
     def request(self, *_: object) -> None:
         self.requested = True
+        if self.prompting:
+            raise KeyboardInterrupt
 
     def __call__(self) -> bool:
         return self.requested
@@ -326,6 +386,12 @@ def _signals() -> Iterator[_StopState]:
 
 def _code(error: BaseException) -> str:
     value = getattr(error, "code", None)
+    if (
+        value is None
+        and len(getattr(error, "args", ())) == 1
+        and type(error.args[0]) is str
+    ):
+        value = error.args[0]
     return (
         value
         if type(value) is str and _SAFE_CODE.fullmatch(value) is not None
@@ -354,21 +420,211 @@ def _preflight_quota(ledger: object, planned_calls: int) -> None:
 
 
 def _startup_banner(
-    *, planned_calls: int, evidence_root: object
+    *, planned_calls: int, evidence_root: object, mapping_mode: str
 ) -> str:
     root = str(evidence_root)
     if not root or "\n" in root or "\r" in root or len(root) > 4_096:
         raise ShadowCollectorError("shadow_evidence_root_invalid")
+    if mapping_mode == "auto_matched":
+        mode = "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS"
+        mapping = "AUTO-MATCHED / UNQUALIFIED"
+    elif mapping_mode == "operator_supplied":
+        mode = "READ ONLY / UNQUALIFIED / NO ORDERS"
+        mapping = "OPERATOR-SUPPLIED / UNVERIFIED"
+    else:
+        raise ShadowCollectorError("shadow_mapping_mode_invalid")
     return (
-        "READ ONLY / UNQUALIFIED / NO ORDERS\n"
+        f"{mode}\n"
         "starting unqualified tennis shadow collector\n"
-        "ticker mapping: OPERATOR-SUPPLIED / UNVERIFIED\n"
+        f"ticker mapping: {mapping}\n"
         f"planned provider calls: {planned_calls}\n"
         f"evidence root: {root}"
     )
 
 
-async def _run(
+async def _record_trial_terminal(
+    ledger: object,
+    *,
+    provider_match_id: str | None,
+    reason: str,
+    code: str | None = None,
+) -> None:
+    operation = getattr(ledger, "record_session_terminal", None)
+    if not callable(operation):
+        return
+    values: dict[str, object] = {
+        "command": "shadow",
+        "provider_match_id": provider_match_id,
+        "reason": reason,
+    }
+    if code is not None:
+        values["code"] = code
+    await asyncio.to_thread(operation, **values)
+
+
+def _trial_halt_code(error: BaseException) -> str:
+    code = _code(error)
+    return (
+        code
+        if code.startswith("sportradar_")
+        else "sportradar_shadow_discovery_halted"
+    )
+
+
+def _safe_display(value: object, maximum: int = 160) -> str:
+    text = str(value)
+    safe = "".join(
+        " " if character in "\r\n\t" or ord(character) < 32 else character
+        for character in text
+    )
+    return " ".join(safe.split())[:maximum]
+
+
+def _chooser_text(snapshot: ShadowChooserSnapshot) -> str:
+    lines = [
+        "READY TO COLLECT\n",
+        "----------------\n",
+    ]
+    if snapshot.ready:
+        for number, row in enumerate(snapshot.ready, start=1):
+            lines.append(
+                f"[{number}] {_safe_display(row.home_player_name)} vs "
+                f"{_safe_display(row.away_player_name)} | "
+                f"{_safe_display(row.event_ticker)}\n"
+            )
+    else:
+        lines.append("None\n")
+    lines.extend(("\nUNAVAILABLE\n", "-----------\n"))
+    if snapshot.unavailable:
+        for row in snapshot.unavailable:
+            lines.append(
+                f"- {_safe_display(row.display_name)} | "
+                f"{_safe_display(row.source)}:{_safe_display(row.identity)} | "
+                f"{_safe_display(row.reason)}\n"
+            )
+    else:
+        lines.append("None\n")
+    return "".join(lines)
+
+
+def _prompt_choice(
+    snapshot: ShadowChooserSnapshot,
+    *,
+    stdin: TextIO,
+    stdout: TextIO,
+    stop: _StopState,
+) -> ShadowMatchChoice | None:
+    if not snapshot.ready:
+        return None
+    while True:
+        if stop():
+            raise KeyboardInterrupt
+        _write(stdout, f"Select [1-{len(snapshot.ready)}] or Q: ")
+        try:
+            stop.prompting = True
+            value = stdin.readline()
+        finally:
+            stop.prompting = False
+        if type(value) is not str:
+            raise ShadowCollectorError("shadow_selection_input_invalid")
+        if value == "":
+            return None
+        selected = value.strip()
+        if selected.casefold() == "q":
+            return None
+        if selected.isascii() and selected.isdigit():
+            number = int(selected)
+            if 1 <= number <= len(snapshot.ready):
+                return snapshot.ready[number - 1]
+        _write(stdout, "Invalid selection; enter a displayed number or Q.\n")
+
+
+async def _run_collection(
+    *,
+    match_id: str,
+    tickers: tuple[str, str],
+    duration_seconds: int,
+    poll_seconds: int,
+    material: object,
+    output: _DashboardOutput,
+    services: LiveShadowCliDependencies,
+    stop: _StopState,
+    trial_ledger: object,
+    provider: object,
+    mapping_mode: str,
+    resolution: ShadowResolutionEvidence | None,
+) -> str:
+    collector: object | None = None
+    evidence: object | None = None
+    try:
+        with services.evidence_store_factory() as evidence:
+            if resolution is not None:
+                append_resolution = getattr(
+                    evidence, "append_resolution", None
+                )
+                if not callable(append_resolution):
+                    raise ShadowCollectorError(
+                        "shadow_evidence_resolution_unavailable"
+                    )
+                await asyncio.to_thread(append_resolution, resolution)
+            kalshi = services.kalshi_transport_factory(material, tickers)
+            projector = services.projector_factory(tickers)
+            collector = services.collector_factory(
+                provider_match_id=match_id,
+                market_tickers=tickers,
+                sportradar_transport=provider,
+                sportradar_ledger=trial_ledger,
+                kalshi_transport=kalshi,
+                market_projector=projector,
+                evidence_store=evidence,
+                wall_ns=services.wall_ns,
+                monotonic_ns=services.monotonic_ns,
+                pause=services.pause,
+                stop_requested=stop,
+                render=output,
+                mapping_mode=mapping_mode,
+            )
+            return await collector.run(
+                duration_seconds=duration_seconds,
+                poll_seconds=poll_seconds,
+            )
+    except BaseException as error:
+        counts = getattr(collector, "evidence_counts", (0, 0))
+        if collector is None:
+            provider_captures = getattr(provider, "completed_captures", 0)
+            if type(provider_captures) is int and provider_captures >= 0:
+                counts = (provider_captures, 0)
+        if (
+            type(counts) is not tuple
+            or len(counts) != 2
+            or any(type(value) is not int or value < 0 for value in counts)
+        ):
+            counts = (0, 0)
+        if evidence is not None:
+            ensure_terminal = getattr(evidence, "ensure_halted_terminal", None)
+            if not callable(ensure_terminal):
+                raise ShadowCollectorError(
+                    "shadow_evidence_terminal_unavailable"
+                ) from error
+            await asyncio.to_thread(
+                ensure_terminal,
+                code=_code(error),
+                provider_match_id=match_id,
+                market_tickers=tickers,
+                sportradar_captures=counts[0],
+                kalshi_frames=counts[1],
+            )
+        if collector is None:
+            await _record_trial_terminal(
+                trial_ledger,
+                provider_match_id=match_id,
+                reason="halted",
+                code="sportradar_shadow_discovery_halted",
+            )
+        raise
+
+
+async def _run_manual(
     *,
     match_id: str,
     tickers: tuple[str, str],
@@ -380,14 +636,13 @@ async def _run(
     stop: _StopState,
 ) -> str:
     with services.trial_ledger_factory() as trial_ledger:
-        planned_calls = _planned_provider_calls(
-            duration_seconds, poll_seconds
-        )
+        planned_calls = _planned_provider_calls(duration_seconds, poll_seconds)
         _preflight_quota(trial_ledger, planned_calls)
         output(
             _startup_banner(
                 planned_calls=planned_calls,
                 evidence_root=services.evidence_root(),
+                mapping_mode="operator_supplied",
             )
         )
         provider_context = services.sportradar_transport_factory(
@@ -395,89 +650,238 @@ async def _run(
             ledger=trial_ledger,
         )
         async with provider_context as provider:
-            kalshi = services.kalshi_transport_factory(material, tickers)
-            projector = services.projector_factory(tickers)
-            with services.evidence_store_factory() as evidence:
-                collector: object | None = None
+            return await _run_collection(
+                match_id=match_id,
+                tickers=tickers,
+                duration_seconds=duration_seconds,
+                poll_seconds=poll_seconds,
+                material=material,
+                output=output,
+                services=services,
+                stop=stop,
+                trial_ledger=trial_ledger,
+                provider=provider,
+                mapping_mode="operator_supplied",
+                resolution=None,
+            )
+
+
+async def _run_choose(
+    *,
+    duration_seconds: int,
+    poll_seconds: int,
+    material: object,
+    stdin: TextIO,
+    stdout: TextIO,
+    output: _DashboardOutput,
+    services: LiveShadowCliDependencies,
+    stop: _StopState,
+) -> str:
+    with services.trial_ledger_factory() as trial_ledger:
+        collection_calls = _planned_provider_calls(
+            duration_seconds, poll_seconds
+        )
+        planned_calls = 1 + collection_calls
+        _preflight_quota(trial_ledger, planned_calls)
+        output(
+            _startup_banner(
+                planned_calls=planned_calls,
+                evidence_root=services.evidence_root(),
+                mapping_mode="auto_matched",
+            )
+        )
+        provider_context = services.sportradar_transport_factory(
+            api_key=material.sportradar_api_key,
+            ledger=trial_ledger,
+        )
+        async with provider_context as provider:
+            try:
+                capture = await provider.fetch_live_summaries()
                 try:
-                    collector = services.collector_factory(
-                        provider_match_id=match_id,
-                        market_tickers=tickers,
-                        sportradar_transport=provider,
-                        sportradar_ledger=trial_ledger,
-                        kalshi_transport=kalshi,
-                        market_projector=projector,
-                        evidence_store=evidence,
-                        wall_ns=services.wall_ns,
-                        monotonic_ns=services.monotonic_ns,
-                        pause=services.pause,
-                        stop_requested=stop,
-                        render=output,
-                    )
-                    return await collector.run(
-                        duration_seconds=duration_seconds,
-                        poll_seconds=poll_seconds,
-                    )
-                except BaseException as error:
-                    counts = getattr(collector, "evidence_counts", (0, 0))
-                    if (
-                        type(counts) is not tuple
-                        or len(counts) != 2
-                        or any(
-                            type(value) is not int or value < 0
-                            for value in counts
+                    provider_snapshot = (
+                        trial_wire.parse_live_summaries_envelope(
+                            capture.payload
                         )
-                    ):
-                        counts = (0, 0)
-                    ensure_terminal = getattr(
-                        evidence, "ensure_halted_terminal", None
                     )
-                    if not callable(ensure_terminal):
-                        raise ShadowCollectorError(
-                            "shadow_evidence_terminal_unavailable"
-                        ) from error
+                except trial_wire.SportradarWireContractError as error:
                     await asyncio.to_thread(
-                        ensure_terminal,
-                        code=_code(error),
-                        provider_match_id=match_id,
-                        market_tickers=tickers,
-                        sportradar_captures=counts[0],
-                        kalshi_frames=counts[1],
+                        trial_ledger.record_parser_failure,
+                        command="shadow",
+                        reservation=capture.reservation,
+                        code=error.code,
                     )
                     raise
+                difference = (
+                    capture.captured_wall_ns
+                    - provider_snapshot.generated_wall_ns
+                )
+                if difference < -_MAXIMUM_SOURCE_FUTURE_NS:
+                    error = trial_wire.SportradarWireContractError(
+                        "sportradar_source_time_ahead"
+                    )
+                    await asyncio.to_thread(
+                        trial_ledger.record_parser_failure,
+                        command="shadow",
+                        reservation=capture.reservation,
+                        code=error.code,
+                    )
+                    raise error
+                await asyncio.to_thread(
+                    trial_ledger.record_observation,
+                    TrialObservationRecord(
+                        command="shadow",
+                        reservation=capture.reservation,
+                        provider_match_id=None,
+                        generated_wall_ns=provider_snapshot.generated_wall_ns,
+                        captured_wall_ns=capture.captured_wall_ns,
+                        status="listed",
+                        match_status=None,
+                        payload_sha256=sha256(capture.payload).hexdigest(),
+                        raw_path=capture.raw_path,
+                        progression="discovery",
+                        last_event_id=None,
+                        terminal_reason=(
+                            "empty"
+                            if not provider_snapshot.snapshots
+                            else None
+                        ),
+                    ),
+                )
+                if difference > _MAXIMUM_SOURCE_AGE_NS:
+                    raise trial_wire.SportradarWireContractError(
+                        "sportradar_source_stale"
+                    )
+                catalog = services.catalog_transport_factory()
+                games, catalog_sha256 = await asyncio.to_thread(
+                    catalog.discover_tennis_games
+                )
+                snapshot = resolve_shadow_matches(
+                    provider_snapshot,
+                    games,
+                    kalshi_catalog_sha256=catalog_sha256,
+                )
+                output(_chooser_text(snapshot))
+                choice = _prompt_choice(
+                    snapshot,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stop=stop,
+                )
+                if choice is None:
+                    await _record_trial_terminal(
+                        trial_ledger,
+                        provider_match_id=None,
+                        reason="list_complete",
+                    )
+                    return "list_complete"
+            except asyncio.CancelledError:
+                await _record_trial_terminal(
+                    trial_ledger,
+                    provider_match_id=None,
+                    reason="cancelled",
+                    code="sportradar_shadow_task_cancelled",
+                )
+                raise
+            except KeyboardInterrupt:
+                await _record_trial_terminal(
+                    trial_ledger,
+                    provider_match_id=None,
+                    reason="operator_interrupt",
+                    code="sportradar_operator_interrupt",
+                )
+                raise
+            except BaseException as error:
+                await _record_trial_terminal(
+                    trial_ledger,
+                    provider_match_id=None,
+                    reason="halted",
+                    code=_trial_halt_code(error),
+                )
+                raise
+
+            resolution = ShadowResolutionEvidence(
+                selected_wall_ns=services.wall_ns(),
+                provider_match_id=choice.provider_match_id,
+                provider_start_wall_ns=choice.provider_start_wall_ns,
+                event_ticker=choice.event_ticker,
+                home_player_name=choice.home_player_name,
+                away_player_name=choice.away_player_name,
+                market_tickers=choice.market_tickers,
+                provider_discovery_raw_path=str(capture.raw_path),
+                provider_discovery_raw_sha256=sha256(
+                    capture.payload
+                ).hexdigest(),
+                kalshi_catalog_sha256=snapshot.kalshi_catalog_sha256,
+                resolver_snapshot_sha256=(
+                    snapshot.resolver_snapshot_sha256
+                ),
+                resolver_rule_version="strict-name-start-v1",
+            )
+            return await _run_collection(
+                match_id=choice.provider_match_id,
+                tickers=choice.market_tickers,
+                duration_seconds=duration_seconds,
+                poll_seconds=poll_seconds,
+                material=material,
+                output=output,
+                services=services,
+                stop=stop,
+                trial_ledger=trial_ledger,
+                provider=provider,
+                mapping_mode="auto_matched",
+                resolution=resolution,
+            )
 
 
 def run_cli(
     argv: list[str] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
+    stdin: TextIO | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     dependencies: LiveShadowCliDependencies | None = None,
 ) -> int:
+    input_stream = sys.stdin if stdin is None else stdin
     output_stream = sys.stdout if stdout is None else stdout
     error_stream = sys.stderr if stderr is None else stderr
     services = LiveShadowCliDependencies() if dependencies is None else dependencies
     try:
-        match_id, tickers, duration, poll = _arguments(argv)
+        arguments = _arguments(argv)
     except _UsageError:
         _best_effort_write(error_stream, "ERROR: invalid command arguments\n")
         return 2
     try:
         material = services.credential_loader(environ)
         with _signals() as stop:
-            result = asyncio.run(
-                _run(
-                    match_id=match_id,
-                    tickers=tickers,
-                    duration_seconds=duration,
-                    poll_seconds=poll,
-                    material=material,
-                    output=_DashboardOutput(output_stream),
-                    services=services,
-                    stop=stop,
+            if arguments.choose:
+                result = asyncio.run(
+                    _run_choose(
+                        duration_seconds=arguments.duration_seconds,
+                        poll_seconds=arguments.poll_seconds,
+                        material=material,
+                        stdin=input_stream,
+                        stdout=output_stream,
+                        output=_DashboardOutput(output_stream),
+                        services=services,
+                        stop=stop,
+                    )
                 )
-            )
+            else:
+                if arguments.match_id is None or arguments.tickers is None:
+                    raise _UsageError("invalid command arguments")
+                result = asyncio.run(
+                    _run_manual(
+                        match_id=arguments.match_id,
+                        tickers=arguments.tickers,
+                        duration_seconds=arguments.duration_seconds,
+                        poll_seconds=arguments.poll_seconds,
+                        material=material,
+                        output=_DashboardOutput(output_stream),
+                        services=services,
+                        stop=stop,
+                    )
+                )
         return 130 if result == "operator_interrupt" else 0
     except KeyboardInterrupt:
         _best_effort_write(error_stream, "STOPPED: operator interrupt\n")

@@ -967,10 +967,16 @@ class TrialUsageLedger:
                         and provider is None
                     )
                 else:
+                    unselected_shadow = (
+                        command == "shadow"
+                        and provider is None
+                        and not providers
+                    )
                     coherent = (
                         (not commands or commands == {command})
                         and (
                             (command == "list_live" and provider is None)
+                            or unselected_shadow
                             or (
                                 command in {"check", "observe", "shadow"}
                                 and provider is not None
@@ -987,8 +993,16 @@ class TrialUsageLedger:
                     )
                     if coherent and reason == "list_complete":
                         coherent = (
-                            command == "list_live"
+                            (
+                                command == "list_live"
+                                and provider is None
+                                or unselected_shadow
+                            )
                             and last_is_observation
+                            and dispositions[-1].get("route")
+                            == "live_summaries"
+                            and dispositions[-1].get("provider_match_id")
+                            is None
                             and dispositions[-1].get("progression")
                             == "discovery"
                         )
@@ -1001,6 +1015,7 @@ class TrialUsageLedger:
                     elif coherent and reason == "duration_elapsed":
                         coherent = (
                             command in {"observe", "shadow"}
+                            and provider is not None
                             and last_is_observation
                         )
                     elif (
@@ -1058,7 +1073,7 @@ class TrialUsageLedger:
                 "list_live": {"live_summaries"},
                 "check": {"summary"},
                 "observe": {"summary", "timeline"},
-                "shadow": {"summary", "timeline"},
+                "shadow": {"live_summaries", "summary", "timeline"},
             }
             if not _allowed_text(command, _COMMANDS) or not _allowed_text(
                 row["route"], expected_routes[command]
@@ -1111,6 +1126,17 @@ class TrialUsageLedger:
             ):
                 _fail("sportradar_audit_ledger_corrupt")
             provider = row["provider_match_id"]
+            if command == "shadow" and (
+                row["route"] == "live_summaries"
+                and (
+                    provider is not None
+                    or row["progression"] != "discovery"
+                    or row["last_event_id"] is not None
+                )
+                or row["route"] in {"summary", "timeline"}
+                and provider is None
+            ):
+                _fail("sportradar_audit_ledger_corrupt")
             if provider is not None:
                 providers_by_session.setdefault(
                     row["session_id"], set()
