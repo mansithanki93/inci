@@ -779,6 +779,8 @@ def resolve_hybrid_shadow_matches(
     game_entries: list[tuple[object, _HybridGameCandidate | None]] = [
         (game, _hybrid_game_candidate(game)) for game in catalog.games
     ]
+    if any(candidate is None for _, candidate in game_entries):
+        raise ValueError("hybrid_shadow_resolver_input_invalid")
     raw_matches: tuple[object, ...] = () if provider is None else provider.matches
     provider_entries: list[tuple[object, _HybridProviderCandidate | None]] = [
         (match, _hybrid_provider_candidate(match)) for match in raw_matches
@@ -874,23 +876,7 @@ def resolve_hybrid_shadow_matches(
     rows: list[HybridMatchRow] = []
     for index, (raw_game, game_candidate) in enumerate(game_entries):
         if game_candidate is None:
-            # A catalog parser should never produce this, but a malformed
-            # direct caller still receives one non-selectable row per input.
-            if type(raw_game) is not HybridKalshiShadowGame:
-                raise ValueError("hybrid_shadow_resolver_input_invalid")
-            diagnostics = tuple(sorted(game_conflicts[index]))
-            rows.append(
-                HybridMatchRow(
-                    status=HybridStatus.CONFLICT,
-                    game=raw_game,
-                    market_tickers=(),
-                    provider_match=None,
-                    reason="kalshi_conflict",
-                    selectable=False,
-                    diagnostics=diagnostics,
-                )
-            )
-            continue
+            raise ValueError("hybrid_shadow_resolver_input_invalid")
         diagnostics = set(game_conflicts.get(index, set()))
         diagnostics.update(game_provider_conflicts.get(index, set()))
         provider_indexes = game_live_edges.get(index, [])

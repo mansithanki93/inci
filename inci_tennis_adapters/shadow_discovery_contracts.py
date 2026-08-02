@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from re import compile as pattern_compile
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from inci_tennis_adapters.sportradar_trial_v3 import (
         SportradarCompetitionProvenance,
     )
+
+
+_MAX_SIGNED_64 = 9_223_372_036_854_775_807
+_DIGEST = pattern_compile(r"[0-9a-f]{64}\Z")
+_TICKER = pattern_compile(r"[A-Z0-9][A-Z0-9._-]{0,127}\Z")
 
 
 class HybridStatus(str, Enum):
@@ -88,8 +94,20 @@ class ProviderDiscoveryState:
         ):
             raise ValueError("provider_discovery_state_invalid")
         if self.state == "available" and (
-            type(self.provider_payload_sha256) is not str
-            or type(self.captured_wall_ns) is not int
+            self.provider_payload_sha256 is None or self.captured_wall_ns is None
+        ):
+            raise ValueError("provider_discovery_state_invalid")
+        if (
+            self.provider_payload_sha256 is not None
+            and (
+                type(self.provider_payload_sha256) is not str
+                or _DIGEST.fullmatch(self.provider_payload_sha256) is None
+            )
+        ):
+            raise ValueError("provider_discovery_state_invalid")
+        if self.captured_wall_ns is not None and (
+            type(self.captured_wall_ns) is not int
+            or not 0 < self.captured_wall_ns <= _MAX_SIGNED_64
         ):
             raise ValueError("provider_discovery_state_invalid")
 
@@ -113,6 +131,19 @@ class HybridMatchRow:
     reason: str
     selectable: bool
     diagnostics: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        tickers = self.market_tickers
+        if (
+            type(tickers) is not tuple
+            or len(tickers) != 2
+            or any(
+                type(ticker) is not str or _TICKER.fullmatch(ticker) is None
+                for ticker in tickers
+            )
+            or tickers[0] == tickers[1]
+        ):
+            raise ValueError("hybrid_match_row_market_tickers_invalid")
 
 
 @dataclass(frozen=True, slots=True)

@@ -701,6 +701,54 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         self.assertEqual(duplicate_id.status, HybridStatus.CONFLICT)
         self.assertEqual([row.status for row in duplicate_pair.rows], [HybridStatus.CONFLICT] * 2)
         self.assertEqual([row.status for row in duplicate_ticker.rows], [HybridStatus.CONFLICT] * 2)
+        self.assertEqual(
+            [row.market_tickers for row in duplicate_ticker.rows],
+            [("KXATP-DUP-A", "KXATP-DUP-B")] * 2,
+        )
+
+    def test_malformed_typed_catalog_game_fails_closed_before_row_construction(self) -> None:
+        """Catches a malformed catalog game escaping as a conflict with no two-ticker mapping."""
+        malformed = replace(self.game("KXATP-BAD"), markets=())
+
+        with self.assertRaisesRegex(ValueError, "^hybrid_shadow_resolver_input_invalid$"):
+            self.resolve(self.catalog(malformed))
+
+    def test_public_provider_state_and_market_mapping_contracts_reject_invalid_values(self) -> None:
+        """Catches public immutable values representing an unbound provider or unusable mapping."""
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            HybridMatchRow,
+            HybridStatus,
+            ProviderDiscoveryState,
+        )
+
+        self.assertEqual(
+            ProviderDiscoveryState("available", "fresh", SHA_A, START).captured_wall_ns,
+            START,
+        )
+        self.assertIsNone(ProviderDiscoveryState("error", "unavailable").captured_wall_ns)
+        for state in (
+            ("available", "fresh", None, START),
+            ("available", "fresh", SHA_A, None),
+            ("stale", "bad digest", "A" * 64, None),
+            ("error", "bad digest", "g" * 64, None),
+            ("unavailable", "bad time", None, 0),
+            ("unavailable", "bad time", None, True),
+            ("stale", "bad time", SHA_A, 9_223_372_036_854_775_808),
+        ):
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                ProviderDiscoveryState(*state)
+
+        game = self.game("KXATP-MAPPING")
+        for tickers in ((), ("KXATP-A",), ("KXATP-A", "KXATP-A"), ("lower", "KXATP-B"), ["KXATP-A", "KXATP-B"]):
+            with self.subTest(tickers=tickers), self.assertRaises(ValueError):
+                HybridMatchRow(
+                    HybridStatus.PRICE_ONLY,
+                    game,
+                    tickers,
+                    None,
+                    "provider_not_attested",
+                    True,
+                )
 
     def test_provider_absence_empty_stale_or_error_remain_selectable_price_only(self) -> None:
         """Catches provider availability failures removing an otherwise valid Kalshi game."""
