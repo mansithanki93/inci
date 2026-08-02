@@ -25,6 +25,7 @@ def score(
     away: str = "Grace Hopper",
     start: int = START,
     status: str = "live",
+    match_status: str | None = None,
 ) -> SportradarScoreSnapshot:
     return SportradarScoreSnapshot(
         provider_match_id=match_id,
@@ -36,7 +37,7 @@ def score(
         away_id="sr:competitor:2",
         away_name=away,
         status=status,
-        match_status=status,
+        match_status=status if match_status is None else match_status,
         sets_home=0,
         sets_away=0,
         games_home=0,
@@ -455,6 +456,276 @@ class ShadowMatchChooserTests(unittest.TestCase):
             if isinstance(node, ast.ImportFrom) and node.module is not None
         }
         self.assertTrue(imported.isdisjoint({"os", "pathlib", "socket", "subprocess", "urllib", "requests"}))
+
+
+class HybridShadowMatchChooserTests(unittest.TestCase):
+    """The Kalshi census is authoritative: provider evidence only annotates it."""
+
+    def game(
+        self,
+        event: str,
+        *,
+        home: str = "Ada Lovelace",
+        away: str = "Grace Hopper",
+        start: int = START,
+        series: str = "KXATP",
+    ) -> object:
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            KalshiCompetitionProvenance,
+            KalshiShadowGame,
+            KalshiShadowMarket,
+        )
+
+        return KalshiShadowGame(
+            provenance=KalshiCompetitionProvenance(
+                sport="Tennis",
+                scope="Games",
+                queried_competitions=("ATP Washington",),
+                series_ticker=series,
+                milestone_id=f"milestone-{event}",
+                milestone_league="ATP Washington",
+            ),
+            event_ticker=event,
+            scheduled_start_wall_ns=start,
+            game_title=f"{home} vs {away}",
+            markets=(
+                KalshiShadowMarket(f"{event}-A", home),
+                KalshiShadowMarket(f"{event}-B", away),
+            ),
+            initial_book_state="two_sided",
+        )
+
+    def catalog(self, *games: object, digest: str = SHA_B) -> object:
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            KalshiShadowCatalogSnapshot,
+        )
+
+        return KalshiShadowCatalogSnapshot(
+            games=tuple(games), excluded=(), catalog_sha256=digest
+        )
+
+    def competition(
+        self,
+        *,
+        category: str = "sr:category:3",
+        competition_type: str = "singles",
+    ) -> object:
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            SportradarCompetitionProvenance,
+        )
+
+        return SportradarCompetitionProvenance(
+            sport_id="sr:sport:5",
+            sport_name="Tennis",
+            category_id=category,
+            category_name="Tour",
+            competition_id="sr:competition:1",
+            competition_name="Washington",
+            competition_type=competition_type,
+            gender="men",
+            level="professional",
+        )
+
+    def discovery(
+        self,
+        *rows: SportradarScoreSnapshot,
+        digest: str = SHA_A,
+        category: str = "sr:category:3",
+        competition_type: str = "singles",
+    ) -> object:
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            SportradarHybridDiscoverySnapshot,
+            SportradarHybridMatch,
+        )
+
+        provenance = self.competition(
+            category=category, competition_type=competition_type
+        )
+        return SportradarHybridDiscoverySnapshot(
+            generated_wall_ns=START,
+            matches=tuple(
+                SportradarHybridMatch(score=row, competition=provenance)
+                for row in rows
+            ),
+            diagnostics=(),
+            payload_sha256=digest,
+        )
+
+    def resolve(
+        self,
+        catalog: object,
+        discovery: object | None = None,
+        *,
+        provider_state: object | None = None,
+    ) -> object:
+        from inci_tennis_adapters.shadow_match_chooser import (
+            resolve_hybrid_shadow_matches,
+        )
+
+        return resolve_hybrid_shadow_matches(
+            catalog, discovery, provider_state=provider_state
+        )
+
+    def provider_state(self, state: str, reason: str, digest: str | None = None) -> object:
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            ProviderDiscoveryState,
+        )
+
+        return ProviderDiscoveryState(state, reason, digest)
+
+    def test_every_kalshi_game_has_exactly_one_state(self) -> None:
+        """Catches provider-centric output that drops unmatched catalog games."""
+        catalog = self.catalog(
+            self.game("KXATP-ONE"),
+            self.game("KXATP-TWO", home="Marie Curie", away="Katherine Johnson"),
+            self.game("KXATP-THREE", home="Serena Williams", away="Venus Williams"),
+        )
+        result = self.resolve(catalog, self.discovery(score("sr:1")))
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        self.assertEqual(
+            [row.status for row in result.rows],
+            [HybridStatus.VERIFIED, HybridStatus.PRICE_ONLY, HybridStatus.PRICE_ONLY],
+        )
+        self.assertTrue(all(row.selectable for row in result.rows))
+        self.assertEqual(len({row.game.event_ticker for row in result.rows}), 3)
+
+    def test_exact_reversed_normalized_pair_verifies_at_inclusive_900_seconds(self) -> None:
+        """Catches order-sensitive matching or an exclusive start tolerance."""
+        game = self.game("KXATP-ONE", start=START + 900_000_000_000)
+        match = score(
+            "sr:1",
+            home="GRACE\u2003HOPPER",
+            away="Ａda   Lovelace",
+            start=START,
+        )
+        row = self.resolve(self.catalog(game), self.discovery(match)).rows[0]
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        self.assertEqual(row.status, HybridStatus.VERIFIED)
+        self.assertEqual(row.provider_match.home_player_name, "GRACE\u2003HOPPER")
+        self.assertEqual(row.diagnostics, ())
+
+    def test_901_seconds_or_prestart_provider_is_price_only(self) -> None:
+        """Catches accepting a distant match or treating scheduled score data as live."""
+        distant = self.resolve(
+            self.catalog(self.game("KXATP-DISTANT", start=START + 900_000_000_001)),
+            self.discovery(score("sr:1")),
+        ).rows[0]
+        prestart = self.resolve(
+            self.catalog(self.game("KXATP-PRESTART", start=START + 1)),
+            self.discovery(score("sr:2", status="not_started")),
+        ).rows[0]
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        self.assertEqual((distant.status, distant.provider_match), (HybridStatus.PRICE_ONLY, None))
+        self.assertEqual((prestart.status, prestart.provider_match), (HybridStatus.PRICE_ONLY, None))
+
+    def test_ambiguous_or_terminal_disagreement_is_conflict_and_not_selectable(self) -> None:
+        """Catches arbitrary winner selection when provider evidence contradicts itself."""
+        catalog = self.catalog(self.game("KXATP-ONE"))
+        ambiguous = self.resolve(
+            catalog, self.discovery(score("sr:1"), score("sr:2"))
+        ).rows[0]
+        terminal = self.resolve(
+            catalog,
+            self.discovery(
+                score("sr:1"), score("sr:2", status="ended", match_status="ended")
+            ),
+        ).rows[0]
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        for row in (ambiguous, terminal):
+            self.assertEqual(row.status, HybridStatus.CONFLICT)
+            self.assertFalse(row.selectable)
+            self.assertIsNone(row.provider_match)
+            self.assertEqual(row.diagnostics, tuple(sorted(row.diagnostics)))
+
+    def test_duplicate_ids_pairs_and_catalog_identity_are_conflicts(self) -> None:
+        """Catches duplicate stable identity or graph nodes silently producing verification."""
+        duplicate_id = self.resolve(
+            self.catalog(self.game("KXATP-ONE")),
+            self.discovery(score("sr:duplicate"), score("sr:duplicate")),
+        ).rows[0]
+        duplicate_pair = self.resolve(
+            self.catalog(self.game("KXATP-ONE"), self.game("KXATP-TWO")),
+            self.discovery(score("sr:1")),
+        )
+        duplicate_ticker = self.resolve(
+            self.catalog(self.game("KXATP-DUP"), self.game("KXATP-DUP")),
+            self.discovery(score("sr:1")),
+        )
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        self.assertEqual(duplicate_id.status, HybridStatus.CONFLICT)
+        self.assertEqual([row.status for row in duplicate_pair.rows], [HybridStatus.CONFLICT] * 2)
+        self.assertEqual([row.status for row in duplicate_ticker.rows], [HybridStatus.CONFLICT] * 2)
+
+    def test_provider_absence_empty_stale_or_error_remain_selectable_price_only(self) -> None:
+        """Catches provider availability failures removing an otherwise valid Kalshi game."""
+        catalog = self.catalog(self.game("KXATP-ONE"))
+        cases = (
+            self.resolve(catalog),
+            self.resolve(catalog, self.discovery()),
+            self.resolve(
+                catalog,
+                self.discovery(score("sr:1")),
+                provider_state=self.provider_state("stale", "provider_response_stale", SHA_A),
+            ),
+            self.resolve(
+                catalog,
+                None,
+                provider_state=self.provider_state("error", "provider_transport_error"),
+            ),
+        )
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        for result in cases:
+            row = result.rows[0]
+            self.assertEqual((row.status, row.selectable, row.provider_match), (HybridStatus.PRICE_ONLY, True, None))
+
+    def test_coverage_denied_or_default_deny_cannot_verify(self) -> None:
+        """Catches a provider route becoming trusted through a wildcard or guessed tour."""
+        catalog = self.catalog(self.game("KXATP-ONE"))
+        denied = self.resolve(
+            catalog,
+            self.discovery(score("sr:1"), category="sr:category:785"),
+        ).rows[0]
+        unknown = self.resolve(
+            catalog,
+            self.discovery(score("sr:1"), category="sr:category:999"),
+        ).rows[0]
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        self.assertEqual((denied.status, denied.selectable), (HybridStatus.PRICE_ONLY, True))
+        self.assertEqual((unknown.status, unknown.selectable), (HybridStatus.PRICE_ONLY, True))
+
+    def test_snapshot_is_sorted_hashed_and_provider_only_rows_never_create_choices(self) -> None:
+        """Catches input-order leakage or a provider row becoming a catalog choice."""
+        games = (
+            self.game("KXATP-LATE", start=START + 1, home="Marie Curie", away="Katherine Johnson"),
+            self.game("KXATP-EARLY", start=START),
+        )
+        rows = (
+            score("sr:late", home="Katherine Johnson", away="Marie Curie", start=START + 1),
+            score("sr:early"),
+            score("sr:provider-only", home="One", away="Two"),
+        )
+        first = self.resolve(self.catalog(*games), self.discovery(*rows))
+        second = self.resolve(self.catalog(*reversed(games)), self.discovery(*reversed(rows)))
+
+        self.assertEqual(first, second)
+        self.assertEqual([row.game.event_ticker for row in first.rows], ["KXATP-EARLY", "KXATP-LATE"])
+        self.assertEqual(len(first.rows), 2)
+        self.assertRegex(first.resolver_snapshot_sha256, r"^[0-9a-f]{64}$")
+        self.assertEqual(first.resolver_version, "kalshi-first-hybrid-v1")
 
 
 if __name__ == "__main__":

@@ -9,8 +9,26 @@ from re import compile as pattern_compile
 from unicodedata import category, normalize
 
 from inci_tennis_adapters.sportradar_trial_v3 import (
+    SportradarCompetitionProvenance,
+    SportradarHybridDiagnostic,
+    SportradarHybridDiscoverySnapshot,
+    SportradarHybridMatch,
     SportradarLiveSummariesSnapshot,
     SportradarScoreSnapshot,
+)
+from inci_tennis_adapters.shadow_discovery_contracts import (
+    HybridChooserSnapshot,
+    HybridMatchRow,
+    HybridStatus,
+    KalshiShadowCatalogSnapshot,
+    KalshiShadowGame as HybridKalshiShadowGame,
+    KalshiShadowMarket as HybridKalshiShadowMarket,
+    ProviderDiscoveryState,
+    ProviderMatchRef,
+)
+from inci_tennis_adapters.shadow_provider_coverage import (
+    assess_provider_route,
+    coverage_registry_sha256 as _coverage_registry_sha256,
 )
 
 
@@ -447,6 +465,463 @@ def resolve_shadow_matches(
     )
 
 
+_HYBRID_RESOLVER_VERSION = "kalshi-first-hybrid-v1"
+_START_WINDOW_NS = 900_000_000_000
+_PRESTART_PROVIDER_STATUSES = frozenset({"not_started", "scheduled"})
+
+
+@dataclass(frozen=True, slots=True)
+class _HybridGameCandidate:
+    game: HybridKalshiShadowGame
+    pair: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _HybridProviderCandidate:
+    match: SportradarHybridMatch
+    pair: frozenset[str]
+
+    @property
+    def score(self) -> SportradarScoreSnapshot:
+        return self.match.score
+
+    @property
+    def identity(self) -> str:
+        return self.score.provider_match_id
+
+
+def _hybrid_game_candidate(game: object) -> _HybridGameCandidate | None:
+    if type(game) is not HybridKalshiShadowGame:
+        return None
+    if (
+        not _safe_ticker(game.event_ticker)
+        or not _positive_wall_ns(game.scheduled_start_wall_ns)
+        or not _safe_title(game.game_title)
+        or type(game.markets) is not tuple
+        or len(game.markets) != 2
+    ):
+        return None
+    first, second = game.markets
+    if type(first) is not HybridKalshiShadowMarket or type(second) is not HybridKalshiShadowMarket:
+        return None
+    if not _safe_ticker(first.ticker) or not _safe_ticker(second.ticker):
+        return None
+    if first.ticker == second.ticker:
+        return None
+    try:
+        first_name = normalize_player_name(first.yes_player_name)
+        second_name = normalize_player_name(second.yes_player_name)
+    except ValueError:
+        return None
+    if first_name == second_name:
+        return None
+    return _HybridGameCandidate(game, frozenset((first_name, second_name)))
+
+
+def _hybrid_provider_candidate(match: object) -> _HybridProviderCandidate | None:
+    if type(match) is not SportradarHybridMatch:
+        return None
+    score = match.score
+    if type(score) is not SportradarScoreSnapshot or type(match.competition) is not SportradarCompetitionProvenance:
+        return None
+    if not _positive_wall_ns(score.start_wall_ns) or _provider_identity(score.provider_match_id) == "provider_identity_invalid":
+        return None
+    if type(score.status) is not str or type(score.match_status) is not str:
+        return None
+    try:
+        home = normalize_player_name(score.home_name)
+        away = normalize_player_name(score.away_name)
+    except ValueError:
+        return None
+    if home == away:
+        return None
+    return _HybridProviderCandidate(match, frozenset((home, away)))
+
+
+def _hybrid_game_identity(game: object) -> str:
+    if type(game) is HybridKalshiShadowGame and _safe_ticker(game.event_ticker):
+        return game.event_ticker
+    return "kalshi_game_invalid"
+
+
+def _hybrid_provider_identity(match: object) -> str:
+    if type(match) is SportradarHybridMatch and type(match.score) is SportradarScoreSnapshot:
+        return _provider_identity(match.score.provider_match_id)
+    return "provider_row_invalid"
+
+
+def _hybrid_provider_status(candidate: _HybridProviderCandidate) -> str:
+    score = candidate.score
+    if score.status == "live" and score.match_status == "live":
+        return "live"
+    if score.status in _PRESTART_PROVIDER_STATUSES and score.match_status in _PRESTART_PROVIDER_STATUSES:
+        return "prestart"
+    return "contradictory"
+
+
+def _hybrid_provider_ref(candidate: _HybridProviderCandidate) -> ProviderMatchRef:
+    score = candidate.score
+    return ProviderMatchRef(
+        provider_match_id=score.provider_match_id,
+        provider_start_wall_ns=score.start_wall_ns,
+        home_player_name=score.home_name,
+        away_player_name=score.away_name,
+        status=score.status,
+        competition=candidate.match.competition,
+    )
+
+
+def _hybrid_game_projection(game: HybridKalshiShadowGame) -> dict[str, object]:
+    return {
+        "event_ticker": game.event_ticker,
+        "game_title": game.game_title,
+        "initial_book_state": game.initial_book_state,
+        "markets": [
+            {
+                "initial_yes_ask": market.initial_yes_ask,
+                "initial_yes_ask_depth": market.initial_yes_ask_depth,
+                "initial_yes_bid": market.initial_yes_bid,
+                "initial_yes_bid_depth": market.initial_yes_bid_depth,
+                "ticker": market.ticker,
+                "yes_player_name": market.yes_player_name,
+            }
+            for market in game.markets
+        ],
+        "provenance": {
+            "milestone_id": game.provenance.milestone_id,
+            "milestone_league": game.provenance.milestone_league,
+            "queried_competitions": list(game.provenance.queried_competitions),
+            "scope": game.provenance.scope,
+            "series_ticker": game.provenance.series_ticker,
+            "sport": game.provenance.sport,
+        },
+        "scheduled_start_wall_ns": game.scheduled_start_wall_ns,
+    }
+
+
+def _hybrid_ref_projection(ref: ProviderMatchRef | None) -> dict[str, object] | None:
+    if ref is None:
+        return None
+    return {
+        "away_player_name": ref.away_player_name,
+        "competition": {
+            "category_id": ref.competition.category_id,
+            "category_name": ref.competition.category_name,
+            "competition_id": ref.competition.competition_id,
+            "competition_name": ref.competition.competition_name,
+            "competition_type": ref.competition.competition_type,
+            "gender": ref.competition.gender,
+            "level": ref.competition.level,
+            "sport_id": ref.competition.sport_id,
+            "sport_name": ref.competition.sport_name,
+        },
+        "home_player_name": ref.home_player_name,
+        "provider_match_id": ref.provider_match_id,
+        "provider_start_wall_ns": ref.provider_start_wall_ns,
+        "status": ref.status,
+    }
+
+
+def _hybrid_provider_diagnostics(
+    provider: SportradarHybridDiscoverySnapshot | None,
+    provider_entries: list[tuple[object, _HybridProviderCandidate | None]],
+    linked_provider_indexes: set[int],
+) -> list[str]:
+    diagnostics: list[str] = []
+    if provider is None:
+        return diagnostics
+    for diagnostic in provider.diagnostics:
+        if type(diagnostic) is SportradarHybridDiagnostic:
+            diagnostics.append(f"provider_diagnostic:{diagnostic.index}:{diagnostic.code}")
+        else:
+            diagnostics.append("provider_diagnostic:invalid")
+    for index, (match, _) in enumerate(provider_entries):
+        if index not in linked_provider_indexes:
+            diagnostics.append(f"provider_only:{_hybrid_provider_identity(match)}")
+    return sorted(diagnostics)
+
+
+def _hybrid_projection(
+    rows: tuple[HybridMatchRow, ...],
+    provider_state: ProviderDiscoveryState,
+    catalog_sha256: str,
+    provider_snapshot_sha256: str | None,
+    coverage_registry_digest: str,
+    provider_diagnostics: list[str],
+) -> bytes:
+    return json.dumps(
+        {
+            "catalog_sha256": catalog_sha256,
+            "coverage_registry_sha256": coverage_registry_digest,
+            "provider_diagnostics": provider_diagnostics,
+            "provider_snapshot_sha256": provider_snapshot_sha256,
+            "provider_state": {
+                "provider_payload_sha256": provider_state.provider_payload_sha256,
+                "reason": provider_state.reason,
+                "state": provider_state.state,
+            },
+            "resolver_version": _HYBRID_RESOLVER_VERSION,
+            "rows": [
+                {
+                    "diagnostics": list(row.diagnostics),
+                    "game": _hybrid_game_projection(row.game),
+                    "provider_match": _hybrid_ref_projection(row.provider_match),
+                    "reason": row.reason,
+                    "selectable": row.selectable,
+                    "status": row.status.value,
+                }
+                for row in rows
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _default_provider_state(
+    provider: SportradarHybridDiscoverySnapshot | None,
+) -> ProviderDiscoveryState:
+    if provider is None:
+        return ProviderDiscoveryState("unavailable", "provider_not_requested")
+    return ProviderDiscoveryState(
+        "available", "provider_discovery_available", provider.payload_sha256
+    )
+
+
+def resolve_hybrid_shadow_matches(
+    catalog: KalshiShadowCatalogSnapshot,
+    provider: SportradarHybridDiscoverySnapshot | None = None,
+    provider_state: ProviderDiscoveryState | None = None,
+    *,
+    coverage_registry_sha256: str | None = None,
+) -> HybridChooserSnapshot:
+    """Annotate every Kalshi catalog game with observation-only provider evidence.
+
+    ``VERIFIED`` means a unique, fresh live observation link only.  It never
+    conveys provider qualification or authority to execute anything.
+    """
+    if (
+        type(catalog) is not KalshiShadowCatalogSnapshot
+        or type(catalog.games) is not tuple
+        or type(catalog.excluded) is not tuple
+        or not _valid_digest(catalog.catalog_sha256)
+        or (provider is not None and type(provider) is not SportradarHybridDiscoverySnapshot)
+    ):
+        raise ValueError("hybrid_shadow_resolver_input_invalid")
+    if provider is not None and (
+        type(provider.matches) is not tuple
+        or type(provider.diagnostics) is not tuple
+        or not _valid_digest(provider.payload_sha256)
+    ):
+        raise ValueError("hybrid_shadow_resolver_input_invalid")
+    if provider_state is None:
+        provider_state = _default_provider_state(provider)
+    if (
+        type(provider_state) is not ProviderDiscoveryState
+        or type(provider_state.state) is not str
+        or not provider_state.state
+        or type(provider_state.reason) is not str
+        or not provider_state.reason
+        or (
+            provider_state.provider_payload_sha256 is not None
+            and not _valid_digest(provider_state.provider_payload_sha256)
+        )
+    ):
+        raise ValueError("hybrid_shadow_resolver_input_invalid")
+    if provider is not None and provider_state.provider_payload_sha256 not in {None, provider.payload_sha256}:
+        raise ValueError("hybrid_shadow_resolver_input_invalid")
+    registry_digest = _coverage_registry_sha256() if coverage_registry_sha256 is None else coverage_registry_sha256
+    if not _valid_digest(registry_digest):
+        raise ValueError("hybrid_shadow_resolver_input_invalid")
+
+    game_entries: list[tuple[object, _HybridGameCandidate | None]] = [
+        (game, _hybrid_game_candidate(game)) for game in catalog.games
+    ]
+    raw_matches: tuple[object, ...] = () if provider is None else provider.matches
+    provider_entries: list[tuple[object, _HybridProviderCandidate | None]] = [
+        (match, _hybrid_provider_candidate(match)) for match in raw_matches
+    ]
+
+    game_conflicts: dict[int, set[str]] = {
+        index: {"kalshi_invalid"}
+        for index, (_, candidate) in enumerate(game_entries)
+        if candidate is None
+    }
+    game_ids: dict[str, list[int]] = {}
+    game_pairs: dict[frozenset[str], list[int]] = {}
+    for index, (_, candidate) in enumerate(game_entries):
+        if candidate is None:
+            continue
+        game_ids.setdefault(candidate.game.event_ticker, []).append(index)
+        game_pairs.setdefault(candidate.pair, []).append(index)
+    for indexes in game_ids.values():
+        if len(indexes) > 1:
+            for index in indexes:
+                game_conflicts.setdefault(index, set()).add("kalshi_duplicate_ticker")
+    for indexes in game_pairs.values():
+        if len(indexes) > 1:
+            for index in indexes:
+                game_conflicts.setdefault(index, set()).add("kalshi_duplicate_pair")
+
+    provider_ids: dict[str, list[int]] = {}
+    provider_pairs: dict[frozenset[str], list[int]] = {}
+    for index, (_, candidate) in enumerate(provider_entries):
+        if candidate is None:
+            continue
+        provider_ids.setdefault(candidate.identity, []).append(index)
+        provider_pairs.setdefault(candidate.pair, []).append(index)
+    provider_conflicts: dict[int, set[str]] = {}
+    for indexes in provider_ids.values():
+        if len(indexes) > 1:
+            for index in indexes:
+                provider_conflicts.setdefault(index, set()).add("provider_duplicate_id")
+    for indexes in provider_pairs.values():
+        if len(indexes) > 1:
+            for index in indexes:
+                provider_conflicts.setdefault(index, set()).add("provider_duplicate_pair")
+
+    provider_is_available = provider is not None and provider_state.state == "available"
+    live_edges: dict[int, list[int]] = {}
+    game_live_edges: dict[int, list[int]] = {}
+    game_provider_conflicts: dict[int, set[str]] = {}
+    game_price_reasons: dict[int, set[str]] = {}
+    linked_provider_indexes: set[int] = set()
+    if provider_is_available:
+        for game_index, (_, game_candidate) in enumerate(game_entries):
+            if game_candidate is None:
+                continue
+            for provider_index, (_, provider_candidate) in enumerate(provider_entries):
+                if provider_candidate is None:
+                    continue
+                if (
+                    provider_candidate.pair != game_candidate.pair
+                    or abs(
+                        provider_candidate.score.start_wall_ns
+                        - game_candidate.game.scheduled_start_wall_ns
+                    ) > _START_WINDOW_NS
+                ):
+                    continue
+                coverage = assess_provider_route(
+                    game_candidate.game, provider_candidate.match.competition
+                )
+                if coverage.state != "supported":
+                    game_price_reasons.setdefault(game_index, set()).add(coverage.reason)
+                    continue
+                linked_provider_indexes.add(provider_index)
+                status = _hybrid_provider_status(provider_candidate)
+                if status == "live":
+                    if provider_index in provider_conflicts:
+                        game_provider_conflicts.setdefault(game_index, set()).update(
+                            provider_conflicts[provider_index]
+                        )
+                    live_edges.setdefault(provider_index, []).append(game_index)
+                    game_live_edges.setdefault(game_index, []).append(provider_index)
+                elif status == "prestart":
+                    game_price_reasons.setdefault(game_index, set()).add("provider_not_live")
+                else:
+                    game_provider_conflicts.setdefault(game_index, set()).add(
+                        "provider_lifecycle_conflict"
+                    )
+
+    rows: list[HybridMatchRow] = []
+    for index, (raw_game, game_candidate) in enumerate(game_entries):
+        if game_candidate is None:
+            # A catalog parser should never produce this, but a malformed
+            # direct caller still receives one non-selectable row per input.
+            if type(raw_game) is not HybridKalshiShadowGame:
+                raise ValueError("hybrid_shadow_resolver_input_invalid")
+            diagnostics = tuple(sorted(game_conflicts[index]))
+            rows.append(
+                HybridMatchRow(
+                    HybridStatus.CONFLICT, raw_game, None, "kalshi_conflict", False, diagnostics
+                )
+            )
+            continue
+        diagnostics = set(game_conflicts.get(index, set()))
+        diagnostics.update(game_provider_conflicts.get(index, set()))
+        provider_indexes = game_live_edges.get(index, [])
+        if provider_indexes and any(len(live_edges[item]) != 1 for item in provider_indexes):
+            diagnostics.add("provider_ambiguous")
+        if len(provider_indexes) > 1:
+            diagnostics.add("kalshi_ambiguous")
+        if diagnostics:
+            rows.append(
+                HybridMatchRow(
+                    HybridStatus.CONFLICT,
+                    game_candidate.game,
+                    None,
+                    "hybrid_conflict",
+                    False,
+                    tuple(sorted(diagnostics)),
+                )
+            )
+            continue
+        if len(provider_indexes) == 1 and provider_is_available:
+            provider_candidate = provider_entries[provider_indexes[0]][1]
+            if provider_candidate is not None:
+                rows.append(
+                    HybridMatchRow(
+                        HybridStatus.VERIFIED,
+                        game_candidate.game,
+                        _hybrid_provider_ref(provider_candidate),
+                        "unique_live_provider_match",
+                        True,
+                    )
+                )
+                continue
+        price_reasons = game_price_reasons.get(index, set())
+        reason = (
+            provider_state.reason
+            if not provider_is_available
+            else sorted(price_reasons)[0] if price_reasons else "provider_no_exact_live_match"
+        )
+        rows.append(
+            HybridMatchRow(
+                HybridStatus.PRICE_ONLY,
+                game_candidate.game,
+                None,
+                reason,
+                True,
+            )
+        )
+
+    ordered_rows = tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                row.game.scheduled_start_wall_ns,
+                row.game.event_ticker,
+                row.status.value,
+            ),
+        )
+    )
+    provider_snapshot_sha256 = None if provider is None else provider.payload_sha256
+    provider_diagnostics = _hybrid_provider_diagnostics(
+        provider, provider_entries, linked_provider_indexes
+    )
+    resolver_snapshot_sha256 = sha256(
+        _hybrid_projection(
+            ordered_rows,
+            provider_state,
+            catalog.catalog_sha256,
+            provider_snapshot_sha256,
+            registry_digest,
+            provider_diagnostics,
+        )
+    ).hexdigest()
+    return HybridChooserSnapshot(
+        rows=ordered_rows,
+        provider_state=provider_state,
+        catalog_sha256=catalog.catalog_sha256,
+        provider_snapshot_sha256=provider_snapshot_sha256,
+        coverage_registry_sha256=registry_digest,
+        resolver_version=_HYBRID_RESOLVER_VERSION,
+        resolver_snapshot_sha256=resolver_snapshot_sha256,
+    )
+
+
 __all__ = [
     "KalshiShadowGame",
     "KalshiShadowMarket",
@@ -454,5 +929,6 @@ __all__ = [
     "ShadowMatchChoice",
     "ShadowUnavailableMatch",
     "normalize_player_name",
+    "resolve_hybrid_shadow_matches",
     "resolve_shadow_matches",
 ]
