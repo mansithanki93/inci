@@ -58,6 +58,10 @@ from .provider_readonly import (
     read_sportradar_summary,
     read_sportradar_timeline,
 )
+from .kalshi_readonly import (
+    KalshiReadOnlyCredentials,
+    KalshiReadOnlyTransport,
+)
 from .sportradar_trial_transport import (
     SportradarTrialObserverError,
     SportradarTrialTransport,
@@ -68,6 +72,21 @@ from .sportradar_trial_transport import (
     trial_monotonic_ns,
     trial_sleep,
 )
+from .shadow_evidence import (
+    PersistedKalshiFrame,
+    ShadowCredentialMaterial,
+    ShadowEvidenceError,
+    ShadowEvidenceObservation,
+    ShadowEvidenceStore,
+    ShadowMarketCandidate,
+    default_shadow_state_root,
+    load_shadow_credential_material,
+    shadow_kalshi_clock_observation,
+    shadow_monotonic_ns,
+    shadow_pause,
+    shadow_wall_ns,
+)
+from .sportradar_shadow_async import SportradarShadowAsyncTransport
 
 __all__ = (
     "abort_sportradar_candidate_output",
@@ -122,6 +141,8 @@ __all__ = (
     "prepare_sportradar_timeline_read",
     "read_sportradar_summary",
     "read_sportradar_timeline",
+    "KalshiReadOnlyCredentials",
+    "KalshiReadOnlyTransport",
     "SportradarTrialObserverError",
     "SportradarTrialTransport",
     "TrialCapture",
@@ -130,4 +151,17 @@ __all__ = (
     "load_trial_api_key",
     "trial_monotonic_ns",
     "trial_sleep",
+    "PersistedKalshiFrame",
+    "ShadowCredentialMaterial",
+    "ShadowEvidenceError",
+    "ShadowEvidenceObservation",
+    "ShadowEvidenceStore",
+    "ShadowMarketCandidate",
+    "default_shadow_state_root",
+    "load_shadow_credential_material",
+    "shadow_kalshi_clock_observation",
+    "shadow_monotonic_ns",
+    "shadow_pause",
+    "shadow_wall_ns",
+    "SportradarShadowAsyncTransport",
 )

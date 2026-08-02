@@ -5,7 +5,7 @@
 Tennis v1 Phase 1 is a research-only event core. It captures validated input,
 persists canonical evidence, reduces deterministic state, and supports
 diagnostic inspection. It does not authorize execution, trading, or provider
-transport.
+transport inside the event core.
 
 ## WAL Is Canonical Tennis Input Evidence
 
@@ -32,11 +32,20 @@ profitable strategy or validated research result: throughout Phase 1,
 `research_evaluable=false`. Later qualification work must define and satisfy
 the separate research-evaluability gate.
 
-## No Live, Demo, or Provider-Network Runtime
+## Sealed Event Core Versus the Outer Shadow Collector
 
-Phase 1 has no provider network runtime, no live trading runtime, and no demo
-order runtime. The package contains no exchange client, network transport, or
-order mutation path. Provider artifacts are local, pinned evidence only.
+The sealed `tennis_v1` event core still has no provider network runtime, live
+trading runtime, demo order runtime, exchange client, or order mutation path.
+Provider artifacts admitted to that core remain local, pinned evidence only.
+
+The repository now also contains an explicitly separate outer command,
+`inci_tennis_runtime.live_shadow_cli`, for collecting live, read-only,
+unqualified research evidence from one Sportradar tennis match and two Kalshi
+match-winner books. That command does not admit observations into the trusted
+event core and never upgrades them into qualified evidence. Its trust label is
+always `unqualified_shadow`, and it exposes no order route. See the [live
+shadow collector design and operations
+record](../superpowers/specs/2026-08-01-live-tennis-shadow-collector-design.md).
 
 ## Reviewed Canonical AST Closure
 
@@ -64,11 +73,13 @@ alone is not approval.
 
 ## Local entitlement preflight and external artifacts
 
-Tennis v1 is not yet runnable against a provider. The production adapter
-registry is empty, so preflight cannot currently succeed for any provider in
-Phase 1. `provider_manifest.example.json` is schema documentation only: its
-identities, paths, dates, quotas, formats, and strata are synthetic disabled
-placeholders, and it grants no authority.
+The qualified Tennis v1 event-core path is not yet runnable against a
+provider. The production adapter registry is empty, so preflight cannot
+currently succeed for any provider in Phase 1.
+`provider_manifest.example.json` is schema documentation only: its identities,
+paths, dates, quotas, formats, and strata are synthetic disabled placeholders,
+and it grants no authority. Running the separate unqualified shadow collector
+does not satisfy, bypass, or modify this entitlement gate.
 
 Actual provider manifests, permission evidence, qualification traces,
 credentials, and reviewed trial terms remain outside Git and independently

@@ -112,7 +112,7 @@ _OUTCOME_KEYS = frozenset(
         "raw_file",
     }
 )
-_COMMANDS = frozenset({"list_live", "check", "observe"})
+_COMMANDS = frozenset({"list_live", "check", "observe", "shadow"})
 _AUDIT_COMMANDS = _COMMANDS | {"recovery"}
 _TERMINAL_REASONS = frozenset(
     {
@@ -134,6 +134,7 @@ _CAPTURE_OUTCOME_CODES = frozenset(
     }
 )
 _UNCERTAIN_OUTCOME_CODE = "sportradar_process_crash_unresolved"
+_SHADOW_TASK_CANCELLED_CODE = "sportradar_shadow_task_cancelled"
 
 
 class SportradarTrialObserverError(RuntimeError):
@@ -938,6 +939,11 @@ class TrialUsageLedger:
                     valid_code = (
                         row["code"] == "sportradar_operator_interrupt"
                     )
+                elif row["reason"] == "cancelled":
+                    valid_code = row["code"] in {
+                        None,
+                        _SHADOW_TASK_CANCELLED_CODE,
+                    }
                 elif row["reason"] == "recovered_unclean_session":
                     valid_code = (
                         row["command"] == "recovery"
@@ -966,7 +972,7 @@ class TrialUsageLedger:
                         and (
                             (command == "list_live" and provider is None)
                             or (
-                                command in {"check", "observe"}
+                                command in {"check", "observe", "shadow"}
                                 and provider is not None
                             )
                         )
@@ -993,14 +999,23 @@ class TrialUsageLedger:
                             and dispositions[-1].get("terminal_reason") is None
                         )
                     elif coherent and reason == "duration_elapsed":
-                        coherent = command == "observe" and last_is_observation
+                        coherent = (
+                            command in {"observe", "shadow"}
+                            and last_is_observation
+                        )
+                    elif (
+                        coherent
+                        and reason == "cancelled"
+                        and row["code"] == _SHADOW_TASK_CANCELLED_CODE
+                    ):
+                        coherent = command == "shadow"
                     elif coherent and reason in {
                         "closed",
                         "cancelled",
                         "abandoned",
                     }:
                         coherent = (
-                            command in {"check", "observe"}
+                            command in {"check", "observe", "shadow"}
                             and last_is_observation
                             and dispositions[-1].get("terminal_reason") == reason
                         )
@@ -1043,6 +1058,7 @@ class TrialUsageLedger:
                 "list_live": {"live_summaries"},
                 "check": {"summary"},
                 "observe": {"summary", "timeline"},
+                "shadow": {"summary", "timeline"},
             }
             if not _allowed_text(command, _COMMANDS) or not _allowed_text(
                 row["route"], expected_routes[command]
@@ -1486,7 +1502,15 @@ class TrialUsageLedger:
                 and code != "sportradar_operator_interrupt"
             )
             or (
-                reason not in {"halted", "operator_interrupt"}
+                reason == "cancelled"
+                and code not in {None, _SHADOW_TASK_CANCELLED_CODE}
+            )
+            or (
+                code == _SHADOW_TASK_CANCELLED_CODE
+                and command != "shadow"
+            )
+            or (
+                reason not in {"halted", "operator_interrupt", "cancelled"}
                 and code is not None
             )
             or type(ended_wall_ns) is not int

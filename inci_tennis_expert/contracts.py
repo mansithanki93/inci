@@ -3692,7 +3692,7 @@ _EVENT_SCHEMA_RESOURCE_SHA256_V1: Final[
 ] = (
     (
         ExpertEventKindV1.SYNCHRONIZATION_APPLIED,
-        "b8a8cdb82ada61385864b88897c58340062304fb4c47c37d5bc3d5481b17e361",
+        "da8edb60c720eccc69afe94be49a8a4350770671f2375b30b0304753eacd574f",
     ),
     (
         ExpertEventKindV1.OBSERVATION_IGNORED,

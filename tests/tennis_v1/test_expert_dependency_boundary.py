@@ -28,7 +28,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
     "inci_tennis_expert": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
         "contracts.py": (
-            "8390c0137f8f93b5150cfcc2a85d8c07af6b8c0fffbb6fc66d235aae78a46e12"
+            "574860701427c3bce00af9f17d3bb58bcc94086678cf45d58643fc98f55426ce"
         ),
         "facade.py": (
             "cf6fc820a31443e85254fa9d3bc3534c7e935b025af48a21948478e5fb277e4d"
@@ -70,10 +70,13 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6752e3b873f0e18b6226c0c664aaa49263c30b4c925019ebcebb87ce893d6e5c"
         ),
         "expert_journal_store.py": (
-            "dc14c037d4303ca2fa5ae2ed8c1b7de91b24f097bf08384884726904cc612fb0"
+            "7eef71292feb1ca9bcb08d8dd7a98e4781922f21935b0ce783bee5d75d25b29a"
         ),
         "facade.py": (
-            "9cf621feba65e4e7bc0c463cad257378e3453d59dbfdc48ace76697048355808"
+            "01309e198a6d9bd71548e5512000ac8e7824d096d6566bf0b8b5fe3bffbf2ffe"
+        ),
+        "kalshi_readonly.py": (
+            "44ec46b550a48c0d8a7e456b4620f044123b91ce1f330a1c4b0b75680090b2df"
         ),
         "pinned_artifacts.py": (
             "43feef97b2d9a37f00143f00f6272562a64881da5cf143c060eb77c8c058ca0f"
@@ -84,8 +87,14 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "provider_readonly.py": (
             "6dde0bf459b9106182f94ca3bab6340d7aae7a3b1ad8f48b644e7739e6d28487"
         ),
+        "shadow_evidence.py": (
+            "f6ef97bd1b3f8756e38f56da722deac97ce3fd6ad735f6ff0736c0deafbb5dd8"
+        ),
+        "sportradar_shadow_async.py": (
+            "2910e88509a66746650f475a843f73e072051351cd175508767f4f751cae0110"
+        ),
         "sportradar_trial_transport.py": (
-            "04d36ca299b1b5877f43346937c138c5685a72c0be0e9200aaab9916c9cede85"
+            "33a0f59b5d3e429ba23541a59be96a2d6d208946cd7c8148911d4e3e2fbfa636"
         ),
     },
     "inci_tennis_adapters": {
@@ -95,6 +104,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         ),
         "kalshi_candidate.py": (
             "17747eaa104dc1cfb18e8f57848372624d8b16ba04e6070bf684a7443b410b54"
+        ),
+        "kalshi_v2.py": (
+            "6da2e00e6326e1530a9d13a4c6b1d78b5b1cd992c78bbef099bca7890348618d"
         ),
         "registry.py": (
             "14e534fd3762d5d6198b1de8762568497bcf1c807fd56177942dab8f4de59229"
@@ -110,6 +122,12 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
         "expert_controller.py": (
             "c8f094d2381b04015edffbb1248b727319694497fc1672195e5bb843ac96cf42"
+        ),
+        "live_shadow_cli.py": (
+            "f329fc1c7f405fd8587bf1e16a19d4032ffbed83a208bea34cbdbe507bc8b0de"
+        ),
+        "live_shadow_collector.py": (
+            "49a5f3af026c4706fb80161055501e4dd429aa8cd3e6af4588c5d7711466e71f"
         ),
         "provider_qualification_controller.py": (
             "94be825905f29c252c1d4d32f4544e6e1084661b099255b4d0cfbee9e02d6109"
@@ -156,7 +174,7 @@ EXPECTED_PACKAGE_RESOURCE_SHA256 = {
             "395a1226de161b78e59e79a3ecc04d4de7f2958b71761f7319de0a477b180bc3"
         ),
         "schemas/expert-synchronization-applied-v1.schema.json": (
-            "b8a8cdb82ada61385864b88897c58340062304fb4c47c37d5bc3d5481b17e361"
+            "da8edb60c720eccc69afe94be49a8a4350770671f2375b30b0304753eacd574f"
         ),
         "schemas/task6-fallback-no-payload-v1.schema.json": (
             "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
@@ -244,7 +262,7 @@ ROOT_V6_PYTHON_PATHS = (
 )
 
 EXPECTED_REQUIREMENTS_SHA256 = (
-    "e43aac65de78bba78e9ca0e007f4ff1ba0598bfaba094dbf05005628464fb636"
+    "3183d3dbb70c4404620ec2be38bc39275f94ebcbaac2e3eeab8daff0d4875f53"
 )
 
 EXPERT_PHASE_ONE_IMPORTS = frozenset(
@@ -350,6 +368,7 @@ SEALED_RUNTIME_STDLIB_AUTHORITY_IMPORTS = frozenset(
 )
 SEALED_RUNTIME_FILE_STDLIB_AUTHORITY_IMPORTS = {
     "sportradar_trial_cli.py": frozenset({"signal"}),
+    "live_shadow_cli.py": frozenset({"signal"}),
 }
 IO_PHASE_ONE_IMPORTS = frozenset(
     {
@@ -575,6 +594,12 @@ TASK7_RUNTIME_PHASE_ONE_IMPORTS = {
     )
 }
 TASK7_RUNTIME_ADAPTER_IMPORTS = {
+    "live_shadow_cli.py": frozenset(
+        {"inci_tennis_adapters.kalshi_v2"}
+    ),
+    "live_shadow_collector.py": frozenset(
+        {"inci_tennis_adapters.sportradar_trial_v3"}
+    ),
     "sportradar_trial_cli.py": frozenset(
         {"inci_tennis_adapters.sportradar_trial_v3"}
     ),
@@ -719,6 +744,10 @@ REPOSITORY_IMPORT_ROOTS = frozenset(
 IO_EXTERNAL_IMPORT_ROOTS = frozenset(
     {"cryptography", "requests", "websockets"}
 )
+SEALED_IO_FILE_EXTERNAL_IMPORT_ROOTS = {
+    "kalshi_readonly.py": frozenset({"aiohttp"}),
+    "sportradar_shadow_async.py": frozenset({"aiohttp"}),
+}
 RAW_NETWORK_STDLIB_ROOTS = frozenset(
     {
         "ftplib",
@@ -2277,6 +2306,13 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
         )
     allowed_external_roots = (
         IO_EXTERNAL_IMPORT_ROOTS
+        | (
+            SEALED_IO_FILE_EXTERNAL_IMPORT_ROOTS.get(
+                filename, frozenset()
+            )
+            if is_exactly_sealed_source
+            else frozenset()
+        )
         if package_name == "inci_tennis_io"
         else frozenset()
     )
@@ -2355,7 +2391,7 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
             )
         rejected_network_imports = imported_roots & (
             NETWORK_IMPORT_ROOTS
-            - IO_EXTERNAL_IMPORT_ROOTS
+            - allowed_external_roots
             - RAW_NETWORK_STDLIB_ROOTS
         )
         if rejected_network_imports:
@@ -2772,13 +2808,17 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io/ports.py",
             "inci_tennis_io/expert_journal_store.py",
             "inci_tennis_io/facade.py",
+            "inci_tennis_io/kalshi_readonly.py",
             "inci_tennis_io/provider_readonly.py",
+            "inci_tennis_io/shadow_evidence.py",
+            "inci_tennis_io/sportradar_shadow_async.py",
             "inci_tennis_io/sportradar_trial_transport.py",
             "inci_tennis_io/account_lock.py",
         )
         expected_task7_adapters = (
             "inci_tennis_adapters/__init__.py",
             "inci_tennis_adapters/candidate_contracts.py",
+            "inci_tennis_adapters/kalshi_v2.py",
             "inci_tennis_adapters/registry.py",
             "inci_tennis_adapters/sportradar_tennis_v3.py",
             "inci_tennis_adapters/sportradar_trial_v3.py",
@@ -2835,6 +2875,8 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
         expected_runtime = (
             "inci_tennis_runtime/__init__.py",
             "inci_tennis_runtime/expert_controller.py",
+            "inci_tennis_runtime/live_shadow_cli.py",
+            "inci_tennis_runtime/live_shadow_collector.py",
             "inci_tennis_runtime/replay_service.py",
             (
                 "inci_tennis_runtime/"
@@ -2889,15 +2931,19 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "account_lock.py",
                 "expert_journal_store.py",
                 "facade.py",
+                "kalshi_readonly.py",
                 "pinned_artifacts.py",
                 "ports.py",
                 "provider_readonly.py",
+                "shadow_evidence.py",
+                "sportradar_shadow_async.py",
                 "sportradar_trial_transport.py",
             },
             "inci_tennis_adapters": {
                 "__init__.py",
                 "candidate_contracts.py",
                 "kalshi_candidate.py",
+                "kalshi_v2.py",
                 "registry.py",
                 "sportradar_tennis_v3.py",
                 "sportradar_trial_v3.py",
@@ -2905,6 +2951,8 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_runtime": {
                 "__init__.py",
                 "expert_controller.py",
+                "live_shadow_cli.py",
+                "live_shadow_collector.py",
                 "provider_qualification_controller.py",
                 "replay_service.py",
                 "shadow_cli.py",
@@ -2975,6 +3023,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
         reviewed = (
             ("inci_tennis_io", "expert_journal_store.py"),
             ("inci_tennis_io", "provider_readonly.py"),
+            ("inci_tennis_io", "sportradar_shadow_async.py"),
             ("inci_tennis_adapters", "candidate_contracts.py"),
             ("inci_tennis_adapters", "kalshi_candidate.py"),
             ("inci_tennis_adapters", "registry.py"),
@@ -2983,6 +3032,8 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "inci_tennis_runtime",
                 "provider_qualification_controller.py",
             ),
+            ("inci_tennis_runtime", "live_shadow_cli.py"),
+            ("inci_tennis_runtime", "live_shadow_collector.py"),
             ("inci_tennis_runtime", "shadow_cli.py"),
             ("inci_tennis_runtime", "shadow_runtime.py"),
         )

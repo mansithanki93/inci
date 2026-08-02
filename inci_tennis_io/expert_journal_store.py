@@ -248,7 +248,10 @@ _IO_INVENTORY = (
     "inci_tennis_io/ports.py",
     "inci_tennis_io/expert_journal_store.py",
     "inci_tennis_io/facade.py",
+    "inci_tennis_io/kalshi_readonly.py",
     "inci_tennis_io/provider_readonly.py",
+    "inci_tennis_io/shadow_evidence.py",
+    "inci_tennis_io/sportradar_shadow_async.py",
     "inci_tennis_io/sportradar_trial_transport.py",
     "inci_tennis_io/account_lock.py",
 )
@@ -277,6 +280,7 @@ _KALSHI_CANDIDATE_SCHEMA_INVENTORY = (
 _ADAPTER_INVENTORY = (
     "inci_tennis_adapters/__init__.py",
     "inci_tennis_adapters/candidate_contracts.py",
+    "inci_tennis_adapters/kalshi_v2.py",
     "inci_tennis_adapters/registry.py",
     "inci_tennis_adapters/sportradar_tennis_v3.py",
     "inci_tennis_adapters/sportradar_trial_v3.py",
@@ -285,6 +289,8 @@ _ADAPTER_INVENTORY = (
 _RUNTIME_INVENTORY = (
     "inci_tennis_runtime/__init__.py",
     "inci_tennis_runtime/expert_controller.py",
+    "inci_tennis_runtime/live_shadow_cli.py",
+    "inci_tennis_runtime/live_shadow_collector.py",
     "inci_tennis_runtime/replay_service.py",
     "inci_tennis_runtime/provider_qualification_controller.py",
     "inci_tennis_runtime/shadow_runtime.py",
