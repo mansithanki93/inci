@@ -624,13 +624,80 @@ class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaisesRegex(
                 ShadowCollectorError, "sportradar_primary_failure"
-            ):
+            ) as raised:
                 await collector.run(duration_seconds=10, poll_seconds=10)
 
         self.assertEqual(transport.close_calls, 1)
+        self.assertFalse(raised.exception.failover_eligible)
         self.assertEqual(
             evidence.terminals[0]["code"], "sportradar_primary_failure"
         )
+
+    async def test_only_allowlisted_provider_failure_after_clean_close_is_failover_eligible(
+        self,
+    ) -> None:
+        """Catches generic provider prefixes or dirty cleanup enabling failover."""
+
+        from inci_tennis_runtime.live_shadow_collector import (
+            LiveShadowCollector,
+            ShadowCollectorError,
+        )
+
+        class FailingProvider(_SportradarTransport):
+            def __init__(self, capture: TrialCapture, code: str) -> None:
+                super().__init__(capture)
+                self.code = code
+
+            async def fetch_summary(self, match_id: str) -> TrialCapture:
+                del match_id
+                raise _CodedError(self.code)
+
+        class RecordingEvidence:
+            def __init__(self) -> None:
+                self.terminals: list[dict[str, object]] = []
+
+            def persist_kalshi_frame(self, frame: object) -> object:
+                raise AssertionError(f"unexpected frame: {frame!r}")
+
+            def append_observation(self, record: object) -> None:
+                raise AssertionError(f"unexpected observation: {record!r}")
+
+            def append_terminal(self, **values: object) -> None:
+                self.terminals.append(values)
+
+        for code, expected in (
+            ("sportradar_transport_unavailable", True),
+            ("sportradar_http_status_429", True),
+            ("sportradar_summary_schema_unknown", True),
+            ("sportradar_match_identity_mismatch", False),
+            ("sportradar_usage_ledger_write_failed", False),
+            ("sportradar_new_unknown_failure", False),
+            ("kalshi_ws_contract_invalid", False),
+        ):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                clock = _Clock()
+                collector = LiveShadowCollector(
+                    provider_match_id=MATCH_ID,
+                    market_tickers=TICKERS,
+                    sportradar_transport=FailingProvider(
+                        _capture(Path(directory)), code
+                    ),
+                    sportradar_ledger=_SportradarLedger(),
+                    kalshi_transport=_KalshiTransport(clock, []),
+                    market_projector=_Projector(lambda _: None),
+                    evidence_store=RecordingEvidence(),
+                    wall_ns=clock.wall_ns,
+                    monotonic_ns=clock.monotonic_ns,
+                    pause=clock.pause,
+                    stop_requested=lambda: False,
+                    render=lambda _: None,
+                )
+
+                with self.assertRaises(ShadowCollectorError) as raised:
+                    await collector.run(duration_seconds=10, poll_seconds=10)
+
+                self.assertEqual(raised.exception.code, code)
+                self.assertIs(raised.exception.failover_eligible, expected)
 
     async def test_cancellation_during_open_still_closes_and_records_terminals(self) -> None:
         """Catches abandoning a partially opened socket on early cancellation."""
@@ -1463,8 +1530,8 @@ class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DashboardTests(unittest.TestCase):
-    def test_auto_matched_dashboard_keeps_unqualified_read_only_label(self) -> None:
-        """Catches reverting a chooser session to operator-supplied mapping."""
+    def test_verified_dashboard_keeps_observation_only_safety_label(self) -> None:
+        """Catches verified source correlation implying trading authority."""
 
         from inci_tennis_runtime.live_shadow_collector import (
             ShadowDashboardView,
@@ -1494,9 +1561,10 @@ class DashboardTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS", rendered
+            "READ ONLY / VERIFIED SOURCE LINK / UNQUALIFIED / NO SIGNALS / NO P&L / NO ORDERS",
+            rendered,
         )
-        self.assertIn("AUTO-MATCHED / UNQUALIFIED", rendered)
+        self.assertIn("VERIFIED SOURCE LINK / UNQUALIFIED", rendered)
         self.assertNotIn("OPERATOR-SUPPLIED", rendered)
 
     def test_dashboard_labels_candidate_data_without_trading_language(self) -> None:

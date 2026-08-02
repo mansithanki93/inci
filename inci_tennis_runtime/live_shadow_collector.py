@@ -49,18 +49,88 @@ _CANDIDATE_STATUSES = frozenset(
 _TERMINAL_STATUSES = frozenset({"closed", "cancelled", "abandoned"})
 _TERMINAL_KALSHI_CODES = frozenset({"kalshi_stream_terminal"})
 _MAX_RECOVERY_ATTEMPTS = 3
+_PROVIDER_FAILOVER_TRANSPORT_CODES = frozenset(
+    {
+        "sportradar_async_dependency_unavailable",
+        "sportradar_body_too_large",
+        "sportradar_content_encoding_invalid",
+        "sportradar_content_length_invalid",
+        "sportradar_content_length_mismatch",
+        "sportradar_content_type_invalid",
+        "sportradar_http_status_invalid",
+        "sportradar_response_body_invalid",
+        "sportradar_response_body_unavailable",
+        "sportradar_response_headers_invalid",
+        "sportradar_total_deadline",
+        "sportradar_transport_unavailable",
+    }
+)
+_PROVIDER_FAILOVER_PARSER_CODES = frozenset(
+    {
+        "sportradar_competitors_invalid",
+        "sportradar_duplicate_json_key",
+        "sportradar_generated_time_mismatch",
+        "sportradar_generated_time_missing",
+        "sportradar_live_summaries_schema_unknown",
+        "sportradar_live_summary_schema_unknown",
+        "sportradar_match_format_unknown",
+        "sportradar_match_status_unknown",
+        "sportradar_nonfinite_number",
+        "sportradar_period_scores_invalid",
+        "sportradar_point_state_invalid",
+        "sportradar_server_invalid",
+        "sportradar_source_stale",
+        "sportradar_source_time_ahead",
+        "sportradar_status_unknown",
+        "sportradar_summary_schema_unknown",
+        "sportradar_timeline_before_summary",
+        "sportradar_timeline_competitor_invalid",
+        "sportradar_timeline_event_unknown",
+        "sportradar_timeline_gap",
+        "sportradar_timeline_missing",
+        "sportradar_timeline_order_invalid",
+        "sportradar_timeline_period_invalid",
+        "sportradar_timeline_reason_unknown",
+        "sportradar_timeline_result_unknown",
+        "sportradar_timeline_schema_unknown",
+        "sportradar_timeline_server_invalid",
+        "sportradar_timeline_unmarked_correction",
+        "sportradar_timeline_update_invalid",
+        "sportradar_timestamp_invalid",
+        "sportradar_wire_contract_invalid",
+    }
+)
+_PROVIDER_HTTP_STATUS_PATTERN = pattern_compile(
+    r"sportradar_http_status_[1-5][0-9]{2}\Z", flags=ASCII
+)
 
 
 class ShadowCollectorError(RuntimeError):
     """A fixed shadow diagnostic without raw payload or credential text."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        failover_eligible: bool = False,
+    ) -> None:
+        if type(failover_eligible) is not bool:
+            failover_eligible = False
         self.code = code
+        self.failover_eligible = failover_eligible
         super().__init__(code)
 
 
 def _fail(code: str) -> None:
     raise ShadowCollectorError(code)
+
+
+def _provider_failure_allows_price_only(code: object) -> bool:
+    return type(code) is str and (
+        code in _PROVIDER_FAILOVER_TRANSPORT_CODES
+        or code in _PROVIDER_FAILOVER_PARSER_CODES
+        or _PROVIDER_HTTP_STATUS_PATTERN.fullmatch(code) is not None
+    )
 
 
 class _KalshiTransport(Protocol):
@@ -242,8 +312,11 @@ def render_shadow_dashboard(view: ShadowDashboardView) -> str:
     """Render one dependency-free, explicitly non-trading snapshot."""
 
     if view.mapping_mode == "auto_matched":
-        mode = "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS"
-        mapping = "AUTO-MATCHED / UNQUALIFIED"
+        mode = (
+            "READ ONLY / VERIFIED SOURCE LINK / UNQUALIFIED / "
+            "NO SIGNALS / NO P&L / NO ORDERS"
+        )
+        mapping = "VERIFIED SOURCE LINK / UNQUALIFIED"
     elif view.mapping_mode == "operator_supplied":
         mode = "READ ONLY / UNQUALIFIED / NO ORDERS"
         mapping = "OPERATOR-SUPPLIED / UNVERIFIED"
@@ -887,7 +960,7 @@ class LiveShadowCollector:
         reason: str,
         failure: str | None,
         opened: bool,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, bool]:
         completed_captures = getattr(
             self._sportradar,
             "completed_captures",
@@ -900,11 +973,13 @@ class LiveShadowCollector:
             _fail("shadow_provider_state_invalid")
         self._sportradar_captures = completed_captures
         first_error: Exception | None = None
+        cleanup_clean = True
         primary_halt = reason == "halted" and failure is not None
         if opened:
             try:
                 await self._kalshi.close()
             except Exception as error:
+                cleanup_clean = False
                 if not primary_halt:
                     first_error = error
                 if reason != "cancelled" and not primary_halt:
@@ -950,7 +1025,7 @@ class LiveShadowCollector:
                 first_error = error
         if first_error is not None:
             raise first_error
-        return reason, failure
+        return reason, failure, cleanup_clean
 
     async def run(self, *, duration_seconds: int, poll_seconds: int) -> str:
         if (
@@ -1048,14 +1123,22 @@ class LiveShadowCollector:
             raise ShadowCollectorError(_error_code(cleanup_error)) from cleanup_error
         if (
             type(result) is not tuple
-            or len(result) != 2
+            or len(result) != 3
             or type(result[0]) is not str
             or (result[1] is not None and type(result[1]) is not str)
+            or type(result[2]) is not bool
         ):
             _fail("shadow_internal_error")
-        reason, failure = result
+        reason, failure, cleanup_clean = result
         if reason == "halted":
-            raise ShadowCollectorError(failure or "shadow_internal_error")
+            code = failure or "shadow_internal_error"
+            raise ShadowCollectorError(
+                code,
+                failover_eligible=(
+                    cleanup_clean
+                    and _provider_failure_allows_price_only(code)
+                ),
+            )
         return reason
 
 

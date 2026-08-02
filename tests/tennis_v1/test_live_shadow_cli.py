@@ -32,11 +32,22 @@ def _live_payload(*, include_second: bool = True) -> bytes:
                     {"id": home_id, "name": home, "qualifier": "home"},
                     {"id": away_id, "name": away, "qualifier": "away"},
                 ],
-                "sport_event_context": {"mode": {"best_of": 3}},
+                "sport_event_context": {
+                    "sport": {"id": "sr:sport:5", "name": "Tennis"},
+                    "category": {"id": "sr:category:3", "name": "ATP"},
+                    "competition": {
+                        "id": "sr:competition:1",
+                        "name": "Washington",
+                        "type": "singles",
+                        "gender": "men",
+                        "level": "professional",
+                    },
+                    "mode": {"best_of": 3},
+                },
             },
             "sport_event_status": {
                 "status": "live",
-                "match_status": "1st_set",
+                "match_status": "live",
                 "home_score": 0,
                 "away_score": 0,
                 "period_scores": [],
@@ -115,6 +126,65 @@ def _games(*, include_second: bool = True) -> tuple[object, ...]:
     return tuple(values)
 
 
+def _hybrid_game(
+    event_ticker: str = "KXTENNIS-MATCH",
+    *,
+    home: str = "Player Home",
+    away: str = "Player Away",
+    start_wall_ns: int = 1_785_607_200_000_000_000,
+    initial_book_state: str = "two_sided",
+) -> object:
+    from inci_tennis_adapters.shadow_discovery_contracts import (
+        KalshiCompetitionProvenance,
+        KalshiShadowGame,
+        KalshiShadowMarket,
+    )
+
+    provenance = KalshiCompetitionProvenance(
+        sport="Tennis",
+        scope="Games",
+        queried_competitions=("ATP",),
+        series_ticker="KXATP",
+        milestone_id="milestone-1",
+        milestone_league="ATP",
+    )
+    prefix = event_ticker
+    tickers = TICKERS if event_ticker == "KXTENNIS-MATCH" else (
+        f"{prefix}-HOME",
+        f"{prefix}-AWAY",
+    )
+    return KalshiShadowGame(
+        provenance=provenance,
+        event_ticker=event_ticker,
+        scheduled_start_wall_ns=start_wall_ns,
+        game_title=f"{home} v {away}",
+        markets=(
+            KalshiShadowMarket(
+                tickers[0], home, "0.40", "0.42", "2", "3"
+            ),
+            KalshiShadowMarket(
+                tickers[1], away, "0.58", "0.60", "4", "5"
+            ),
+        ),
+        initial_book_state=initial_book_state,
+    )
+
+
+def _hybrid_catalog(
+    *games: object,
+    exclusions: tuple[object, ...] = (),
+) -> object:
+    from inci_tennis_adapters.shadow_discovery_contracts import (
+        KalshiShadowCatalogSnapshot,
+    )
+
+    return KalshiShadowCatalogSnapshot(
+        games=(_hybrid_game(),) if not games else games,
+        excluded=exclusions,
+        catalog_sha256="b" * 64,
+    )
+
+
 class _Context:
     def __init__(
         self,
@@ -123,6 +193,9 @@ class _Context:
         remaining_session_attempts: int = 100,
         remaining_access_attempts: int = 100,
         state_root: Path = Path("/private/tmp/inci-shadow-evidence"),
+        events: list[str] | None = None,
+        label: str = "context",
+        exit_error: BaseException | None = None,
     ) -> None:
         self.value = self if value is None else value
         self.entered = False
@@ -130,20 +203,35 @@ class _Context:
         self.remaining_session_attempts = remaining_session_attempts
         self.remaining_access_attempts = remaining_access_attempts
         self.state_root = state_root
+        self.events = events
+        self.label = label
+        self.exit_error = exit_error
 
     def __enter__(self) -> object:
         self.entered = True
+        if self.events is not None:
+            self.events.append(f"{self.label}_enter")
         return self.value
 
     def __exit__(self, *_: object) -> None:
         self.exited = True
+        if self.events is not None:
+            self.events.append(f"{self.label}_exit")
+        if self.exit_error is not None:
+            raise self.exit_error
 
     async def __aenter__(self) -> object:
         self.entered = True
+        if self.events is not None:
+            self.events.append(f"{self.label}_enter")
         return self.value
 
     async def __aexit__(self, *_: object) -> None:
         self.exited = True
+        if self.events is not None:
+            self.events.append(f"{self.label}_exit")
+        if self.exit_error is not None:
+            raise self.exit_error
 
 
 class _ChooserLedger(_Context):
@@ -169,15 +257,22 @@ class _ChooserProvider(_Context):
         payload: bytes | None = None,
         *,
         captured_wall_ns: int = GENERATED_NS + 5_000_000_000,
+        error: BaseException | None = None,
+        events: list[str] | None = None,
+        label: str = "provider",
+        exit_error: BaseException | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(events=events, label=label, exit_error=exit_error)
         self.payload = _live_payload() if payload is None else payload
         self.captured_wall_ns = captured_wall_ns
         self.discovery_calls = 0
         self.completed_captures = 1
+        self.error = error
 
     async def fetch_live_summaries(self) -> object:
         self.discovery_calls += 1
+        if self.error is not None:
+            raise self.error
         return SimpleNamespace(
             reservation=SimpleNamespace(route="live_summaries"),
             captured_wall_ns=self.captured_wall_ns,
@@ -195,17 +290,84 @@ class _ChooserCatalog:
         self.calls += 1
         return self.games, "b" * 64
 
+    def discover_tennis_catalog(self) -> object:
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            KalshiShadowCatalogSnapshot,
+            KalshiShadowGame,
+            KalshiShadowMarket,
+        )
+
+        self.calls += 1
+        converted = []
+        for game in self.games:
+            template = _hybrid_game(game.event_ticker)
+            converted.append(
+                KalshiShadowGame(
+                    provenance=template.provenance,
+                    event_ticker=game.event_ticker,
+                    scheduled_start_wall_ns=game.scheduled_start_wall_ns,
+                    game_title=game.game_title,
+                    markets=tuple(
+                        KalshiShadowMarket(
+                            market.ticker, market.yes_player_name
+                        )
+                        for market in game.markets
+                    ),
+                    initial_book_state="empty",
+                )
+            )
+        return KalshiShadowCatalogSnapshot(
+            games=tuple(converted),
+            excluded=(),
+            catalog_sha256="b" * 64,
+        )
+
+
+class _HybridCatalog:
+    def __init__(
+        self,
+        snapshot: object | None = None,
+        *,
+        events: list[str] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.snapshot = _hybrid_catalog() if snapshot is None else snapshot
+        self.calls = 0
+        self.events = events
+        self.error = error
+
+    def discover_tennis_catalog(self) -> object:
+        self.calls += 1
+        if self.events is not None:
+            self.events.append("catalog")
+        if self.error is not None:
+            raise self.error
+        return self.snapshot
+
 
 class _ChooserEvidence(_Context):
-    def __init__(self, events: list[str] | None = None) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        events: list[str] | None = None,
+        *,
+        session_id: str = "11111111-1111-4111-8111-111111111111",
+        terminal_row_sha256: str | None = None,
+    ) -> None:
+        super().__init__(events=events, label="evidence")
         self.resolutions: list[object] = []
-        self.events = events
+        self.halted: list[dict[str, object]] = []
+        self.session_id = session_id
+        self.terminal_row_sha256 = terminal_row_sha256
 
     def append_resolution(self, value: object) -> None:
         self.resolutions.append(value)
         if self.events is not None:
             self.events.append("resolution")
+
+    def ensure_halted_terminal(self, **values: object) -> None:
+        self.halted.append(values)
+        if self.terminal_row_sha256 is None:
+            self.terminal_row_sha256 = "d" * 64
 
 
 class _Collector:
@@ -222,7 +384,556 @@ class _Collector:
         return "duration_elapsed"
 
 
+class _PriceCollector:
+    def __init__(self, **values: object) -> None:
+        self.values = values
+
+    async def run(self, *, duration_seconds: int) -> str:
+        self.values["run_duration_seconds"] = duration_seconds
+        return "duration_elapsed"
+
+
 class LiveShadowCliTests(unittest.TestCase):
+    def test_no_sportradar_key_still_lists_and_collects_price_only(self) -> None:
+        """Catches chooser startup requiring or constructing score-feed state."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        catalog = _HybridCatalog()
+        price_collectors: list[_PriceCollector] = []
+        forbidden: list[str] = []
+
+        def price_factory(**values: object) -> _PriceCollector:
+            collector = _PriceCollector(**values)
+            price_collectors.append(collector)
+            return collector
+
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={},
+            stdin=io.StringIO("1\n"),
+            stdout=io.StringIO(),
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                credential_loader=lambda _: forbidden.append("manual_credentials"),
+                kalshi_only_credential_loader=lambda _: material,
+                trial_ledger_factory=lambda: forbidden.append("trial_ledger"),
+                sportradar_transport_factory=lambda **_: forbidden.append("provider"),
+                catalog_transport_factory=lambda: catalog,
+                evidence_store_factory=_Context,
+                evidence_root=lambda: Path("/private/tmp/inci-shadow"),
+                kalshi_transport_factory=lambda *_: object(),
+                projector_factory=lambda _: object(),
+                collector_factory=lambda **_: forbidden.append("verified_collector"),
+                price_only_collector_factory=price_factory,
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: 10_000_000_000,
+            ),
+        )
+
+        self.assertEqual(code, 0, errors.getvalue())
+        self.assertEqual(catalog.calls, 1)
+        self.assertEqual(forbidden, [])
+        self.assertEqual(len(price_collectors), 1)
+        self.assertEqual(
+            price_collectors[0].values["run_duration_seconds"], 10
+        )
+
+    def test_catalog_failure_precedes_provider_key_ledger_and_transport(self) -> None:
+        """Catches optional provider inspection weakening the primary census."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        events: list[str] = []
+
+        class Environment(dict[str, str]):
+            def get(self, key: str, default: object = None) -> object:
+                if key == "SPORTRADAR_API_KEY":
+                    events.append("provider_key")
+                return super().get(key, default)
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ=Environment(SPORTRADAR_API_KEY="secret"),
+            stdin=io.StringIO("q\n"),
+            stdout=io.StringIO(),
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                kalshi_only_credential_loader=lambda _: material,
+                catalog_transport_factory=lambda: _HybridCatalog(
+                    events=events,
+                    error=ShadowCollectorError("kalshi_catalog_unavailable"),
+                ),
+                trial_ledger_factory=lambda: events.append("ledger"),
+                sportradar_transport_factory=lambda **_: events.append("provider"),
+            ),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(events, ["catalog"])
+        self.assertEqual(errors.getvalue(), "HALTED: kalshi_catalog_unavailable\n")
+
+    def test_discovery_absence_quota_transport_parser_stale_and_empty_downgrade(self) -> None:
+        """Catches optional discovery failures removing the Kalshi choice."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        cases = (
+            ("missing", {}, None, None, "provider_credentials_missing"),
+            (
+                "quota",
+                {"SPORTRADAR_API_KEY": "secret"},
+                _ChooserLedger(
+                    remaining_session_attempts=0,
+                    remaining_access_attempts=1,
+                ),
+                None,
+                "provider_quota_unavailable",
+            ),
+            (
+                "network",
+                {"SPORTRADAR_API_KEY": "secret"},
+                _ChooserLedger(),
+                _ChooserProvider(
+                    error=ShadowCollectorError("sportradar_transport_unavailable")
+                ),
+                "sportradar_transport_unavailable",
+            ),
+            (
+                "parser",
+                {"SPORTRADAR_API_KEY": "secret"},
+                _ChooserLedger(),
+                _ChooserProvider(payload=b"{}"),
+                "sportradar_live_summaries_schema_unknown",
+            ),
+            (
+                "stale",
+                {"SPORTRADAR_API_KEY": "secret"},
+                _ChooserLedger(),
+                _ChooserProvider(
+                    captured_wall_ns=GENERATED_NS + 61_000_000_000
+                ),
+                "sportradar_source_stale",
+            ),
+            (
+                "empty",
+                {"SPORTRADAR_API_KEY": "secret"},
+                _ChooserLedger(),
+                _ChooserProvider(
+                    payload=json.dumps(
+                        {
+                            "generated_at": "2026-08-01T18:00:02+00:00",
+                            "summaries": [],
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                ),
+                "provider_empty",
+            ),
+        )
+        for label, environ, ledger, provider, reason in cases:
+            with self.subTest(label=label):
+                output = io.StringIO()
+                errors = io.StringIO()
+                provider_calls: list[str] = []
+                selected_ledger = ledger
+                selected_provider = provider
+                code = run_cli(
+                    ["--choose", "--duration-seconds", "10"],
+                    environ=environ,
+                    stdin=io.StringIO("q\n"),
+                    stdout=output,
+                    stderr=errors,
+                    dependencies=LiveShadowCliDependencies(
+                        kalshi_only_credential_loader=lambda _: material,
+                        catalog_transport_factory=_HybridCatalog,
+                        trial_ledger_factory=lambda: selected_ledger,
+                        sportradar_transport_factory=lambda **_: (
+                            provider_calls.append("provider") or selected_provider
+                        ),
+                    ),
+                )
+
+                self.assertEqual(code, 0, errors.getvalue())
+                self.assertIn("PRICE ONLY", output.getvalue())
+                self.assertIn(reason, output.getvalue())
+                if label in {"missing", "quota"}:
+                    self.assertEqual(provider_calls, [])
+
+    def test_three_sections_share_selectable_numbering_and_conflicts_reprompt(self) -> None:
+        """Catches conflict numbering or selection-triggered rediscovery."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            KalshiCatalogExclusion,
+        )
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        verified = _hybrid_game()
+        price = _hybrid_game(
+            "KXATP-PRICE",
+            home="Neutral One",
+            away="Neutral Two",
+            start_wall_ns=1_785_607_500_000_000_000,
+        )
+        conflict_a = _hybrid_game(
+            "KXATP-CONFLICT-A", home="Same One", away="Same Two"
+        )
+        conflict_b = _hybrid_game(
+            "KXATP-CONFLICT-B", home="Same One", away="Same Two"
+        )
+        excluded = KalshiCatalogExclusion(
+            "KXATP-EXCLUDED", "active_binary_sibling_count_invalid", None
+        )
+        catalog = _HybridCatalog(
+            _hybrid_catalog(
+                verified,
+                price,
+                conflict_a,
+                conflict_b,
+                exclusions=(excluded,),
+            )
+        )
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        price_collectors: list[_PriceCollector] = []
+        output = io.StringIO()
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={"SPORTRADAR_API_KEY": "secret"},
+            stdin=io.StringIO("3\n2\n"),
+            stdout=output,
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                kalshi_only_credential_loader=lambda _: material,
+                catalog_transport_factory=lambda: catalog,
+                trial_ledger_factory=_ChooserLedger,
+                sportradar_transport_factory=lambda **_: _ChooserProvider(
+                    payload=_live_payload(include_second=False)
+                ),
+                evidence_store_factory=_Context,
+                kalshi_transport_factory=lambda *_: object(),
+                projector_factory=lambda _: object(),
+                price_only_collector_factory=lambda **values: (
+                    price_collectors.append(_PriceCollector(**values))
+                    or price_collectors[-1]
+                ),
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: 10_000_000_000,
+            ),
+        )
+
+        text = output.getvalue()
+        self.assertEqual(code, 0, errors.getvalue())
+        self.assertEqual(catalog.calls, 1)
+        self.assertIn("VERIFIED", text)
+        self.assertIn("[1] Player Home vs Player Away", text)
+        self.assertIn("PRICE ONLY", text)
+        self.assertIn("[2] Neutral One vs Neutral Two", text)
+        self.assertIn("CONFLICT / EXCLUDED", text)
+        self.assertIn("KXATP-CONFLICT-A", text)
+        self.assertNotIn("[3]", text)
+        self.assertIn("Invalid selection", text)
+        self.assertEqual(len(price_collectors), 1)
+
+    def test_verified_second_preflight_happens_after_choice_before_io(self) -> None:
+        """Catches discovery quota being mistaken for collection authority."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        ledgers = iter(
+            (
+                _ChooserLedger(),
+                _ChooserLedger(
+                    remaining_session_attempts=0,
+                    remaining_access_attempts=100,
+                ),
+            )
+        )
+        forbidden: list[str] = []
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={"SPORTRADAR_API_KEY": "secret"},
+            stdin=io.StringIO("1\n"),
+            stdout=io.StringIO(),
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                kalshi_only_credential_loader=lambda _: material,
+                catalog_transport_factory=_HybridCatalog,
+                trial_ledger_factory=lambda: next(ledgers),
+                sportradar_transport_factory=lambda **_: _ChooserProvider(
+                    payload=_live_payload(include_second=False)
+                ),
+                evidence_store_factory=lambda: forbidden.append("evidence"),
+                kalshi_transport_factory=lambda *_: forbidden.append("kalshi"),
+                collector_factory=lambda **_: forbidden.append("collector"),
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: 1_000_000_000,
+            ),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(forbidden, [])
+        self.assertIn("sportradar_shadow_quota_insufficient", errors.getvalue())
+
+    def test_selection_identity_recheck_is_snapshot_only_and_precedes_io(self) -> None:
+        """Catches mutated displayed identity starting a different socket."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        game = _hybrid_game()
+        catalog = _HybridCatalog(_hybrid_catalog(game))
+        forbidden: list[str] = []
+
+        class MutatingInput(io.StringIO):
+            def readline(self, *values: object) -> str:
+                result = super().readline(*values)
+                object.__setattr__(game, "event_ticker", "KXATP-MUTATED")
+                return result
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={"SPORTRADAR_API_KEY": "secret"},
+            stdin=MutatingInput("1\n"),
+            stdout=io.StringIO(),
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                kalshi_only_credential_loader=lambda _: material,
+                catalog_transport_factory=lambda: catalog,
+                evidence_store_factory=lambda: forbidden.append("evidence"),
+                kalshi_transport_factory=lambda *_: forbidden.append("kalshi"),
+                price_only_collector_factory=lambda **_: forbidden.append("price"),
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: 10_000_000_000,
+            ),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(catalog.calls, 1)
+        self.assertEqual(forbidden, [])
+        self.assertIn("shadow_selection_identity_changed", errors.getvalue())
+
+    def test_verified_provider_halt_links_fresh_price_session_for_remainder(self) -> None:
+        """Catches failover reusing score state or an unbound verified terminal."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        events: list[str] = []
+        discovery_ledger = _ChooserLedger(events=events, label="discovery_ledger")
+        verified_ledger = _ChooserLedger(events=events, label="verified_ledger")
+        ledgers = iter((discovery_ledger, verified_ledger))
+        discovery_provider = _ChooserProvider(
+            payload=_live_payload(include_second=False),
+            events=events,
+            label="discovery_provider",
+        )
+        verified_provider = _ChooserProvider(
+            events=events,
+            label="verified_provider",
+        )
+        providers = iter((discovery_provider, verified_provider))
+        verified_evidence = _ChooserEvidence(
+            events,
+            session_id="11111111-1111-4111-8111-111111111111",
+        )
+        price_evidence = _Context(events=events, label="price_evidence")
+        evidence = iter((verified_evidence, price_evidence))
+        price_collectors: list[_PriceCollector] = []
+        clocks = iter((1_000_000_000, 12_200_000_000, 12_200_000_000))
+
+        class ProviderFailureCollector(_Collector):
+            async def run(
+                self, *, duration_seconds: int, poll_seconds: int
+            ) -> str:
+                del duration_seconds, poll_seconds
+                raise ShadowCollectorError(
+                    "sportradar_transport_unavailable",
+                    failover_eligible=True,
+                )
+
+        def price_factory(**values: object) -> _PriceCollector:
+            events.append("price_collector")
+            collector = _PriceCollector(**values)
+            price_collectors.append(collector)
+            return collector
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "30"],
+            environ={"SPORTRADAR_API_KEY": "secret"},
+            stdin=io.StringIO("1\n"),
+            stdout=io.StringIO(),
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                kalshi_only_credential_loader=lambda _: material,
+                catalog_transport_factory=_HybridCatalog,
+                trial_ledger_factory=lambda: next(ledgers),
+                sportradar_transport_factory=lambda **_: next(providers),
+                evidence_store_factory=lambda: next(evidence),
+                kalshi_transport_factory=lambda *_: (events.append("kalshi") or object()),
+                projector_factory=lambda _: (events.append("projector") or object()),
+                collector_factory=ProviderFailureCollector,
+                price_only_collector_factory=price_factory,
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: next(clocks),
+            ),
+        )
+
+        self.assertEqual(code, 0, errors.getvalue())
+        self.assertEqual(len(price_collectors), 1)
+        session = price_collectors[0].values["session_evidence"]
+        self.assertEqual(
+            session.predecessor_session_id,
+            "11111111-1111-4111-8111-111111111111",
+        )
+        self.assertEqual(session.predecessor_terminal_row_sha256, "d" * 64)
+        self.assertEqual(price_collectors[0].values["run_duration_seconds"], 18)
+        self.assertLess(
+            events.index("verified_provider_exit"),
+            events.index("price_collector"),
+        )
+        self.assertLess(
+            events.index("verified_ledger_exit"),
+            events.index("price_collector"),
+        )
+        forbidden_names = {
+            "score",
+            "server",
+            "provider_age",
+            "sportradar_transport",
+            "sportradar_ledger",
+        }
+        self.assertTrue(forbidden_names.isdisjoint(price_collectors[0].values))
+
+    def test_nonprovider_and_short_remainder_never_start_failover(self) -> None:
+        """Catches generic prefix matching or fabricated minimum-duration runs."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+        from inci_tennis_runtime.live_shadow_collector import ShadowCollectorError
+
+        cases = (
+            ("kalshi", "kalshi_transport_unavailable", False, (1, 2)),
+            ("evidence", "shadow_evidence_write_failed", False, (1, 2)),
+            ("unknown", "sportradar_new_unknown_failure", False, (1, 2)),
+            (
+                "short",
+                "sportradar_transport_unavailable",
+                True,
+                (1_000_000_000, 21_500_000_000),
+            ),
+        )
+        for label, error_code, eligible, clock_values in cases:
+            with self.subTest(label=label):
+                ledgers = iter((_ChooserLedger(), _ChooserLedger()))
+                providers = iter(
+                    (
+                        _ChooserProvider(payload=_live_payload(include_second=False)),
+                        _ChooserProvider(),
+                    )
+                )
+                evidence = _ChooserEvidence()
+                price_calls: list[str] = []
+                clocks = iter(clock_values)
+
+                class FailedCollector(_Collector):
+                    async def run(
+                        self, *, duration_seconds: int, poll_seconds: int
+                    ) -> str:
+                        del duration_seconds, poll_seconds
+                        raise ShadowCollectorError(
+                            error_code,
+                            failover_eligible=eligible,
+                        )
+
+                material = SimpleNamespace(
+                    kalshi_api_key_id="identifier",
+                    kalshi_private_key_path=Path("/private/tmp/key.pem"),
+                )
+                errors = io.StringIO()
+                code = run_cli(
+                    ["--choose", "--duration-seconds", "30"],
+                    environ={"SPORTRADAR_API_KEY": "secret"},
+                    stdin=io.StringIO("1\n"),
+                    stdout=io.StringIO(),
+                    stderr=errors,
+                    dependencies=LiveShadowCliDependencies(
+                        kalshi_only_credential_loader=lambda _: material,
+                        catalog_transport_factory=_HybridCatalog,
+                        trial_ledger_factory=lambda: next(ledgers),
+                        sportradar_transport_factory=lambda **_: next(providers),
+                        evidence_store_factory=lambda: evidence,
+                        kalshi_transport_factory=lambda *_: object(),
+                        projector_factory=lambda _: object(),
+                        collector_factory=FailedCollector,
+                        price_only_collector_factory=lambda **_: price_calls.append(
+                            "price"
+                        ),
+                        wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                        monotonic_ns=lambda: next(clocks),
+                    ),
+                )
+
+                self.assertEqual(code, 1)
+                self.assertEqual(price_calls, [])
+                self.assertIn(error_code, errors.getvalue())
+
     def test_choose_lists_once_reprompts_locally_and_runs_second_match(self) -> None:
         """Catches rediscovery or selecting a row other than the displayed number."""
 
@@ -255,12 +966,13 @@ class LiveShadowCliTests(unittest.TestCase):
         errors = io.StringIO()
         code = run_cli(
             ["--choose"],
-            environ={},
+            environ={"SPORTRADAR_API_KEY": "secret"},
             stdin=io.StringIO("x\n2\n"),
             stdout=output,
             stderr=errors,
             dependencies=LiveShadowCliDependencies(
                 credential_loader=lambda _: material,
+                kalshi_only_credential_loader=lambda _: material,
                 trial_ledger_factory=lambda: ledger,
                 sportradar_transport_factory=lambda **_: provider,
                 catalog_transport_factory=lambda: catalog,
@@ -291,15 +1003,18 @@ class LiveShadowCliTests(unittest.TestCase):
         self.assertEqual(collectors[0].values["run_poll_seconds"], 10)
         self.assertEqual(len(evidence.resolutions), 1)
         self.assertEqual(evidence.resolutions[0].provider_match_id, SECOND_MATCH_ID)
-        self.assertEqual(events, ["resolution", "kalshi"])
-        self.assertIn("READY TO COLLECT", output.getvalue())
+        self.assertEqual(
+            events,
+            ["evidence_enter", "resolution", "kalshi", "evidence_exit"],
+        )
+        self.assertIn("VERIFIED", output.getvalue())
         self.assertIn("[2] Second Home vs Second Away", output.getvalue())
         self.assertIn("Invalid selection", output.getvalue())
         self.assertIn(
-            "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS",
+            "READ ONLY / VERIFIED SOURCE LINK / UNQUALIFIED / NO SIGNALS / NO P&L / NO ORDERS",
             output.getvalue(),
         )
-        self.assertIn("planned provider calls: 61", output.getvalue())
+        self.assertIn("planned provider calls: 60", output.getvalue())
 
     def test_quit_eof_and_zero_ready_never_create_evidence_or_websocket(self) -> None:
         """Catches opening market IO before an immutable choice exists."""
@@ -326,6 +1041,7 @@ class LiveShadowCliTests(unittest.TestCase):
                 forbidden: list[str] = []
                 dependencies = LiveShadowCliDependencies(
                     credential_loader=lambda _: material,
+                    kalshi_only_credential_loader=lambda _: material,
                     trial_ledger_factory=lambda: ledger,
                     sportradar_transport_factory=lambda **_: provider,
                     catalog_transport_factory=lambda: catalog,
@@ -336,7 +1052,7 @@ class LiveShadowCliTests(unittest.TestCase):
                 )
                 code = run_cli(
                     ["--choose", "--duration-seconds", "10"],
-                    environ={},
+                    environ={"SPORTRADAR_API_KEY": "secret"},
                     stdin=stdin,
                     stdout=io.StringIO(),
                     stderr=io.StringIO(),
@@ -358,8 +1074,8 @@ class LiveShadowCliTests(unittest.TestCase):
                     ],
                 )
 
-    def test_choose_quota_preflight_counts_discovery_before_network(self) -> None:
-        """Catches spending the extra discovery call outside the trial budget."""
+    def test_choose_quota_preflight_is_exchange_first_and_bounds_discovery(self) -> None:
+        """Catches spending provider quota before the catalog or at zero budget."""
 
         from inci_tennis_runtime.live_shadow_cli import (
             LiveShadowCliDependencies,
@@ -372,29 +1088,32 @@ class LiveShadowCliTests(unittest.TestCase):
             kalshi_private_key_path=Path("/private/tmp/key.pem"),
         )
         ledger = _ChooserLedger(
-            remaining_session_attempts=60,
+            remaining_session_attempts=0,
             remaining_access_attempts=100,
         )
         calls: list[str] = []
         code = run_cli(
             ["--choose"],
-            environ={},
+            environ={"SPORTRADAR_API_KEY": "secret"},
             stdin=io.StringIO("q\n"),
             stdout=io.StringIO(),
             stderr=io.StringIO(),
             dependencies=LiveShadowCliDependencies(
                 credential_loader=lambda _: material,
+                kalshi_only_credential_loader=lambda _: material,
                 trial_ledger_factory=lambda: ledger,
                 sportradar_transport_factory=lambda **_: calls.append("provider"),
-                catalog_transport_factory=lambda: calls.append("catalog"),
+                catalog_transport_factory=lambda: (
+                    calls.append("catalog") or _HybridCatalog()
+                ),
             ),
         )
 
-        self.assertEqual(code, 1)
-        self.assertEqual(calls, [])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["catalog"])
 
-    def test_choose_rejects_future_stale_and_malformed_discovery(self) -> None:
-        """Catches resolving names from an untrustworthy provider capture."""
+    def test_choose_downgrades_future_stale_and_malformed_discovery(self) -> None:
+        """Catches untrustworthy discovery verifying or removing catalog rows."""
 
         from inci_tennis_runtime.live_shadow_cli import (
             LiveShadowCliDependencies,
@@ -426,22 +1145,24 @@ class LiveShadowCliTests(unittest.TestCase):
         for label, provider, code_value in cases:
             with self.subTest(label=label):
                 ledger = _ChooserLedger()
+                output = io.StringIO()
                 errors = io.StringIO()
                 code = run_cli(
                     ["--choose", "--duration-seconds", "10"],
-                    environ={},
+                    environ={"SPORTRADAR_API_KEY": "secret"},
                     stdin=io.StringIO("q\n"),
-                    stdout=io.StringIO(),
+                    stdout=output,
                     stderr=errors,
                     dependencies=LiveShadowCliDependencies(
                         credential_loader=lambda _: material,
+                        kalshi_only_credential_loader=lambda _: material,
                         trial_ledger_factory=lambda: ledger,
                         sportradar_transport_factory=lambda **_: provider,
                         catalog_transport_factory=lambda: _ChooserCatalog(),
                     ),
                 )
-                self.assertEqual(code, 1)
-                self.assertIn(code_value, errors.getvalue())
+                self.assertEqual(code, 0, errors.getvalue())
+                self.assertIn(code_value, output.getvalue())
                 self.assertEqual(
                     ledger.terminals[-1],
                     {
@@ -499,14 +1220,16 @@ class LiveShadowCliTests(unittest.TestCase):
         ledger = _ChooserLedger()
         code = run_cli(
             ["--choose", "--duration-seconds", "10"],
-            environ={},
+            environ={"SPORTRADAR_API_KEY": "secret"},
             stdin=io.StringIO(),
             stdout=io.StringIO(),
             stderr=io.StringIO(),
             dependencies=LiveShadowCliDependencies(
                 credential_loader=lambda _: material,
+                kalshi_only_credential_loader=lambda _: material,
                 trial_ledger_factory=lambda: ledger,
                 sportradar_transport_factory=lambda **_: CancelledProvider(),
+                catalog_transport_factory=_HybridCatalog,
             ),
         )
 
@@ -545,8 +1268,15 @@ class LiveShadowCliTests(unittest.TestCase):
             kalshi_api_key_id="identifier",
             kalshi_private_key_path=Path("/private/tmp/key.pem"),
         )
-        ledger = _ChooserLedger()
-        provider = _ChooserProvider()
+        discovery_ledger = _ChooserLedger()
+        collection_ledger = _ChooserLedger()
+        ledgers = iter((discovery_ledger, collection_ledger))
+        providers = iter(
+            (
+                _ChooserProvider(payload=_live_payload(include_second=False)),
+                _ChooserProvider(),
+            )
+        )
         evidence = TerminalEvidence()
 
         def fail_kalshi(*_: object) -> object:
@@ -554,14 +1284,15 @@ class LiveShadowCliTests(unittest.TestCase):
 
         code = run_cli(
             ["--choose", "--duration-seconds", "10"],
-            environ={},
+            environ={"SPORTRADAR_API_KEY": "secret"},
             stdin=io.StringIO("1\n"),
             stdout=io.StringIO(),
             stderr=io.StringIO(),
             dependencies=LiveShadowCliDependencies(
                 credential_loader=lambda _: material,
-                trial_ledger_factory=lambda: ledger,
-                sportradar_transport_factory=lambda **_: provider,
+                kalshi_only_credential_loader=lambda _: material,
+                trial_ledger_factory=lambda: next(ledgers),
+                sportradar_transport_factory=lambda **_: next(providers),
                 catalog_transport_factory=lambda: _ChooserCatalog(),
                 evidence_store_factory=lambda: evidence,
                 kalshi_transport_factory=fail_kalshi,
@@ -573,7 +1304,7 @@ class LiveShadowCliTests(unittest.TestCase):
         self.assertEqual(evidence.halted[0]["sportradar_captures"], 1)
         self.assertEqual(evidence.halted[0]["provider_match_id"], MATCH_ID)
         self.assertEqual(
-            ledger.terminals[-1],
+            collection_ledger.terminals[-1],
             {
                 "command": "shadow",
                 "provider_match_id": MATCH_ID,
@@ -586,30 +1317,14 @@ class LiveShadowCliTests(unittest.TestCase):
         """Catches a signal race accepting a choice after stop was requested."""
 
         from inci_tennis_adapters.shadow_match_chooser import (
-            ShadowChooserSnapshot,
-            ShadowMatchChoice,
+            resolve_hybrid_shadow_matches,
         )
         from inci_tennis_runtime.live_shadow_cli import (
             _StopState,
             _prompt_choice,
         )
 
-        snapshot = ShadowChooserSnapshot(
-            ready=(
-                ShadowMatchChoice(
-                    provider_match_id=MATCH_ID,
-                    provider_start_wall_ns=GENERATED_NS,
-                    event_ticker="KXTENNIS-MATCH",
-                    home_player_name="Player Home",
-                    away_player_name="Player Away",
-                    market_tickers=TICKERS,
-                ),
-            ),
-            unavailable=(),
-            provider_payload_sha256="a" * 64,
-            kalshi_catalog_sha256="b" * 64,
-            resolver_snapshot_sha256="c" * 64,
-        )
+        snapshot = resolve_hybrid_shadow_matches(_hybrid_catalog())
 
         for phase in ("after_prompt_write", "after_read"):
             with self.subTest(phase=phase):
@@ -663,6 +1378,7 @@ class LiveShadowCliTests(unittest.TestCase):
             stderr=io.StringIO(),
             dependencies=LiveShadowCliDependencies(
                 credential_loader=lambda _: material,
+                kalshi_only_credential_loader=lambda _: material,
                 trial_ledger_factory=_ChooserLedger,
                 sportradar_transport_factory=lambda **_: _ChooserProvider(),
                 catalog_transport_factory=lambda: _ChooserCatalog(
@@ -674,10 +1390,11 @@ class LiveShadowCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         visible = output.getvalue().split("\x1b[2J\x1b[H")[-1]
         self.assertIn(
-            "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS", visible
+            "READ ONLY / HYBRID TENNIS EVIDENCE / NO SIGNALS / NO P&L / NO ORDERS",
+            visible,
         )
-        self.assertIn("UNAVAILABLE", visible)
-        self.assertIn("Second Home v Second Away", visible)
+        self.assertIn("PRICE ONLY", visible)
+        self.assertIn("CONFLICT / EXCLUDED", visible)
         self.assertNotIn("[2]", visible)
 
     def test_selection_rechecks_discovery_freshness_after_operator_delay(self) -> None:
@@ -697,12 +1414,13 @@ class LiveShadowCliTests(unittest.TestCase):
         forbidden: list[str] = []
         code = run_cli(
             ["--choose", "--duration-seconds", "10"],
-            environ={},
+            environ={"SPORTRADAR_API_KEY": "secret"},
             stdin=io.StringIO("1\n"),
             stdout=io.StringIO(),
             stderr=io.StringIO(),
             dependencies=LiveShadowCliDependencies(
                 credential_loader=lambda _: material,
+                kalshi_only_credential_loader=lambda _: material,
                 trial_ledger_factory=lambda: ledger,
                 sportradar_transport_factory=lambda **_: _ChooserProvider(),
                 catalog_transport_factory=lambda: _ChooserCatalog(),
@@ -719,8 +1437,7 @@ class LiveShadowCliTests(unittest.TestCase):
             {
                 "command": "shadow",
                 "provider_match_id": None,
-                "reason": "halted",
-                "code": "sportradar_source_stale",
+                "reason": "list_complete",
             },
         )
 
@@ -732,12 +1449,13 @@ class LiveShadowCliTests(unittest.TestCase):
         failed_ledger = _ChooserLedger()
         failed_code = run_cli(
             ["--choose", "--duration-seconds", "10"],
-            environ={},
+            environ={"SPORTRADAR_API_KEY": "secret"},
             stdin=io.StringIO("1\n"),
             stdout=io.StringIO(),
             stderr=io.StringIO(),
             dependencies=LiveShadowCliDependencies(
                 credential_loader=lambda _: material,
+                kalshi_only_credential_loader=lambda _: material,
                 trial_ledger_factory=lambda: failed_ledger,
                 sportradar_transport_factory=lambda **_: _ChooserProvider(),
                 catalog_transport_factory=lambda: _ChooserCatalog(),
@@ -752,8 +1470,7 @@ class LiveShadowCliTests(unittest.TestCase):
             {
                 "command": "shadow",
                 "provider_match_id": None,
-                "reason": "halted",
-                "code": "sportradar_shadow_discovery_halted",
+                "reason": "list_complete",
             },
         )
 

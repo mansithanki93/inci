@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+import os
 from re import compile as pattern_compile
 import signal
 import sys
@@ -16,12 +17,15 @@ from typing import Iterator, TextIO
 from inci_tennis_io.facade import (
     KalshiReadOnlyCredentials,
     KalshiReadOnlyTransport,
+    PriceOnlySessionEvidence,
     ShadowEvidenceStore,
+    ShadowMarketCandidate,
     ShadowResolutionEvidence,
     SportradarShadowAsyncTransport,
     TrialObservationRecord,
     TrialUsageLedger,
     default_shadow_state_root,
+    load_kalshi_only_credential_material,
     load_shadow_credential_material,
     shadow_kalshi_clock_observation,
     shadow_monotonic_ns,
@@ -33,11 +37,23 @@ from inci_tennis_runtime.live_shadow_collector import (
     CandidateMarketView,
     LiveShadowCollector,
     ShadowCollectorError,
+    _durable_to_thread,
+    _provider_failure_allows_price_only,
+)
+from inci_tennis_runtime.live_price_only_collector import (
+    PriceOnlyShadowCollector,
 )
 from inci_tennis_adapters.shadow_match_chooser import (
-    ShadowChooserSnapshot,
-    ShadowMatchChoice,
-    resolve_shadow_matches,
+    resolve_hybrid_shadow_matches,
+)
+from inci_tennis_adapters.shadow_discovery_contracts import (
+    HybridChooserSnapshot,
+    HybridMatchRow,
+    HybridStatus,
+    KalshiCatalogExclusion,
+    KalshiShadowCatalogSnapshot,
+    ProviderDiscoveryState,
+    ProviderMatchRef,
 )
 import inci_tennis_adapters.sportradar_trial_v3 as trial_wire
 
@@ -209,6 +225,9 @@ def _kalshi_transport(material: object, tickers: tuple[str, str]) -> object:
 @dataclass(frozen=True, slots=True)
 class LiveShadowCliDependencies:
     credential_loader: Callable[..., object] = load_shadow_credential_material
+    kalshi_only_credential_loader: Callable[..., object] = (
+        load_kalshi_only_credential_material
+    )
     trial_ledger_factory: Callable[[], object] = TrialUsageLedger
     sportradar_transport_factory: Callable[..., object] = (
         _async_provider
@@ -223,6 +242,9 @@ class LiveShadowCliDependencies:
         UnqualifiedKalshiProjector
     )
     collector_factory: Callable[..., object] = LiveShadowCollector
+    price_only_collector_factory: Callable[..., object] = (
+        PriceOnlyShadowCollector
+    )
     wall_ns: Callable[[], int] = shadow_wall_ns
     monotonic_ns: Callable[[], int] = shadow_monotonic_ns
     pause: Callable[..., object] = shadow_pause
@@ -426,8 +448,11 @@ def _startup_banner(
     if not root or "\n" in root or "\r" in root or len(root) > 4_096:
         raise ShadowCollectorError("shadow_evidence_root_invalid")
     if mapping_mode == "auto_matched":
-        mode = "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS"
-        mapping = "AUTO-MATCHED / UNQUALIFIED"
+        mode = (
+            "READ ONLY / VERIFIED SOURCE LINK / UNQUALIFIED / "
+            "NO SIGNALS / NO P&L / NO ORDERS"
+        )
+        mapping = "VERIFIED SOURCE LINK / UNQUALIFIED"
     elif mapping_mode == "operator_supplied":
         mode = "READ ONLY / UNQUALIFIED / NO ORDERS"
         mapping = "OPERATOR-SUPPLIED / UNVERIFIED"
@@ -459,7 +484,7 @@ async def _record_trial_terminal(
     }
     if code is not None:
         values["code"] = code
-    await asyncio.to_thread(operation, **values)
+    await _durable_to_thread(operation, **values)
 
 
 def _trial_halt_code(error: BaseException) -> str:
@@ -468,6 +493,328 @@ def _trial_halt_code(error: BaseException) -> str:
         code
         if code.startswith("sportradar_")
         else "sportradar_shadow_discovery_halted"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderDiscovery:
+    snapshot: object | None
+    state: ProviderDiscoveryState
+    raw_path: str | None = None
+    raw_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedCollectionHalt:
+    code: str
+    predecessor_session_id: str
+    predecessor_terminal_row_sha256: str
+
+
+def _optional_provider_key(
+    environ: Mapping[str, str] | None,
+) -> tuple[str | None, str]:
+    source = os.environ if environ is None else environ
+    if not isinstance(source, Mapping):
+        raise ShadowCollectorError("shadow_credentials_invalid")
+    value = source.get("SPORTRADAR_API_KEY")
+    if value is None:
+        return None, "provider_credentials_missing"
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > 4_096
+        or any(ord(character) < 32 for character in value)
+    ):
+        return None, "provider_credentials_invalid"
+    return value, "provider_credentials_available"
+
+
+def _discovery_state(
+    state: str,
+    reason: str,
+    *,
+    raw_sha256: str | None = None,
+    captured_wall_ns: int | None = None,
+) -> ProviderDiscoveryState:
+    try:
+        return ProviderDiscoveryState(
+            state,
+            reason,
+            raw_sha256,
+            captured_wall_ns,
+        )
+    except ValueError:
+        raise ShadowCollectorError("shadow_provider_discovery_invalid") from None
+
+
+async def _capture_optional_provider(
+    *,
+    provider_key: str | None,
+    absent_reason: str,
+    services: LiveShadowCliDependencies,
+) -> _ProviderDiscovery:
+    if provider_key is None:
+        return _ProviderDiscovery(
+            None,
+            _discovery_state("unavailable", absent_reason),
+        )
+    with services.trial_ledger_factory() as trial_ledger:
+        try:
+            _preflight_quota(trial_ledger, 1)
+        except ShadowCollectorError as error:
+            if error.code == "sportradar_shadow_quota_insufficient":
+                return _ProviderDiscovery(
+                    None,
+                    _discovery_state(
+                        "unavailable", "provider_quota_unavailable"
+                    ),
+                )
+            raise
+        capture: object | None = None
+        provider_snapshot: object | None = None
+        terminal_attempted = False
+        provider_context = services.sportradar_transport_factory(
+            api_key=provider_key,
+            ledger=trial_ledger,
+        )
+        try:
+            async with provider_context as provider:
+                try:
+                    capture = await provider.fetch_live_summaries()
+                    payload = getattr(capture, "payload", None)
+                    if type(payload) is not bytes:
+                        raise ShadowCollectorError(
+                            "sportradar_response_body_invalid"
+                        )
+                    raw_digest = sha256(payload).hexdigest()
+                    try:
+                        provider_snapshot = (
+                            trial_wire.parse_live_summaries_for_hybrid(payload)
+                        )
+                    except trial_wire.SportradarWireContractError as error:
+                        await _durable_to_thread(
+                            trial_ledger.record_parser_failure,
+                            command="shadow",
+                            reservation=capture.reservation,
+                            code=error.code,
+                        )
+                        raise
+                    captured_wall_ns = getattr(
+                        capture, "captured_wall_ns", None
+                    )
+                    difference = (
+                        captured_wall_ns - provider_snapshot.generated_wall_ns
+                        if type(captured_wall_ns) is int
+                        else None
+                    )
+                    if difference is None:
+                        raise ShadowCollectorError("sportradar_clock_invalid")
+                    if difference < -_MAXIMUM_SOURCE_FUTURE_NS:
+                        error = trial_wire.SportradarWireContractError(
+                            "sportradar_source_time_ahead"
+                        )
+                        await _durable_to_thread(
+                            trial_ledger.record_parser_failure,
+                            command="shadow",
+                            reservation=capture.reservation,
+                            code=error.code,
+                        )
+                        raise error
+                    await _durable_to_thread(
+                        trial_ledger.record_observation,
+                        TrialObservationRecord(
+                            command="shadow",
+                            reservation=capture.reservation,
+                            provider_match_id=None,
+                            generated_wall_ns=(
+                                provider_snapshot.generated_wall_ns
+                            ),
+                            captured_wall_ns=captured_wall_ns,
+                            status="listed",
+                            match_status=None,
+                            payload_sha256=raw_digest,
+                            raw_path=capture.raw_path,
+                            progression="discovery",
+                            last_event_id=None,
+                            terminal_reason=(
+                                "empty"
+                                if not provider_snapshot.matches
+                                else None
+                            ),
+                        ),
+                    )
+                    if difference > _MAXIMUM_SOURCE_AGE_NS:
+                        raise trial_wire.SportradarWireContractError(
+                            "sportradar_source_stale"
+                        )
+                    if not provider_snapshot.matches:
+                        terminal_attempted = True
+                        await _record_trial_terminal(
+                            trial_ledger,
+                            provider_match_id=None,
+                            reason="list_complete",
+                        )
+                        return _ProviderDiscovery(
+                            provider_snapshot,
+                            _discovery_state(
+                                "unavailable",
+                                "provider_empty",
+                                raw_sha256=raw_digest,
+                                captured_wall_ns=captured_wall_ns,
+                            ),
+                            str(capture.raw_path),
+                            raw_digest,
+                        )
+                    terminal_attempted = True
+                    await _record_trial_terminal(
+                        trial_ledger,
+                        provider_match_id=None,
+                        reason="list_complete",
+                    )
+                    return _ProviderDiscovery(
+                        provider_snapshot,
+                        _discovery_state(
+                            "available",
+                            "provider_discovery_available",
+                            raw_sha256=raw_digest,
+                            captured_wall_ns=captured_wall_ns,
+                        ),
+                        str(capture.raw_path),
+                        raw_digest,
+                    )
+                except asyncio.CancelledError:
+                    if terminal_attempted:
+                        raise
+                    terminal_attempted = True
+                    await _record_trial_terminal(
+                        trial_ledger,
+                        provider_match_id=None,
+                        reason="cancelled",
+                        code="sportradar_shadow_task_cancelled",
+                    )
+                    raise
+                except KeyboardInterrupt:
+                    if terminal_attempted:
+                        raise
+                    terminal_attempted = True
+                    await _record_trial_terminal(
+                        trial_ledger,
+                        provider_match_id=None,
+                        reason="operator_interrupt",
+                        code="sportradar_operator_interrupt",
+                    )
+                    raise
+                except BaseException as error:
+                    if terminal_attempted:
+                        raise
+                    code = _code(error)
+                    terminal_attempted = True
+                    await _record_trial_terminal(
+                        trial_ledger,
+                        provider_match_id=None,
+                        reason="halted",
+                        code=_trial_halt_code(error),
+                    )
+                    if not _provider_failure_allows_price_only(code):
+                        raise
+                    raw_path = (
+                        None
+                        if capture is None
+                        else str(getattr(capture, "raw_path", "")) or None
+                    )
+                    raw_digest = (
+                        None
+                        if capture is None
+                        else sha256(getattr(capture, "payload", b"")).hexdigest()
+                    )
+                    captured_wall_ns = (
+                        None
+                        if capture is None
+                        else getattr(capture, "captured_wall_ns", None)
+                    )
+                    return _ProviderDiscovery(
+                        provider_snapshot,
+                        _discovery_state(
+                            "stale" if code == "sportradar_source_stale" else "error",
+                            code,
+                            raw_sha256=raw_digest,
+                            captured_wall_ns=captured_wall_ns,
+                        ),
+                        raw_path,
+                        raw_digest,
+                    )
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+
+
+def _clock_pair(services: LiveShadowCliDependencies) -> tuple[int, int]:
+    wall = services.wall_ns()
+    monotonic = services.monotonic_ns()
+    if (
+        type(wall) is not int
+        or wall <= 0
+        or type(monotonic) is not int
+        or monotonic < 0
+    ):
+        raise ShadowCollectorError("shadow_clock_invalid")
+    return wall, monotonic
+
+
+def _price_session(
+    *,
+    row: HybridMatchRow,
+    snapshot: HybridChooserSnapshot,
+    discovery: _ProviderDiscovery,
+    selected_wall_ns: int,
+    selected_monotonic_ns: int,
+    predecessor_session_id: str | None = None,
+    predecessor_terminal_row_sha256: str | None = None,
+) -> PriceOnlySessionEvidence:
+    _row_identity(row)
+    game = row.game
+    markets = game.markets
+    candidates = tuple(
+        ShadowMarketCandidate(
+            market.ticker,
+            market.initial_yes_bid,
+            market.initial_yes_ask,
+            market.initial_yes_bid_depth,
+            market.initial_yes_ask_depth,
+        )
+        for market in markets
+    )
+    provenance = game.provenance
+    return PriceOnlySessionEvidence(
+        selected_wall_ns=selected_wall_ns,
+        selected_monotonic_ns=selected_monotonic_ns,
+        event_ticker=game.event_ticker,
+        player_a_name=markets[0].yes_player_name,
+        player_b_name=markets[1].yes_player_name,
+        market_tickers=(markets[0].ticker, markets[1].ticker),
+        scheduled_start_wall_ns=game.scheduled_start_wall_ns,
+        catalog_sport=provenance.sport,
+        catalog_scope=provenance.scope,
+        catalog_queried_competitions=provenance.queried_competitions,
+        catalog_series_ticker=provenance.series_ticker,
+        catalog_milestone_id=provenance.milestone_id,
+        catalog_milestone_league=provenance.milestone_league,
+        initial_book_state=game.initial_book_state,
+        initial_market_a=candidates[0],
+        initial_market_b=candidates[1],
+        provider_discovery_state=discovery.state.state,
+        provider_discovery_reason=discovery.state.reason,
+        provider_discovery_raw_path=discovery.raw_path,
+        provider_discovery_raw_sha256=discovery.raw_sha256,
+        kalshi_catalog_sha256=snapshot.catalog_sha256,
+        resolver_snapshot_sha256=snapshot.resolver_snapshot_sha256,
+        resolver_version=snapshot.resolver_version,
+        registry_digest=snapshot.coverage_registry_sha256,
+        predecessor_session_id=predecessor_session_id,
+        predecessor_terminal_row_sha256=(
+            predecessor_terminal_row_sha256
+        ),
     )
 
 
@@ -480,47 +827,180 @@ def _safe_display(value: object, maximum: int = 160) -> str:
     return " ".join(safe.split())[:maximum]
 
 
-def _chooser_text(snapshot: ShadowChooserSnapshot) -> str:
+def _selectable_rows(
+    snapshot: HybridChooserSnapshot,
+) -> tuple[HybridMatchRow, ...]:
+    return tuple(
+        row
+        for status in (HybridStatus.VERIFIED, HybridStatus.PRICE_ONLY)
+        for row in snapshot.rows
+        if row.status is status and row.selectable is True
+    )
+
+
+def _row_names(row: HybridMatchRow) -> tuple[str, str]:
+    provider = row.provider_match
+    if row.status is HybridStatus.VERIFIED and type(provider) is ProviderMatchRef:
+        return provider.home_player_name, provider.away_player_name
+    markets = row.game.markets
+    if type(markets) is tuple and len(markets) == 2:
+        return markets[0].yes_player_name, markets[1].yes_player_name
+    raise ShadowCollectorError("shadow_selection_identity_changed")
+
+
+def _row_identity(row: object) -> tuple[object, ...]:
+    if type(row) is not HybridMatchRow:
+        raise ShadowCollectorError("shadow_selection_identity_changed")
+    game = row.game
+    markets = getattr(game, "markets", None)
+    provenance = getattr(game, "provenance", None)
+    if (
+        type(markets) is not tuple
+        or len(markets) != 2
+        or type(row.market_tickers) is not tuple
+        or len(row.market_tickers) != 2
+        or any(
+            type(ticker) is not str or _TICKER.fullmatch(ticker) is None
+            for ticker in row.market_tickers
+        )
+        or row.market_tickers[0] == row.market_tickers[1]
+        or type(getattr(game, "event_ticker", None)) is not str
+        or _TICKER.fullmatch(game.event_ticker) is None
+    ):
+        raise ShadowCollectorError("shadow_selection_identity_changed")
+    market_identity = tuple(
+        (
+            market.ticker,
+            market.yes_player_name,
+            market.initial_yes_bid,
+            market.initial_yes_ask,
+            market.initial_yes_bid_depth,
+            market.initial_yes_ask_depth,
+        )
+        for market in markets
+    )
+    provider = row.provider_match
+    if row.status is HybridStatus.VERIFIED:
+        if (
+            row.selectable is not True
+            or type(provider) is not ProviderMatchRef
+            or type(provider.provider_match_id) is not str
+            or _MATCH.fullmatch(provider.provider_match_id) is None
+            or type(provider.provider_start_wall_ns) is not int
+            or provider.provider_start_wall_ns <= 0
+            or provider.status != "live"
+            or set(row.market_tickers)
+            != {markets[0].ticker, markets[1].ticker}
+        ):
+            raise ShadowCollectorError("shadow_selection_identity_changed")
+        provider_identity: object = (
+            provider.provider_match_id,
+            provider.provider_start_wall_ns,
+            provider.home_player_name,
+            provider.away_player_name,
+            provider.status,
+            provider.competition,
+        )
+    elif row.status is HybridStatus.PRICE_ONLY:
+        if (
+            row.selectable is not True
+            or provider is not None
+            or row.market_tickers
+            != (markets[0].ticker, markets[1].ticker)
+        ):
+            raise ShadowCollectorError("shadow_selection_identity_changed")
+        provider_identity = None
+    else:
+        raise ShadowCollectorError("shadow_selection_identity_changed")
+    return (
+        row.status,
+        game.event_ticker,
+        game.scheduled_start_wall_ns,
+        game.game_title,
+        market_identity,
+        provenance,
+        game.initial_book_state,
+        row.market_tickers,
+        provider_identity,
+        row.reason,
+        row.selectable,
+        row.diagnostics,
+    )
+
+
+def _chooser_text(
+    snapshot: HybridChooserSnapshot,
+    exclusions: tuple[KalshiCatalogExclusion, ...] = (),
+) -> str:
+    selectable = _selectable_rows(snapshot)
+    numbers = {id(row): number for number, row in enumerate(selectable, start=1)}
     lines = [
-        "READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO ORDERS\n",
-        "READY TO COLLECT\n",
-        "----------------\n",
+        "READ ONLY / HYBRID TENNIS EVIDENCE / NO SIGNALS / NO P&L / NO ORDERS\n",
+        "VERIFIED\n",
+        "--------\n",
     ]
-    if snapshot.ready:
-        for number, row in enumerate(snapshot.ready, start=1):
+    verified = tuple(
+        row for row in snapshot.rows if row.status is HybridStatus.VERIFIED
+    )
+    if verified:
+        for row in verified:
+            first, second = _row_names(row)
             lines.append(
-                f"[{number}] {_safe_display(row.home_player_name)} vs "
-                f"{_safe_display(row.away_player_name)} | "
-                f"{_safe_display(row.event_ticker)}\n"
+                f"[{numbers[id(row)]}] {_safe_display(first)} vs "
+                f"{_safe_display(second)} | {_safe_display(row.game.event_ticker)}\n"
             )
     else:
         lines.append("None\n")
-    lines.extend(("\nUNAVAILABLE\n", "-----------\n"))
-    if snapshot.unavailable:
-        for row in snapshot.unavailable:
+    lines.extend(("\nPRICE ONLY\n", "----------\n"))
+    price_only = tuple(
+        row for row in snapshot.rows if row.status is HybridStatus.PRICE_ONLY
+    )
+    if price_only:
+        for row in price_only:
+            first, second = _row_names(row)
             lines.append(
-                f"- {_safe_display(row.display_name)} | "
-                f"{_safe_display(row.source)}:{_safe_display(row.identity)} | "
-                f"{_safe_display(row.reason)}\n"
+                f"[{numbers[id(row)]}] {_safe_display(first)} vs "
+                f"{_safe_display(second)} | {_safe_display(row.game.event_ticker)} | "
+                f"{_safe_display(row.reason)} | book={_safe_display(row.game.initial_book_state)}\n"
             )
+    else:
+        lines.append("None\n")
+    lines.extend(("\nCONFLICT / EXCLUDED\n", "-------------------\n"))
+    conflicts = tuple(
+        row for row in snapshot.rows if row.status is HybridStatus.CONFLICT
+    )
+    if conflicts or exclusions or snapshot.provider_diagnostics:
+        for row in conflicts:
+            lines.append(
+                f"- {_safe_display(row.game.event_ticker)} | "
+                f"{_safe_display(row.reason)} | "
+                f"{_safe_display(','.join(row.diagnostics))}\n"
+            )
+        for row in exclusions:
+            lines.append(
+                f"- {_safe_display(row.event_ticker)} | {_safe_display(row.reason)}\n"
+            )
+        for diagnostic in snapshot.provider_diagnostics:
+            lines.append(f"- provider | {_safe_display(diagnostic)}\n")
     else:
         lines.append("None\n")
     return "".join(lines)
 
 
 def _prompt_choice(
-    snapshot: ShadowChooserSnapshot,
+    snapshot: HybridChooserSnapshot,
     *,
     stdin: TextIO,
     stdout: TextIO,
     stop: _StopState,
-) -> ShadowMatchChoice | None:
-    if not snapshot.ready:
+) -> HybridMatchRow | None:
+    choices = _selectable_rows(snapshot)
+    if not choices:
         return None
     while True:
         if stop():
             raise KeyboardInterrupt
-        _write(stdout, f"Select [1-{len(snapshot.ready)}] or Q: ")
+        _write(stdout, f"Select [1-{len(choices)}] or Q: ")
         try:
             stop.prompting = True
             if stop():
@@ -539,8 +1019,8 @@ def _prompt_choice(
             return None
         if selected.isascii() and selected.isdigit():
             number = int(selected)
-            if 1 <= number <= len(snapshot.ready):
-                return snapshot.ready[number - 1]
+            if 1 <= number <= len(choices):
+                return choices[number - 1]
         _write(stdout, "Invalid selection; enter a displayed number or Q.\n")
 
 
@@ -558,7 +1038,7 @@ async def _run_collection(
     provider: object,
     mapping_mode: str,
     resolution: ShadowResolutionEvidence | None,
-) -> str:
+) -> str | _VerifiedCollectionHalt:
     collector: object | None = None
     evidence: object | None = None
     try:
@@ -626,6 +1106,29 @@ async def _run_collection(
                 reason="halted",
                 code="sportradar_shadow_discovery_halted",
             )
+        if (
+            mapping_mode == "auto_matched"
+            and getattr(error, "failover_eligible", False) is True
+        ):
+            session_id = getattr(evidence, "session_id", None)
+            terminal_digest = getattr(
+                evidence, "terminal_row_sha256", None
+            )
+            if (
+                type(session_id) is not str
+                or not session_id
+                or type(terminal_digest) is not str
+                or pattern_compile(r"[0-9a-f]{64}\Z").fullmatch(
+                    terminal_digest
+                )
+                is None
+            ):
+                raise ShadowCollectorError(
+                    "shadow_evidence_reference_invalid"
+                ) from error
+            return _VerifiedCollectionHalt(
+                _code(error), session_id, terminal_digest
+            )
         raise
 
 
@@ -671,23 +1174,84 @@ async def _run_manual(
             )
 
 
-async def _run_choose(
+async def _run_price_choice(
     *,
+    row: HybridMatchRow,
+    snapshot: HybridChooserSnapshot,
+    discovery: _ProviderDiscovery,
     duration_seconds: int,
-    poll_seconds: int,
     material: object,
-    stdin: TextIO,
-    stdout: TextIO,
     output: _DashboardOutput,
     services: LiveShadowCliDependencies,
     stop: _StopState,
+    selected_wall_ns: int,
+    selected_monotonic_ns: int,
+    predecessor: _VerifiedCollectionHalt | None = None,
 ) -> str:
-    with services.trial_ledger_factory() as trial_ledger:
-        collection_calls = _planned_provider_calls(
-            duration_seconds, poll_seconds
+    session = _price_session(
+        row=row,
+        snapshot=snapshot,
+        discovery=discovery,
+        selected_wall_ns=selected_wall_ns,
+        selected_monotonic_ns=selected_monotonic_ns,
+        predecessor_session_id=(
+            None if predecessor is None else predecessor.predecessor_session_id
+        ),
+        predecessor_terminal_row_sha256=(
+            None
+            if predecessor is None
+            else predecessor.predecessor_terminal_row_sha256
+        ),
+    )
+    with services.evidence_store_factory() as evidence:
+        kalshi = services.kalshi_transport_factory(
+            material, session.market_tickers
         )
-        planned_calls = 1 + collection_calls
+        projector = services.projector_factory(session.market_tickers)
+        collector = services.price_only_collector_factory(
+            session_evidence=session,
+            kalshi_transport=kalshi,
+            market_projector=projector,
+            evidence_store=evidence,
+            wall_ns=services.wall_ns,
+            monotonic_ns=services.monotonic_ns,
+            pause=services.pause,
+            stop_requested=stop,
+            render=output,
+        )
+        return await collector.run(duration_seconds=duration_seconds)
+
+
+async def _run_verified_choice(
+    *,
+    row: HybridMatchRow,
+    snapshot: HybridChooserSnapshot,
+    discovery: _ProviderDiscovery,
+    provider_key: str,
+    duration_seconds: int,
+    poll_seconds: int,
+    selected_wall_ns: int,
+    material: object,
+    output: _DashboardOutput,
+    services: LiveShadowCliDependencies,
+    stop: _StopState,
+) -> str | _VerifiedCollectionHalt:
+    identity = _row_identity(row)
+    provider_match = row.provider_match
+    if (
+        type(provider_match) is not ProviderMatchRef
+        or discovery.raw_path is None
+        or discovery.raw_sha256 is None
+        or discovery.state.state != "available"
+    ):
+        raise ShadowCollectorError("shadow_selection_identity_changed")
+    planned_calls = _planned_provider_calls(
+        duration_seconds, poll_seconds
+    )
+    with services.trial_ledger_factory() as trial_ledger:
         _preflight_quota(trial_ledger, planned_calls)
+        if _row_identity(row) != identity:
+            raise ShadowCollectorError("shadow_selection_identity_changed")
         output(
             _startup_banner(
                 planned_calls=planned_calls,
@@ -696,153 +1260,31 @@ async def _run_choose(
             )
         )
         provider_context = services.sportradar_transport_factory(
-            api_key=material.sportradar_api_key,
+            api_key=provider_key,
             ledger=trial_ledger,
         )
         async with provider_context as provider:
-            try:
-                capture = await provider.fetch_live_summaries()
-                try:
-                    provider_snapshot = (
-                        trial_wire.parse_live_summaries_envelope(
-                            capture.payload
-                        )
-                    )
-                except trial_wire.SportradarWireContractError as error:
-                    await asyncio.to_thread(
-                        trial_ledger.record_parser_failure,
-                        command="shadow",
-                        reservation=capture.reservation,
-                        code=error.code,
-                    )
-                    raise
-                difference = (
-                    capture.captured_wall_ns
-                    - provider_snapshot.generated_wall_ns
-                )
-                if difference < -_MAXIMUM_SOURCE_FUTURE_NS:
-                    error = trial_wire.SportradarWireContractError(
-                        "sportradar_source_time_ahead"
-                    )
-                    await asyncio.to_thread(
-                        trial_ledger.record_parser_failure,
-                        command="shadow",
-                        reservation=capture.reservation,
-                        code=error.code,
-                    )
-                    raise error
-                await asyncio.to_thread(
-                    trial_ledger.record_observation,
-                    TrialObservationRecord(
-                        command="shadow",
-                        reservation=capture.reservation,
-                        provider_match_id=None,
-                        generated_wall_ns=provider_snapshot.generated_wall_ns,
-                        captured_wall_ns=capture.captured_wall_ns,
-                        status="listed",
-                        match_status=None,
-                        payload_sha256=sha256(capture.payload).hexdigest(),
-                        raw_path=capture.raw_path,
-                        progression="discovery",
-                        last_event_id=None,
-                        terminal_reason=(
-                            "empty"
-                            if not provider_snapshot.snapshots
-                            else None
-                        ),
-                    ),
-                )
-                if difference > _MAXIMUM_SOURCE_AGE_NS:
-                    raise trial_wire.SportradarWireContractError(
-                        "sportradar_source_stale"
-                    )
-                catalog = services.catalog_transport_factory()
-                games, catalog_sha256 = await asyncio.to_thread(
-                    catalog.discover_tennis_games
-                )
-                snapshot = resolve_shadow_matches(
-                    provider_snapshot,
-                    games,
-                    kalshi_catalog_sha256=catalog_sha256,
-                )
-                output(_chooser_text(snapshot))
-                choice = _prompt_choice(
-                    snapshot,
-                    stdin=stdin,
-                    stdout=stdout,
-                    stop=stop,
-                )
-                if choice is None:
-                    await _record_trial_terminal(
-                        trial_ledger,
-                        provider_match_id=None,
-                        reason="list_complete",
-                    )
-                    return "list_complete"
-                selected_wall_ns = services.wall_ns()
-                if (
-                    type(selected_wall_ns) is not int
-                    or selected_wall_ns <= 0
-                ):
-                    raise ShadowCollectorError("shadow_clock_invalid")
-                selected_source_age = (
-                    selected_wall_ns
-                    - provider_snapshot.generated_wall_ns
-                )
-                if selected_source_age < -_MAXIMUM_SOURCE_FUTURE_NS:
-                    raise trial_wire.SportradarWireContractError(
-                        "sportradar_source_time_ahead"
-                    )
-                if selected_source_age > _MAXIMUM_SOURCE_AGE_NS:
-                    raise trial_wire.SportradarWireContractError(
-                        "sportradar_source_stale"
-                    )
-            except asyncio.CancelledError:
-                await _record_trial_terminal(
-                    trial_ledger,
-                    provider_match_id=None,
-                    reason="cancelled",
-                    code="sportradar_shadow_task_cancelled",
-                )
-                raise
-            except KeyboardInterrupt:
-                await _record_trial_terminal(
-                    trial_ledger,
-                    provider_match_id=None,
-                    reason="operator_interrupt",
-                    code="sportradar_operator_interrupt",
-                )
-                raise
-            except BaseException as error:
-                await _record_trial_terminal(
-                    trial_ledger,
-                    provider_match_id=None,
-                    reason="halted",
-                    code=_trial_halt_code(error),
-                )
-                raise
-
             resolution = ShadowResolutionEvidence(
                 selected_wall_ns=selected_wall_ns,
-                provider_match_id=choice.provider_match_id,
-                provider_start_wall_ns=choice.provider_start_wall_ns,
-                event_ticker=choice.event_ticker,
-                home_player_name=choice.home_player_name,
-                away_player_name=choice.away_player_name,
-                market_tickers=choice.market_tickers,
-                provider_discovery_raw_path=str(capture.raw_path),
-                provider_discovery_raw_sha256=sha256(
-                    capture.payload
-                ).hexdigest(),
-                kalshi_catalog_sha256=snapshot.kalshi_catalog_sha256,
+                provider_match_id=provider_match.provider_match_id,
+                provider_start_wall_ns=(
+                    provider_match.provider_start_wall_ns
+                ),
+                event_ticker=row.game.event_ticker,
+                home_player_name=provider_match.home_player_name,
+                away_player_name=provider_match.away_player_name,
+                market_tickers=row.market_tickers,
+                provider_discovery_raw_path=discovery.raw_path,
+                provider_discovery_raw_sha256=discovery.raw_sha256,
+                kalshi_catalog_sha256=snapshot.catalog_sha256,
                 resolver_snapshot_sha256=(
                     snapshot.resolver_snapshot_sha256
                 ),
                 resolver_rule_version="strict-name-start-v1",
             )
             return await _run_collection(
-                match_id=choice.provider_match_id,
-                tickers=choice.market_tickers,
+                match_id=provider_match.provider_match_id,
+                tickers=row.market_tickers,
                 duration_seconds=duration_seconds,
                 poll_seconds=poll_seconds,
                 material=material,
@@ -854,6 +1296,129 @@ async def _run_choose(
                 mapping_mode="auto_matched",
                 resolution=resolution,
             )
+
+
+async def _run_choose(
+    *,
+    duration_seconds: int,
+    poll_seconds: int,
+    material: object,
+    environ: Mapping[str, str] | None,
+    stdin: TextIO,
+    stdout: TextIO,
+    output: _DashboardOutput,
+    services: LiveShadowCliDependencies,
+    stop: _StopState,
+) -> str:
+    catalog_transport = services.catalog_transport_factory()
+    discover = getattr(catalog_transport, "discover_tennis_catalog", None)
+    if not callable(discover):
+        raise ShadowCollectorError("kalshi_catalog_contract_invalid")
+    catalog = await asyncio.to_thread(discover)
+    if type(catalog) is not KalshiShadowCatalogSnapshot:
+        raise ShadowCollectorError("kalshi_catalog_contract_invalid")
+    provider_key, absent_reason = _optional_provider_key(environ)
+    discovery = await _capture_optional_provider(
+        provider_key=provider_key,
+        absent_reason=absent_reason,
+        services=services,
+    )
+    try:
+        snapshot = resolve_hybrid_shadow_matches(
+            catalog,
+            discovery.snapshot,
+            provider_state=discovery.state,
+        )
+    except ValueError:
+        raise ShadowCollectorError("shadow_resolution_invalid") from None
+    identities = tuple(
+        _row_identity(row) for row in _selectable_rows(snapshot)
+    )
+    output(_chooser_text(snapshot, catalog.excluded))
+    choice = _prompt_choice(
+        snapshot,
+        stdin=stdin,
+        stdout=stdout,
+        stop=stop,
+    )
+    if choice is None:
+        return "list_complete"
+    choices = _selectable_rows(snapshot)
+    try:
+        index = next(
+            position
+            for position, candidate in enumerate(choices)
+            if candidate is choice
+        )
+    except StopIteration:
+        raise ShadowCollectorError("shadow_selection_identity_changed") from None
+    if _row_identity(choice) != identities[index]:
+        raise ShadowCollectorError("shadow_selection_identity_changed")
+    selected_wall_ns, selected_monotonic_ns = _clock_pair(services)
+    if choice.status is HybridStatus.PRICE_ONLY:
+        return await _run_price_choice(
+            row=choice,
+            snapshot=snapshot,
+            discovery=discovery,
+            duration_seconds=duration_seconds,
+            material=material,
+            output=output,
+            services=services,
+            stop=stop,
+            selected_wall_ns=selected_wall_ns,
+            selected_monotonic_ns=selected_monotonic_ns,
+        )
+    if choice.status is not HybridStatus.VERIFIED or provider_key is None:
+        raise ShadowCollectorError("shadow_selection_identity_changed")
+    provider_snapshot = discovery.snapshot
+    generated_wall_ns = getattr(
+        provider_snapshot, "generated_wall_ns", None
+    )
+    if type(generated_wall_ns) is not int:
+        raise ShadowCollectorError("shadow_selection_identity_changed")
+    selected_source_age = selected_wall_ns - generated_wall_ns
+    if selected_source_age < -_MAXIMUM_SOURCE_FUTURE_NS:
+        raise ShadowCollectorError("sportradar_source_time_ahead")
+    if selected_source_age > _MAXIMUM_SOURCE_AGE_NS:
+        raise ShadowCollectorError("sportradar_source_stale")
+    deadline_ns = selected_monotonic_ns + duration_seconds * 1_000_000_000
+    result = await _run_verified_choice(
+        row=choice,
+        snapshot=snapshot,
+        discovery=discovery,
+        provider_key=provider_key,
+        duration_seconds=duration_seconds,
+        poll_seconds=poll_seconds,
+        selected_wall_ns=selected_wall_ns,
+        material=material,
+        output=output,
+        services=services,
+        stop=stop,
+    )
+    if type(result) is str:
+        return result
+    if type(result) is not _VerifiedCollectionHalt:
+        raise ShadowCollectorError("shadow_internal_error")
+    failover_wall_ns, failover_monotonic_ns = _clock_pair(services)
+    if failover_monotonic_ns < selected_monotonic_ns:
+        raise ShadowCollectorError("shadow_clock_invalid")
+    remaining_ns = deadline_ns - failover_monotonic_ns
+    remaining_seconds = remaining_ns // 1_000_000_000
+    if remaining_seconds < 10:
+        raise ShadowCollectorError(result.code)
+    return await _run_price_choice(
+        row=choice,
+        snapshot=snapshot,
+        discovery=discovery,
+        duration_seconds=int(remaining_seconds),
+        material=material,
+        output=output,
+        services=services,
+        stop=stop,
+        selected_wall_ns=failover_wall_ns,
+        selected_monotonic_ns=failover_monotonic_ns,
+        predecessor=result,
+    )
 
 
 def run_cli(
@@ -875,7 +1440,11 @@ def run_cli(
         _best_effort_write(error_stream, "ERROR: invalid command arguments\n")
         return 2
     try:
-        material = services.credential_loader(environ)
+        material = (
+            services.kalshi_only_credential_loader(environ)
+            if arguments.choose
+            else services.credential_loader(environ)
+        )
         with _signals() as stop:
             if arguments.choose:
                 result = asyncio.run(
@@ -883,6 +1452,7 @@ def run_cli(
                         duration_seconds=arguments.duration_seconds,
                         poll_seconds=arguments.poll_seconds,
                         material=material,
+                        environ=environ,
                         stdin=input_stream,
                         stdout=output_stream,
                         output=_DashboardOutput(output_stream),
