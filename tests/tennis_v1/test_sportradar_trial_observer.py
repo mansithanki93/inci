@@ -463,6 +463,54 @@ class SportradarWireContractTests(unittest.TestCase):
             ):
                 parse_live_summaries_for_hybrid(invalid)
 
+    def test_hybrid_parser_isolates_zero_period_row(self) -> None:
+        """Catches a malformed set number aborting unrelated hybrid rows."""
+
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            parse_live_summaries_for_hybrid,
+        )
+
+        document = json.loads(_hybrid_live_summaries_payload())
+        malformed = json.loads(json.dumps(document["summaries"][0]))
+        malformed["sport_event"]["id"] = "sr:sport_event:654321"
+        malformed["sport_event_status"]["period_scores"][0]["number"] = 0
+        document["summaries"].append(malformed)
+        snapshot = parse_live_summaries_for_hybrid(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+        self.assertEqual(
+            (
+                [match.score.provider_match_id for match in snapshot.matches],
+                [(item.index, item.code) for item in snapshot.diagnostics],
+            ),
+            (
+                ["sr:sport_event:123456"],
+                [(1, "sportradar_wire_contract_invalid")],
+            ),
+        )
+
+    def test_hybrid_parser_marks_duplicate_match_as_invalid_row(self) -> None:
+        """Catches duplicate provider identities weakening hybrid correlation."""
+
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            parse_live_summaries_for_hybrid,
+        )
+
+        document = json.loads(_hybrid_live_summaries_payload())
+        document["summaries"].append(
+            json.loads(json.dumps(document["summaries"][0]))
+        )
+        snapshot = parse_live_summaries_for_hybrid(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+        self.assertEqual(
+            (
+                len(snapshot.matches),
+                [(item.index, item.code) for item in snapshot.diagnostics],
+            ),
+            (1, [(1, "sportradar_wire_contract_invalid")]),
+        )
+
 
 class _FakeClock:
     def __init__(self) -> None:

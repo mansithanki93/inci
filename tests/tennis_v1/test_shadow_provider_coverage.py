@@ -159,6 +159,10 @@ class ShadowProviderCoverageTests(unittest.TestCase):
             ),
         )
         self.assertRegex(coverage_registry_sha256(), r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            coverage_registry_sha256(),
+            "b3d91969c11e709c0741210fca10420863eaf3936dba33f96d1ebff3f5f3c32e",
+        )
 
     def test_discovery_contracts_are_frozen_value_objects(self) -> None:
         """Catches a mutable discovery snapshot changing after it is hashed."""

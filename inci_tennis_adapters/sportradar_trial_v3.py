@@ -367,6 +367,8 @@ def _last_set(status: dict[str, object]) -> tuple[int | None, int | None]:
             if raw_number is None
             else _integer(raw_number, maximum=5)
         )
+        if number == 0:
+            _fail("sportradar_period_scores_invalid")
         raw_type = period.get("type")
         period_type = (
             None if raw_type is None else _text(raw_type, maximum=16)
@@ -571,6 +573,7 @@ def parse_live_summaries_for_hybrid(
     digest = sha256(payload).hexdigest()
     matches: list[SportradarHybridMatch] = []
     diagnostics: list[SportradarHybridDiagnostic] = []
+    seen_match_ids: set[str] = set()
     for index, raw in enumerate(summaries):
         try:
             summary = _object(raw)
@@ -583,6 +586,8 @@ def parse_live_summaries_for_hybrid(
             )
             if score.generated_wall_ns != generated_wall_ns:
                 _fail("sportradar_generated_time_mismatch")
+            if score.provider_match_id in seen_match_ids:
+                _fail("sportradar_duplicate_match")
             sport_event = _object(summary.get("sport_event"))
             matches.append(
                 SportradarHybridMatch(
@@ -590,7 +595,8 @@ def parse_live_summaries_for_hybrid(
                     competition=_hybrid_competition(sport_event),
                 )
             )
-        except SportradarWireContractError:
+            seen_match_ids.add(score.provider_match_id)
+        except (KeyError, SportradarWireContractError):
             diagnostics.append(
                 SportradarHybridDiagnostic(
                     index=index,
