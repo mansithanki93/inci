@@ -23,6 +23,7 @@ import uuid
 _MAXIMUM_KALSHI_FRAME_BYTES = 1_048_576
 _MAXIMUM_SPORTRADAR_CAPTURE_BYTES = 8_388_608
 _ZERO_DIGEST = "0" * 64
+_COMMIT_WATERMARK_SCHEMA = "inci-tennis-shadow-commit-watermark-v1"
 _DIGEST_PATTERN = pattern_compile(r"[0-9a-f]{64}\Z", flags=ASCII)
 _TICKER_PATTERN = pattern_compile(
     r"[A-Z0-9][A-Z0-9._-]{0,127}\Z", flags=ASCII
@@ -89,6 +90,27 @@ _TERMINAL_REASONS = frozenset(
         "abandoned",
         "halted",
     }
+)
+_PRICE_ONLY_OBSERVATION_REASONS = frozenset(
+    {
+        "candidate_snapshot_applied",
+        "candidate_delta_applied",
+        "candidate_book_incomplete",
+        "candidate_book_ready",
+        "empty_book",
+        "candidate_message_ignored",
+        "kalshi_sequence_gap",
+        "kalshi_sequence_duplicate",
+        "kalshi_sequence_out_of_order",
+        "kalshi_stream_disconnected",
+        "kalshi_parser_error",
+        "kalshi_resnapshot_requested",
+        "kalshi_reconnected",
+    }
+)
+_INITIAL_BOOK_STATES = frozenset({"empty", "one_sided", "two_sided"})
+_PRICE_ONLY_TERMINAL_REASONS = frozenset(
+    {"duration_elapsed", "operator_interrupt", "cancelled", "halted"}
 )
 _CHAIN_FIELDS = frozenset(
     {
@@ -204,12 +226,112 @@ _RESOLUTION_FIELDS = frozenset(
 _AUTO_TERMINAL_FIELDS = _TERMINAL_FIELDS | frozenset(
     {"mapping_mode", "resolution_row_sha256"}
 )
+_PRICE_ONLY_SESSION_FIELDS = frozenset(
+    {
+        "schema",
+        "kind",
+        "trust",
+        "reason",
+        "selected_wall_ns",
+        "selected_monotonic_ns",
+        "event_ticker",
+        "player_a_name",
+        "player_b_name",
+        "market_tickers",
+        "scheduled_start_wall_ns",
+        "catalog_sport",
+        "catalog_scope",
+        "catalog_queried_competitions",
+        "catalog_series_ticker",
+        "catalog_milestone_id",
+        "catalog_milestone_league",
+        "initial_book_state",
+        "initial_market_a_ticker",
+        "initial_market_a_yes_bid",
+        "initial_market_a_yes_ask",
+        "initial_market_a_bid_depth",
+        "initial_market_a_ask_depth",
+        "initial_market_b_ticker",
+        "initial_market_b_yes_bid",
+        "initial_market_b_yes_ask",
+        "initial_market_b_bid_depth",
+        "initial_market_b_ask_depth",
+        "provider_discovery_state",
+        "provider_discovery_reason",
+        "provider_discovery_raw_path",
+        "provider_discovery_raw_sha256",
+        "kalshi_catalog_sha256",
+        "resolver_snapshot_sha256",
+        "resolver_version",
+        "registry_digest",
+        "authority_scope",
+        "execution_authorized",
+        "score_feed",
+        "predecessor_session_id",
+        "predecessor_terminal_row_sha256",
+    }
+)
+_PRICE_ONLY_CAPTURE_FIELDS = _KALSHI_CAPTURE_FIELDS
+_PRICE_ONLY_OBSERVATION_FIELDS = frozenset(
+    {
+        "schema",
+        "kind",
+        "trust",
+        "reason",
+        "observed_wall_ns",
+        "observed_monotonic_ns",
+        "clock_uncertainty_ns",
+        "event_ticker",
+        "market_tickers",
+        "kalshi_raw_path",
+        "kalshi_raw_sha256",
+        "kalshi_captured_wall_ns",
+        "kalshi_captured_monotonic_ns",
+        "kalshi_generation",
+        "kalshi_sequence",
+        "kalshi_age_ns",
+        "kalshi_status",
+        "market_a_ticker",
+        "market_a_yes_bid",
+        "market_a_yes_ask",
+        "market_a_bid_depth",
+        "market_a_ask_depth",
+        "market_b_ticker",
+        "market_b_yes_bid",
+        "market_b_yes_ask",
+        "market_b_bid_depth",
+        "market_b_ask_depth",
+        "kalshi_frames",
+    }
+)
+_PRICE_ONLY_TERMINAL_FIELDS = frozenset(
+    {
+        "schema",
+        "kind",
+        "trust",
+        "reason",
+        "code",
+        "ended_wall_ns",
+        "ended_monotonic_ns",
+        "event_ticker",
+        "market_tickers",
+        "kalshi_frames",
+        "mapping_mode",
+        "session_row_sha256",
+    }
+)
 _FIELDS_BY_KIND = {
     "resolution": _RESOLUTION_FIELDS | _CHAIN_FIELDS,
     "kalshi_capture": _KALSHI_CAPTURE_FIELDS | _CHAIN_FIELDS,
     "observation": _OBSERVATION_FIELDS | _CHAIN_FIELDS,
     "terminal": _TERMINAL_FIELDS | _CHAIN_FIELDS,
     "auto_terminal": _AUTO_TERMINAL_FIELDS | _CHAIN_FIELDS,
+    "price_only_session": _PRICE_ONLY_SESSION_FIELDS | _CHAIN_FIELDS,
+    "price_only_kalshi_capture": _PRICE_ONLY_CAPTURE_FIELDS | _CHAIN_FIELDS,
+    "price_only_observation": (
+        _PRICE_ONLY_OBSERVATION_FIELDS | _CHAIN_FIELDS
+    ),
+    "price_only_terminal": _PRICE_ONLY_TERMINAL_FIELDS | _CHAIN_FIELDS,
 }
 _SCHEMA_BY_KIND = {
     "resolution": "inci-tennis-unqualified-shadow-resolution-v1",
@@ -219,6 +341,21 @@ _SCHEMA_BY_KIND = {
     "auto_terminal": (
         "inci-tennis-unqualified-shadow-auto-terminal-v1"
     ),
+    "price_only_session": "inci-tennis-price-only-session-v1",
+    "price_only_kalshi_capture": "inci-tennis-price-only-kalshi-capture-v1",
+    "price_only_observation": "inci-tennis-price-only-observation-v1",
+    "price_only_terminal": "inci-tennis-price-only-terminal-v1",
+}
+_TRUST_BY_KIND = {
+    "resolution": "unqualified_shadow",
+    "observation": "unqualified_shadow",
+    "kalshi_capture": "unqualified_shadow",
+    "terminal": "unqualified_shadow",
+    "auto_terminal": "unqualified_shadow",
+    "price_only_session": "PRICE_ONLY",
+    "price_only_kalshi_capture": "PRICE_ONLY",
+    "price_only_observation": "PRICE_ONLY",
+    "price_only_terminal": "PRICE_ONLY",
 }
 
 
@@ -329,6 +466,47 @@ def load_shadow_credential_material(
 
 
 @dataclass(frozen=True, slots=True)
+class KalshiOnlyCredentialMaterial:
+    kalshi_api_key_id: str
+    kalshi_private_key_path: Path
+
+    def __repr__(self) -> str:
+        return "<KalshiOnlyCredentialMaterial redacted>"
+
+
+def load_kalshi_only_credential_material(
+    environ: Mapping[str, str] | None = None,
+) -> KalshiOnlyCredentialMaterial:
+    """Validate only the credentials required for Kalshi price observation."""
+
+    source = os.environ if environ is None else environ
+    if not isinstance(source, Mapping):
+        _fail("shadow_credentials_invalid")
+    values: list[str] = []
+    for name in ("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PATH"):
+        value = source.get(name)
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or len(value) > 4_096
+            or any(ord(character) < 32 for character in value)
+        ):
+            _fail("shadow_credentials_missing")
+        values.append(value)
+    key_path = Path(values[1])
+    if not key_path.is_absolute():
+        _fail("shadow_private_key_path_invalid")
+    _validate_existing_regular_file(
+        key_path,
+        expected_mode=0o600,
+        code="shadow_private_key_path_invalid",
+        read_payload=False,
+    )
+    return KalshiOnlyCredentialMaterial(values[0], key_path)
+
+
+@dataclass(frozen=True, slots=True)
 class PersistedKalshiFrame:
     raw_path: str
     raw_sha256: str
@@ -404,6 +582,57 @@ class ShadowResolutionEvidence:
     kalshi_catalog_sha256: str
     resolver_snapshot_sha256: str
     resolver_rule_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class PriceOnlySessionEvidence:
+    selected_wall_ns: int
+    selected_monotonic_ns: int
+    event_ticker: str
+    player_a_name: str
+    player_b_name: str
+    market_tickers: tuple[str, str]
+    scheduled_start_wall_ns: int
+    catalog_sport: str
+    catalog_scope: str
+    catalog_queried_competitions: tuple[str, ...]
+    catalog_series_ticker: str
+    catalog_milestone_id: str
+    catalog_milestone_league: str | None
+    initial_book_state: str
+    initial_market_a: ShadowMarketCandidate
+    initial_market_b: ShadowMarketCandidate
+    provider_discovery_state: str
+    provider_discovery_reason: str
+    provider_discovery_raw_path: str | None
+    provider_discovery_raw_sha256: str | None
+    kalshi_catalog_sha256: str
+    resolver_snapshot_sha256: str
+    resolver_version: str
+    registry_digest: str
+    predecessor_session_id: str | None = None
+    predecessor_terminal_row_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PriceOnlyEvidenceObservation:
+    observed_wall_ns: int
+    observed_monotonic_ns: int
+    clock_uncertainty_ns: int
+    event_ticker: str
+    market_tickers: tuple[str, str]
+    kalshi_raw_path: str | None
+    kalshi_raw_sha256: str | None
+    kalshi_captured_wall_ns: int | None
+    kalshi_captured_monotonic_ns: int | None
+    kalshi_generation: int | None
+    kalshi_sequence: int | None
+    kalshi_age_ns: int | None
+    kalshi_status: str
+    market_a: ShadowMarketCandidate
+    market_b: ShadowMarketCandidate
+    reason: str
+    kalshi_frames: int
 
 
 def _private_directory(path: Path) -> None:
@@ -751,6 +980,226 @@ def _validate_observation(value: object) -> ShadowEvidenceObservation:
     return value
 
 
+def _valid_price_only_market_tickers(value: object) -> bool:
+    return (
+        type(value) is tuple
+        and len(value) == 2
+        and value[0] != value[1]
+        and all(
+            type(item) is str and _TICKER_PATTERN.fullmatch(item) is not None
+            for item in value
+        )
+    )
+
+
+def _valid_digest(value: object) -> bool:
+    return type(value) is str and _DIGEST_PATTERN.fullmatch(value) is not None
+
+
+def _empty_market(value: ShadowMarketCandidate) -> bool:
+    return (
+        value.yes_bid is None
+        and value.yes_ask is None
+        and value.bid_depth is None
+        and value.ask_depth is None
+    )
+
+
+def _two_sided_market(value: ShadowMarketCandidate) -> bool:
+    return (
+        value.yes_bid is not None
+        and value.yes_ask is not None
+        and value.bid_depth is not None
+        and value.ask_depth is not None
+    )
+
+
+def _valid_price_only_initial_books(value: PriceOnlySessionEvidence) -> bool:
+    market_a = value.initial_market_a
+    market_b = value.initial_market_b
+    if not (
+        _valid_market(market_a, value.market_tickers[0])
+        and _valid_market(market_b, value.market_tickers[1])
+    ):
+        return False
+    if value.initial_book_state == "empty":
+        return _empty_market(market_a) and _empty_market(market_b)
+    if value.initial_book_state == "two_sided":
+        return _two_sided_market(market_a) and _two_sided_market(market_b)
+    return not (_empty_market(market_a) and _empty_market(market_b)) and not (
+        _two_sided_market(market_a) and _two_sided_market(market_b)
+    )
+
+
+def _validate_price_only_session(value: object) -> PriceOnlySessionEvidence:
+    if type(value) is not PriceOnlySessionEvidence:
+        _fail("shadow_evidence_row_invalid")
+    raw_reference = (
+        value.provider_discovery_raw_path,
+        value.provider_discovery_raw_sha256,
+    )
+    predecessor = (
+        value.predecessor_session_id,
+        value.predecessor_terminal_row_sha256,
+    )
+    if (
+        type(value.selected_wall_ns) is not int
+        or value.selected_wall_ns <= 0
+        or type(value.selected_monotonic_ns) is not int
+        or value.selected_monotonic_ns < 0
+        or type(value.event_ticker) is not str
+        or _TICKER_PATTERN.fullmatch(value.event_ticker) is None
+        or not _valid_identity_text(value.player_a_name)
+        or not _valid_identity_text(value.player_b_name)
+        or value.player_a_name == value.player_b_name
+        or not _valid_price_only_market_tickers(value.market_tickers)
+        or type(value.scheduled_start_wall_ns) is not int
+        or value.scheduled_start_wall_ns <= 0
+        or any(
+            not _valid_identity_text(item)
+            for item in (
+                value.catalog_sport,
+                value.catalog_scope,
+                value.catalog_series_ticker,
+                value.catalog_milestone_id,
+                value.provider_discovery_state,
+                value.provider_discovery_reason,
+                value.resolver_version,
+            )
+        )
+        or type(value.catalog_queried_competitions) is not tuple
+        or not value.catalog_queried_competitions
+        or any(
+            not _valid_identity_text(item)
+            for item in value.catalog_queried_competitions
+        )
+        or value.catalog_queried_competitions
+        != tuple(sorted(set(value.catalog_queried_competitions)))
+        or value.catalog_milestone_league is not None
+        and not _valid_identity_text(value.catalog_milestone_league)
+        or value.initial_book_state not in _INITIAL_BOOK_STATES
+        or not _valid_price_only_initial_books(value)
+        or (
+            not all(item is None for item in raw_reference)
+            and not all(item is not None for item in raw_reference)
+        )
+        or value.provider_discovery_raw_path is not None
+        and (
+            type(value.provider_discovery_raw_path) is not str
+            or not os.path.isabs(value.provider_discovery_raw_path)
+        )
+        or value.provider_discovery_raw_sha256 is not None
+        and not _valid_digest(value.provider_discovery_raw_sha256)
+        or any(
+            not _valid_digest(item)
+            for item in (
+                value.kalshi_catalog_sha256,
+                value.resolver_snapshot_sha256,
+                value.registry_digest,
+            )
+        )
+        or (
+            not all(item is None for item in predecessor)
+            and not all(item is not None for item in predecessor)
+        )
+        or value.predecessor_session_id is not None
+        and _canonical_session_id(value.predecessor_session_id) is None
+        or value.predecessor_terminal_row_sha256 is not None
+        and not _valid_digest(value.predecessor_terminal_row_sha256)
+    ):
+        _fail("shadow_evidence_row_invalid")
+    return value
+
+
+def _validate_price_only_observation(
+    value: object,
+) -> PriceOnlyEvidenceObservation:
+    if type(value) is not PriceOnlyEvidenceObservation:
+        _fail("shadow_evidence_row_invalid")
+    reference = (
+        value.kalshi_raw_path,
+        value.kalshi_raw_sha256,
+        value.kalshi_captured_wall_ns,
+        value.kalshi_captured_monotonic_ns,
+        value.kalshi_generation,
+        value.kalshi_sequence,
+        value.kalshi_age_ns,
+    )
+    book_values = (
+        value.market_a.yes_bid,
+        value.market_a.yes_ask,
+        value.market_a.bid_depth,
+        value.market_a.ask_depth,
+        value.market_b.yes_bid,
+        value.market_b.yes_ask,
+        value.market_b.bid_depth,
+        value.market_b.ask_depth,
+    ) if (
+        type(value.market_a) is ShadowMarketCandidate
+        and type(value.market_b) is ShadowMarketCandidate
+    ) else (object(),)
+    if (
+        type(value.observed_wall_ns) is not int
+        or value.observed_wall_ns <= 0
+        or type(value.observed_monotonic_ns) is not int
+        or value.observed_monotonic_ns < 0
+        or type(value.clock_uncertainty_ns) is not int
+        or value.clock_uncertainty_ns < 0
+        or type(value.event_ticker) is not str
+        or _TICKER_PATTERN.fullmatch(value.event_ticker) is None
+        or not _valid_price_only_market_tickers(value.market_tickers)
+        or (
+            not all(item is None for item in reference)
+            and not all(item is not None for item in reference)
+        )
+        or value.kalshi_raw_path is not None
+        and (
+            type(value.kalshi_raw_path) is not str
+            or not os.path.isabs(value.kalshi_raw_path)
+        )
+        or value.kalshi_raw_sha256 is not None
+        and not _valid_digest(value.kalshi_raw_sha256)
+        or value.kalshi_captured_wall_ns is not None
+        and (
+            type(value.kalshi_captured_wall_ns) is not int
+            or value.kalshi_captured_wall_ns <= 0
+        )
+        or value.kalshi_captured_monotonic_ns is not None
+        and (
+            type(value.kalshi_captured_monotonic_ns) is not int
+            or value.kalshi_captured_monotonic_ns < 0
+        )
+        or value.kalshi_generation is not None
+        and (
+            type(value.kalshi_generation) is not int
+            or value.kalshi_generation <= 0
+        )
+        or value.kalshi_sequence is not None
+        and (
+            type(value.kalshi_sequence) is not int
+            or value.kalshi_sequence < 0
+        )
+        or value.kalshi_age_ns is not None
+        and (type(value.kalshi_age_ns) is not int or value.kalshi_age_ns < 0)
+        or value.kalshi_status not in _KALSHI_STATUSES
+        or not _valid_market(value.market_a, value.market_tickers[0])
+        or not _valid_market(value.market_b, value.market_tickers[1])
+        or value.reason not in _PRICE_ONLY_OBSERVATION_REASONS
+        or type(value.kalshi_frames) is not int
+        or value.kalshi_frames < 0
+        or all(item is None for item in reference)
+        and value.kalshi_frames != 0
+        or all(item is None for item in reference)
+        and value.kalshi_status == "candidate"
+        or value.kalshi_status == "candidate"
+        and any(item is None for item in book_values)
+        or value.kalshi_status != "candidate"
+        and any(item is not None for item in book_values)
+    ):
+        _fail("shadow_evidence_row_invalid")
+    return value
+
+
 def _canonical_json(value: object) -> bytes:
     try:
         return json.dumps(
@@ -863,6 +1312,114 @@ def _stored_observation(row: dict[str, object]) -> ShadowEvidenceObservation:
         _fail("shadow_evidence_prior_corrupt")
 
 
+def _stored_price_only_session(
+    row: dict[str, object],
+) -> PriceOnlySessionEvidence:
+    if (
+        type(row.get("market_tickers")) is not list
+        or type(row.get("catalog_queried_competitions")) is not list
+    ):
+        _fail("shadow_evidence_prior_corrupt")
+    try:
+        return _validate_price_only_session(
+            PriceOnlySessionEvidence(
+                selected_wall_ns=row["selected_wall_ns"],
+                selected_monotonic_ns=row["selected_monotonic_ns"],
+                event_ticker=row["event_ticker"],
+                player_a_name=row["player_a_name"],
+                player_b_name=row["player_b_name"],
+                market_tickers=tuple(row["market_tickers"]),
+                scheduled_start_wall_ns=row["scheduled_start_wall_ns"],
+                catalog_sport=row["catalog_sport"],
+                catalog_scope=row["catalog_scope"],
+                catalog_queried_competitions=tuple(
+                    row["catalog_queried_competitions"]
+                ),
+                catalog_series_ticker=row["catalog_series_ticker"],
+                catalog_milestone_id=row["catalog_milestone_id"],
+                catalog_milestone_league=row["catalog_milestone_league"],
+                initial_book_state=row["initial_book_state"],
+                initial_market_a=ShadowMarketCandidate(
+                    row["initial_market_a_ticker"],
+                    row["initial_market_a_yes_bid"],
+                    row["initial_market_a_yes_ask"],
+                    row["initial_market_a_bid_depth"],
+                    row["initial_market_a_ask_depth"],
+                ),
+                initial_market_b=ShadowMarketCandidate(
+                    row["initial_market_b_ticker"],
+                    row["initial_market_b_yes_bid"],
+                    row["initial_market_b_yes_ask"],
+                    row["initial_market_b_bid_depth"],
+                    row["initial_market_b_ask_depth"],
+                ),
+                provider_discovery_state=row["provider_discovery_state"],
+                provider_discovery_reason=row["provider_discovery_reason"],
+                provider_discovery_raw_path=row[
+                    "provider_discovery_raw_path"
+                ],
+                provider_discovery_raw_sha256=row[
+                    "provider_discovery_raw_sha256"
+                ],
+                kalshi_catalog_sha256=row["kalshi_catalog_sha256"],
+                resolver_snapshot_sha256=row["resolver_snapshot_sha256"],
+                resolver_version=row["resolver_version"],
+                registry_digest=row["registry_digest"],
+                predecessor_session_id=row["predecessor_session_id"],
+                predecessor_terminal_row_sha256=row[
+                    "predecessor_terminal_row_sha256"
+                ],
+            )
+        )
+    except (KeyError, TypeError, ShadowEvidenceError):
+        _fail("shadow_evidence_prior_corrupt")
+
+
+def _stored_price_only_observation(
+    row: dict[str, object],
+) -> PriceOnlyEvidenceObservation:
+    if type(row.get("market_tickers")) is not list:
+        _fail("shadow_evidence_prior_corrupt")
+    try:
+        return _validate_price_only_observation(
+            PriceOnlyEvidenceObservation(
+                observed_wall_ns=row["observed_wall_ns"],
+                observed_monotonic_ns=row["observed_monotonic_ns"],
+                clock_uncertainty_ns=row["clock_uncertainty_ns"],
+                event_ticker=row["event_ticker"],
+                market_tickers=tuple(row["market_tickers"]),
+                kalshi_raw_path=row["kalshi_raw_path"],
+                kalshi_raw_sha256=row["kalshi_raw_sha256"],
+                kalshi_captured_wall_ns=row["kalshi_captured_wall_ns"],
+                kalshi_captured_monotonic_ns=row[
+                    "kalshi_captured_monotonic_ns"
+                ],
+                kalshi_generation=row["kalshi_generation"],
+                kalshi_sequence=row["kalshi_sequence"],
+                kalshi_age_ns=row["kalshi_age_ns"],
+                kalshi_status=row["kalshi_status"],
+                market_a=ShadowMarketCandidate(
+                    row["market_a_ticker"],
+                    row["market_a_yes_bid"],
+                    row["market_a_yes_ask"],
+                    row["market_a_bid_depth"],
+                    row["market_a_ask_depth"],
+                ),
+                market_b=ShadowMarketCandidate(
+                    row["market_b_ticker"],
+                    row["market_b_yes_bid"],
+                    row["market_b_yes_ask"],
+                    row["market_b_bid_depth"],
+                    row["market_b_ask_depth"],
+                ),
+                reason=row["reason"],
+                kalshi_frames=row["kalshi_frames"],
+            )
+        )
+    except (KeyError, TypeError, ShadowEvidenceError):
+        _fail("shadow_evidence_prior_corrupt")
+
+
 def _stored_resolution(row: dict[str, object]) -> ShadowResolutionEvidence:
     if type(row.get("market_tickers")) is not list:
         _fail("shadow_evidence_prior_corrupt")
@@ -933,8 +1490,46 @@ def _valid_terminal_row(row: dict[str, object]) -> bool:
     )
 
 
+def _valid_price_only_terminal_row(row: dict[str, object]) -> bool:
+    tickers = row.get("market_tickers")
+    reason = row.get("reason")
+    code = row.get("code")
+    return (
+        reason in _PRICE_ONLY_TERMINAL_REASONS
+        and (
+            (
+                reason == "halted"
+                and type(code) is str
+                and _SAFE_CODE_PATTERN.fullmatch(code) is not None
+            )
+            or (reason != "halted" and code is None)
+        )
+        and type(row.get("ended_wall_ns")) is int
+        and row["ended_wall_ns"] > 0
+        and type(row.get("ended_monotonic_ns")) is int
+        and row["ended_monotonic_ns"] >= 0
+        and type(row.get("event_ticker")) is str
+        and _TICKER_PATTERN.fullmatch(row["event_ticker"]) is not None
+        and type(tickers) is list
+        and len(tickers) == 2
+        and tickers[0] != tickers[1]
+        and all(
+            type(item) is str and _TICKER_PATTERN.fullmatch(item) is not None
+            for item in tickers
+        )
+        and type(row.get("kalshi_frames")) is int
+        and row["kalshi_frames"] >= 0
+        and row.get("mapping_mode") == "price_only"
+        and _valid_digest(row.get("session_row_sha256"))
+    )
+
+
 class ShadowEvidenceStore:
-    """One-owner append-only ledger with immutable raw Kalshi captures."""
+    """One-owner append-only ledger with immutable raw Kalshi captures.
+
+    A local chain cannot detect rollback or deletion of the entire state root;
+    promotion therefore requires immutable external archival of these files.
+    """
 
     def __init__(self, state_root: Path | None = None) -> None:
         root = default_shadow_state_root() if state_root is None else state_root
@@ -952,11 +1547,18 @@ class ShadowEvidenceStore:
         self._raw_number = 0
         self._previous_row_sha256 = _ZERO_DIGEST
         self._kalshi_receipts: dict[str, str] = {}
+        self._eligible_predecessor_terminals: dict[str, tuple[str, int]] = {}
+        self._audited_price_predecessors: list[tuple[str, str, int]] = []
+        self._mode: str | None = None
         self._resolution_identity: (
             tuple[str, tuple[str, str], str, str] | None
         ) = None
         self._resolution_row_sha256: str | None = None
+        self._price_only_session: PriceOnlySessionEvidence | None = None
+        self._price_only_session_row_sha256: str | None = None
         self._terminal_recorded = False
+        self._terminal_row_sha256: str | None = None
+        self._poisoned = False
         self._lock_fd = _open_private_file(root / "shadow.lock", create=True)
         try:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -982,8 +1584,172 @@ class ShadowEvidenceStore:
     def __repr__(self) -> str:
         return f"ShadowEvidenceStore(state_root={self.state_root!r})"
 
+    @property
+    def terminal_row_sha256(self) -> str | None:
+        """Expose only a successfully fsynced terminal row digest."""
+
+        return self._terminal_row_sha256
+
+    def _pending_marker_path(self, session_id: str | None = None) -> Path:
+        value = self.session_id if session_id is None else session_id
+        return self.state_root / f"session-{value}.pending"
+
+    def _commit_marker_path(self, session_id: str | None = None) -> Path:
+        value = self.session_id if session_id is None else session_id
+        return self.state_root / f"session-{value}.commit"
+
+    def _watermark_payload(self, row_number: int, row_sha256: str) -> bytes:
+        return _canonical_json(
+            {
+                "row_number": row_number,
+                "row_sha256": row_sha256,
+                "schema": _COMMIT_WATERMARK_SCHEMA,
+                "session_id": self.session_id,
+            }
+        ) + b"\n"
+
+    def _persist_pending_marker(self, path: Path, payload: bytes) -> None:
+        descriptor: int | None = None
+        try:
+            descriptor = _open_private_file(path, create=True, exclusive=True)
+            try:
+                _write_all(
+                    descriptor, payload, "shadow_evidence_write_failed"
+                )
+            except ShadowEvidenceError:
+                self._poisoned = True
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    self._poisoned = True
+                descriptor = None
+                raise
+            try:
+                os.close(descriptor)
+            except OSError:
+                descriptor = None
+                self._poisoned = True
+                _fail("shadow_evidence_write_failed")
+            descriptor = None
+            _fsync_directory(self.state_root)
+        except ShadowEvidenceError:
+            self._poisoned = True
+            raise
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    self._poisoned = True
+
+    def _create_pending_marker(
+        self, row_number: int, row_sha256: str
+    ) -> tuple[Path, bytes]:
+        path = self._pending_marker_path()
+        payload = self._watermark_payload(row_number, row_sha256)
+        self._persist_pending_marker(path, payload)
+        return path, payload
+
+    def _commit_pending_marker(self, path: Path) -> None:
+        try:
+            os.replace(path, self._commit_marker_path())
+        except OSError:
+            self._poisoned = True
+            _fail("shadow_evidence_write_failed")
+        try:
+            _fsync_directory(self.state_root)
+        except ShadowEvidenceError:
+            self._poisoned = True
+            raise
+
+    def _audit_watermark(
+        self, path: Path, session_id: str
+    ) -> tuple[int, str]:
+        try:
+            info = path.lstat()
+        except OSError:
+            _fail("shadow_evidence_prior_corrupt")
+        if stat.S_ISLNK(info.st_mode):
+            _fail("shadow_evidence_prior_corrupt")
+        payload = _validate_existing_regular_file(
+            path,
+            expected_mode=0o600,
+            code="shadow_evidence_prior_corrupt",
+            read_payload=True,
+            maximum_bytes=512,
+        )
+        if payload is None or not payload.endswith(b"\n"):
+            _fail("shadow_evidence_prior_corrupt")
+        try:
+            marker = json.loads(
+                payload,
+                object_pairs_hook=_strict_json_object,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            _fail("shadow_evidence_prior_corrupt")
+        if (
+            type(marker) is not dict
+            or frozenset(marker)
+            != {
+                "row_number",
+                "row_sha256",
+                "schema",
+                "session_id",
+            }
+            or marker.get("schema") != _COMMIT_WATERMARK_SCHEMA
+            or marker.get("session_id") != session_id
+            or type(marker.get("row_number")) is not int
+            or marker["row_number"] < 1
+            or not _valid_digest(marker.get("row_sha256"))
+            or _canonical_json(marker) + b"\n" != payload
+        ):
+            _fail("shadow_evidence_prior_corrupt")
+        return marker["row_number"], marker["row_sha256"]
+
+    def _audit_marker_inventory(self) -> dict[str, tuple[int, str]]:
+        commits: dict[str, tuple[int, str]] = {}
+        try:
+            entries = sorted(self.state_root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            _fail("shadow_evidence_state_unavailable")
+        for path in entries:
+            name = path.name
+            if name in {"raw", "shadow.lock"}:
+                continue
+            if name.startswith("session-") and name.endswith(".jsonl"):
+                continue
+            if name.startswith("session-") and name.endswith(".pending"):
+                session_id = name[len("session-") : -len(".pending")]
+                if (
+                    name != f"session-{session_id}.pending"
+                    or _canonical_session_id(session_id) is None
+                ):
+                    _fail("shadow_evidence_prior_corrupt")
+                self._audit_watermark(path, session_id)
+                _fail("shadow_evidence_unclean_session")
+            if name.startswith("session-") and name.endswith(".commit"):
+                session_id = name[len("session-") : -len(".commit")]
+                if (
+                    name != f"session-{session_id}.commit"
+                    or _canonical_session_id(session_id) is None
+                    or session_id in commits
+                ):
+                    _fail("shadow_evidence_prior_corrupt")
+                commits[session_id] = self._audit_watermark(path, session_id)
+                continue
+            if (
+                name.endswith(".pending")
+                or name.endswith(".commit")
+                or name.endswith(".poisoned")
+            ):
+                _fail("shadow_evidence_prior_corrupt")
+            _fail("shadow_evidence_prior_corrupt")
+        return commits
+
     def _audit_prior_sessions(self) -> None:
         receipts: dict[str, str] = {}
+        commits = self._audit_marker_inventory()
+        audited_tails: dict[str, tuple[int, str]] = {}
         try:
             ledgers = sorted(self.state_root.glob("session-*.jsonl"))
         except OSError:
@@ -1019,6 +1785,12 @@ class ShadowEvidenceStore:
                 raise
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 _fail("shadow_evidence_prior_corrupt")
+            if rows and rows[0].get("kind") == "price_only_session":
+                audited_tails[session_id] = (
+                    len(rows),
+                    self._audit_price_only_rows(rows, session_id, receipts),
+                )
+                continue
             terminal_indexes = [
                 index
                 for index, row in enumerate(rows)
@@ -1040,7 +1812,7 @@ class ShadowEvidenceStore:
                     expected_fields is None
                     or frozenset(row) != expected_fields
                     or row.get("schema") != _SCHEMA_BY_KIND.get(kind)
-                    or row.get("trust") != "unqualified_shadow"
+                    or row.get("trust") != _TRUST_BY_KIND.get(kind)
                     or type(row.get("reason")) is not str
                     or not row["reason"]
                     or row.get("session_id") != session_id
@@ -1114,6 +1886,30 @@ class ShadowEvidenceStore:
                         or kind == "terminal" and resolution is not None
                     ):
                         _fail("shadow_evidence_prior_corrupt")
+            if rows[-1].get("kind") == "auto_terminal":
+                self._eligible_predecessor_terminals[session_id] = (
+                    previous_digest,
+                    rows[-1]["ended_wall_ns"],
+                )
+            audited_tails[session_id] = (len(rows), previous_digest)
+        for session_id, watermark in commits.items():
+            if audited_tails.get(session_id) != watermark:
+                _fail("shadow_evidence_prior_corrupt")
+        for (
+            predecessor_session_id,
+            predecessor_terminal_digest,
+            selected_wall_ns,
+        ) in (
+            self._audited_price_predecessors
+        ):
+            predecessor = self._eligible_predecessor_terminals.get(
+                predecessor_session_id
+            )
+            if predecessor is None or (
+                predecessor[0] != predecessor_terminal_digest
+                or predecessor[1] >= selected_wall_ns
+            ):
+                _fail("shadow_evidence_prior_corrupt")
         try:
             raw_paths = sorted(self.raw_root.iterdir())
         except OSError:
@@ -1134,6 +1930,155 @@ class ShadowEvidenceStore:
                 or sha256(payload).hexdigest() != digest
             ):
                 _fail("shadow_evidence_prior_corrupt")
+
+    def _audit_price_only_rows(
+        self,
+        rows: list[dict[str, Any]],
+        session_id: str,
+        all_receipts: dict[str, str],
+    ) -> str:
+        terminal_indexes = [
+            index
+            for index, row in enumerate(rows)
+            if row.get("kind") == "price_only_terminal"
+        ]
+        if terminal_indexes != [len(rows) - 1]:
+            _fail("shadow_evidence_unclean_session")
+        previous_digest = _ZERO_DIGEST
+        session_receipts: dict[str, str] = {}
+        capture_number = 0
+        session: PriceOnlySessionEvidence | None = None
+        session_row_sha256: str | None = None
+        for row_number, row in enumerate(rows, start=1):
+            kind = row.get("kind")
+            expected_fields = _FIELDS_BY_KIND.get(kind)
+            claimed_digest = row.get("row_sha256")
+            if (
+                expected_fields is None
+                or frozenset(row) != expected_fields
+                or row.get("schema") != _SCHEMA_BY_KIND.get(kind)
+                or row.get("trust") != _TRUST_BY_KIND.get(kind)
+                or type(row.get("reason")) is not str
+                or not row["reason"]
+                or row.get("session_id") != session_id
+                or row.get("row_number") != row_number
+                or row.get("previous_row_sha256") != previous_digest
+                or not _valid_digest(claimed_digest)
+            ):
+                _fail("shadow_evidence_prior_corrupt")
+            unhashed = dict(row)
+            unhashed.pop("row_sha256")
+            if _row_digest(unhashed) != claimed_digest:
+                _fail("shadow_evidence_prior_corrupt")
+            previous_digest = claimed_digest
+            if kind == "price_only_session":
+                if (
+                    row_number != 1
+                    or row.get("reason") != "price_only_selected"
+                    or row.get("authority_scope") != "observation_only"
+                    or row.get("execution_authorized") is not False
+                    or row.get("score_feed") != "none"
+                ):
+                    _fail("shadow_evidence_prior_corrupt")
+                session = _stored_price_only_session(row)
+                session_row_sha256 = claimed_digest
+                if session.provider_discovery_raw_path is not None:
+                    self._audit_raw_reference(
+                        session.provider_discovery_raw_path,
+                        session.provider_discovery_raw_sha256,
+                        kalshi=False,
+                    )
+                if session.predecessor_session_id is not None:
+                    self._audited_price_predecessors.append(
+                        (
+                            session.predecessor_session_id,
+                            session.predecessor_terminal_row_sha256,
+                            session.selected_wall_ns,
+                        )
+                    )
+            elif kind == "price_only_kalshi_capture":
+                if session is None:
+                    _fail("shadow_evidence_prior_corrupt")
+                capture_number += 1
+                self._audit_price_only_capture_row(
+                    row,
+                    session_id=session_id,
+                    capture_number=capture_number,
+                    session_receipts=session_receipts,
+                    all_receipts=all_receipts,
+                )
+            elif kind == "price_only_observation":
+                if session is None:
+                    _fail("shadow_evidence_prior_corrupt")
+                record = _stored_price_only_observation(row)
+                if (
+                    record.event_ticker != session.event_ticker
+                    or record.market_tickers != session.market_tickers
+                    or record.kalshi_frames != capture_number
+                ):
+                    _fail("shadow_evidence_prior_corrupt")
+                if record.kalshi_raw_path is not None:
+                    if (
+                        session_receipts.get(record.kalshi_raw_path)
+                        != record.kalshi_raw_sha256
+                    ):
+                        _fail("shadow_evidence_prior_corrupt")
+                    self._audit_raw_reference(
+                        record.kalshi_raw_path,
+                        record.kalshi_raw_sha256,
+                        kalshi=True,
+                    )
+            elif kind == "price_only_terminal":
+                if (
+                    session is None
+                    or not _valid_price_only_terminal_row(row)
+                    or row["event_ticker"] != session.event_ticker
+                    or tuple(row["market_tickers"]) != session.market_tickers
+                    or row["kalshi_frames"] != capture_number
+                    or row["session_row_sha256"] != session_row_sha256
+                ):
+                    _fail("shadow_evidence_prior_corrupt")
+            else:
+                _fail("shadow_evidence_prior_corrupt")
+        return previous_digest
+
+    def _audit_price_only_capture_row(
+        self,
+        row: dict[str, object],
+        *,
+        session_id: str,
+        capture_number: int,
+        session_receipts: dict[str, str],
+        all_receipts: dict[str, str],
+    ) -> None:
+        raw_path = row.get("raw_path")
+        digest = row.get("raw_sha256")
+        if (
+            row.get("schema")
+            != "inci-tennis-price-only-kalshi-capture-v1"
+            or row.get("reason") != "kalshi_raw_capture_persisted"
+            or type(raw_path) is not str
+            or raw_path
+            != str(
+                self.raw_root
+                / f"{session_id}-{capture_number:08d}-kalshi.bin"
+            )
+            or not _valid_digest(digest)
+            or raw_path in session_receipts
+            or raw_path in all_receipts
+            or type(row.get("captured_wall_ns")) is not int
+            or row["captured_wall_ns"] <= 0
+            or type(row.get("captured_monotonic_ns")) is not int
+            or row["captured_monotonic_ns"] < 0
+            or type(row.get("clock_uncertainty_ns")) is not int
+            or row["clock_uncertainty_ns"] < 0
+            or type(row.get("physical_connection_generation")) is not int
+            or row["physical_connection_generation"] <= 0
+        ):
+            _fail("shadow_evidence_prior_corrupt")
+        self._audit_raw_reference(raw_path, digest, kalshi=True)
+        session_receipts[raw_path] = digest
+        all_receipts[raw_path] = digest
 
     def _audit_raw_reference(
         self,
@@ -1260,7 +2205,7 @@ class ShadowEvidenceStore:
         )
 
     def persist_kalshi_frame(self, frame: object) -> PersistedKalshiFrame:
-        if self._closed:
+        if self._closed or self._poisoned:
             _fail("shadow_evidence_closed")
         try:
             payload = frame.payload
@@ -1287,16 +2232,34 @@ class ShadowEvidenceStore:
             or claimed_digest != digest
         ):
             _fail("shadow_evidence_frame_invalid")
-        self._raw_number += 1
+        raw_number = self._raw_number + 1
         path = self.raw_root / (
-            f"{self.session_id}-{self._raw_number:08d}-kalshi.bin"
+            f"{self.session_id}-{raw_number:08d}-kalshi.bin"
         )
-        descriptor = _open_private_file(path, create=True, exclusive=True)
+        try:
+            descriptor = _open_private_file(path, create=True, exclusive=True)
+        except ShadowEvidenceError:
+            self._poisoned = True
+            raise
         try:
             _write_all(descriptor, payload, "shadow_evidence_raw_write_failed")
-        finally:
+        except ShadowEvidenceError:
+            self._poisoned = True
+            try:
+                os.close(descriptor)
+            except OSError:
+                self._poisoned = True
+            raise
+        try:
             os.close(descriptor)
-        _fsync_directory(self.raw_root)
+        except OSError:
+            self._poisoned = True
+            _fail("shadow_evidence_raw_write_failed")
+        try:
+            _fsync_directory(self.raw_root)
+        except ShadowEvidenceError:
+            self._poisoned = True
+            raise
         reference = PersistedKalshiFrame(
             raw_path=str(path),
             raw_sha256=digest,
@@ -1305,27 +2268,48 @@ class ShadowEvidenceStore:
             clock_uncertainty_ns=clock_uncertainty_ns,
             physical_connection_generation=generation,
         )
-        self._append_record(
-            {
-                "schema": "inci-tennis-unqualified-shadow-kalshi-capture-v1",
-                "kind": "kalshi_capture",
-                "trust": "unqualified_shadow",
-                "reason": "kalshi_raw_capture_persisted",
-                "raw_path": reference.raw_path,
-                "raw_sha256": reference.raw_sha256,
-                "captured_wall_ns": reference.captured_wall_ns,
-                "captured_monotonic_ns": reference.captured_monotonic_ns,
-                "clock_uncertainty_ns": reference.clock_uncertainty_ns,
-                "physical_connection_generation": (
-                    reference.physical_connection_generation
-                ),
-            }
-        )
+        try:
+            self._append_record(
+                {
+                    "schema": (
+                        "inci-tennis-price-only-kalshi-capture-v1"
+                        if self._mode == "price_only"
+                        else "inci-tennis-unqualified-shadow-kalshi-capture-v1"
+                    ),
+                    "kind": (
+                        "price_only_kalshi_capture"
+                        if self._mode == "price_only"
+                        else "kalshi_capture"
+                    ),
+                    "trust": (
+                        "PRICE_ONLY"
+                        if self._mode == "price_only"
+                        else "unqualified_shadow"
+                    ),
+                    "reason": "kalshi_raw_capture_persisted",
+                    "raw_path": reference.raw_path,
+                    "raw_sha256": reference.raw_sha256,
+                    "captured_wall_ns": reference.captured_wall_ns,
+                    "captured_monotonic_ns": reference.captured_monotonic_ns,
+                    "clock_uncertainty_ns": reference.clock_uncertainty_ns,
+                    "physical_connection_generation": (
+                        reference.physical_connection_generation
+                    ),
+                }
+            )
+        except ShadowEvidenceError:
+            self._poisoned = True
+            raise
+        self._raw_number = raw_number
         self._kalshi_receipts[reference.raw_path] = reference.raw_sha256
         return reference
 
     def append_resolution(self, record: ShadowResolutionEvidence) -> None:
-        if self._row_number != 0 or self._resolution_identity is not None:
+        if (
+            self._mode == "price_only"
+            or self._row_number != 0
+            or self._resolution_identity is not None
+        ):
             _fail("shadow_evidence_resolution_invalid")
         value = _validate_resolution(record)
         self._validate_reference(
@@ -1403,15 +2387,16 @@ class ShadowEvidenceStore:
             _fail("shadow_evidence_reference_invalid")
 
     def _append_record(self, row: dict[str, object]) -> None:
-        if self._closed:
+        if self._closed or self._poisoned:
             _fail("shadow_evidence_closed")
-        if type(row) is not dict or row.get("trust") != "unqualified_shadow":
+        if type(row) is not dict:
             _fail("shadow_evidence_row_invalid")
         schema = row.get("schema")
         kind = row.get("kind")
         if (
             type(kind) is not str
             or _SCHEMA_BY_KIND.get(kind) != schema
+            or row.get("trust") != _TRUST_BY_KIND.get(kind)
             or type(row.get("reason")) is not str
             or not row["reason"]
             or self._terminal_recorded
@@ -1422,26 +2407,36 @@ class ShadowEvidenceStore:
             for name in row
         ) or _CHAIN_FIELDS.intersection(row):
             _fail("shadow_evidence_row_invalid")
-        self._row_number += 1
+        row_number = self._row_number + 1
         persisted = {
             **row,
             "session_id": self.session_id,
-            "row_number": self._row_number,
+            "row_number": row_number,
             "previous_row_sha256": self._previous_row_sha256,
         }
         current_digest = _row_digest(persisted)
         persisted["row_sha256"] = current_digest
         payload = _canonical_json(persisted) + b"\n"
-        _write_all(
-            self._ledger_fd,
-            payload,
-            "shadow_evidence_write_failed",
-        )
+        pending_path, _ = self._create_pending_marker(row_number, current_digest)
+        try:
+            _write_all(
+                self._ledger_fd,
+                payload,
+                "shadow_evidence_write_failed",
+            )
+        except ShadowEvidenceError:
+            self._poisoned = True
+            raise
+        self._commit_pending_marker(pending_path)
+        self._row_number = row_number
         self._previous_row_sha256 = current_digest
-        if kind in {"terminal", "auto_terminal"}:
+        if kind in {"terminal", "auto_terminal", "price_only_terminal"}:
             self._terminal_recorded = True
+            self._terminal_row_sha256 = current_digest
 
     def append_observation(self, record: ShadowEvidenceObservation) -> None:
+        if self._mode == "price_only":
+            _fail("shadow_evidence_row_invalid")
         value = _validate_observation(record)
         if self._resolution_identity is not None and (
             value.provider_match_id,
@@ -1530,6 +2525,226 @@ class ShadowEvidenceStore:
             }
         )
 
+    def append_price_only_session(
+        self, record: PriceOnlySessionEvidence
+    ) -> None:
+        """Fix a ledger into the independent Kalshi-only evidence grammar."""
+
+        if (
+            self._closed
+            or self._poisoned
+            or self._row_number != 0
+            or self._mode is not None
+            or self._price_only_session is not None
+        ):
+            _fail("shadow_evidence_row_invalid")
+        value = _validate_price_only_session(record)
+        if value.provider_discovery_raw_path is not None:
+            self._validate_reference(
+                value.provider_discovery_raw_path,
+                value.provider_discovery_raw_sha256,
+                kalshi=False,
+            )
+        if value.predecessor_session_id is not None:
+            predecessor = self._eligible_predecessor_terminals.get(
+                value.predecessor_session_id
+            )
+            if predecessor is None or (
+                predecessor[0] != value.predecessor_terminal_row_sha256
+                or predecessor[1] >= value.selected_wall_ns
+            ):
+                _fail("shadow_evidence_reference_invalid")
+        self._append_record(
+            {
+                "schema": "inci-tennis-price-only-session-v1",
+                "kind": "price_only_session",
+                "trust": "PRICE_ONLY",
+                "reason": "price_only_selected",
+                "selected_wall_ns": value.selected_wall_ns,
+                "selected_monotonic_ns": value.selected_monotonic_ns,
+                "event_ticker": value.event_ticker,
+                "player_a_name": value.player_a_name,
+                "player_b_name": value.player_b_name,
+                "market_tickers": list(value.market_tickers),
+                "scheduled_start_wall_ns": value.scheduled_start_wall_ns,
+                "catalog_sport": value.catalog_sport,
+                "catalog_scope": value.catalog_scope,
+                "catalog_queried_competitions": list(
+                    value.catalog_queried_competitions
+                ),
+                "catalog_series_ticker": value.catalog_series_ticker,
+                "catalog_milestone_id": value.catalog_milestone_id,
+                "catalog_milestone_league": value.catalog_milestone_league,
+                "initial_book_state": value.initial_book_state,
+                "initial_market_a_ticker": value.initial_market_a.ticker,
+                "initial_market_a_yes_bid": value.initial_market_a.yes_bid,
+                "initial_market_a_yes_ask": value.initial_market_a.yes_ask,
+                "initial_market_a_bid_depth": value.initial_market_a.bid_depth,
+                "initial_market_a_ask_depth": value.initial_market_a.ask_depth,
+                "initial_market_b_ticker": value.initial_market_b.ticker,
+                "initial_market_b_yes_bid": value.initial_market_b.yes_bid,
+                "initial_market_b_yes_ask": value.initial_market_b.yes_ask,
+                "initial_market_b_bid_depth": value.initial_market_b.bid_depth,
+                "initial_market_b_ask_depth": value.initial_market_b.ask_depth,
+                "provider_discovery_state": value.provider_discovery_state,
+                "provider_discovery_reason": value.provider_discovery_reason,
+                "provider_discovery_raw_path": (
+                    value.provider_discovery_raw_path
+                ),
+                "provider_discovery_raw_sha256": (
+                    value.provider_discovery_raw_sha256
+                ),
+                "kalshi_catalog_sha256": value.kalshi_catalog_sha256,
+                "resolver_snapshot_sha256": value.resolver_snapshot_sha256,
+                "resolver_version": value.resolver_version,
+                "registry_digest": value.registry_digest,
+                "authority_scope": "observation_only",
+                "execution_authorized": False,
+                "score_feed": "none",
+                "predecessor_session_id": value.predecessor_session_id,
+                "predecessor_terminal_row_sha256": (
+                    value.predecessor_terminal_row_sha256
+                ),
+            }
+        )
+        self._mode = "price_only"
+        self._price_only_session = value
+        self._price_only_session_row_sha256 = self._previous_row_sha256
+
+    def append_price_only_observation(
+        self, record: PriceOnlyEvidenceObservation
+    ) -> None:
+        if (
+            self._mode != "price_only"
+            or self._price_only_session is None
+            or self._terminal_recorded
+        ):
+            _fail("shadow_evidence_row_invalid")
+        value = _validate_price_only_observation(record)
+        if (
+            value.event_ticker != self._price_only_session.event_ticker
+            or value.market_tickers != self._price_only_session.market_tickers
+            or value.kalshi_frames != self._raw_number
+        ):
+            _fail("shadow_evidence_reference_invalid")
+        self._validate_reference(
+            value.kalshi_raw_path,
+            value.kalshi_raw_sha256,
+            kalshi=True,
+        )
+        if value.kalshi_raw_path is not None and (
+            self._kalshi_receipts.get(value.kalshi_raw_path)
+            != value.kalshi_raw_sha256
+        ):
+            _fail("shadow_evidence_reference_invalid")
+        self._append_record(
+            {
+                "schema": "inci-tennis-price-only-observation-v1",
+                "kind": "price_only_observation",
+                "trust": "PRICE_ONLY",
+                "reason": value.reason,
+                "observed_wall_ns": value.observed_wall_ns,
+                "observed_monotonic_ns": value.observed_monotonic_ns,
+                "clock_uncertainty_ns": value.clock_uncertainty_ns,
+                "event_ticker": value.event_ticker,
+                "market_tickers": list(value.market_tickers),
+                "kalshi_raw_path": value.kalshi_raw_path,
+                "kalshi_raw_sha256": value.kalshi_raw_sha256,
+                "kalshi_captured_wall_ns": value.kalshi_captured_wall_ns,
+                "kalshi_captured_monotonic_ns": (
+                    value.kalshi_captured_monotonic_ns
+                ),
+                "kalshi_generation": value.kalshi_generation,
+                "kalshi_sequence": value.kalshi_sequence,
+                "kalshi_age_ns": value.kalshi_age_ns,
+                "kalshi_status": value.kalshi_status,
+                "market_a_ticker": value.market_a.ticker,
+                "market_a_yes_bid": value.market_a.yes_bid,
+                "market_a_yes_ask": value.market_a.yes_ask,
+                "market_a_bid_depth": value.market_a.bid_depth,
+                "market_a_ask_depth": value.market_a.ask_depth,
+                "market_b_ticker": value.market_b.ticker,
+                "market_b_yes_bid": value.market_b.yes_bid,
+                "market_b_yes_ask": value.market_b.yes_ask,
+                "market_b_bid_depth": value.market_b.bid_depth,
+                "market_b_ask_depth": value.market_b.ask_depth,
+                "kalshi_frames": value.kalshi_frames,
+            }
+        )
+
+    def append_price_only_terminal(
+        self,
+        *,
+        reason: str,
+        code: str | None,
+        ended_wall_ns: int,
+        ended_monotonic_ns: int,
+        event_ticker: str,
+        market_tickers: tuple[str, str],
+        kalshi_frames: int,
+    ) -> None:
+        session = self._price_only_session
+        if (
+            self._mode != "price_only"
+            or session is None
+            or reason not in _PRICE_ONLY_TERMINAL_REASONS
+            or reason == "halted"
+            and (
+                type(code) is not str
+                or _SAFE_CODE_PATTERN.fullmatch(code) is None
+            )
+            or reason != "halted"
+            and code is not None
+            or type(ended_wall_ns) is not int
+            or ended_wall_ns <= 0
+            or type(ended_monotonic_ns) is not int
+            or ended_monotonic_ns < 0
+            or type(event_ticker) is not str
+            or _TICKER_PATTERN.fullmatch(event_ticker) is None
+            or not _valid_price_only_market_tickers(market_tickers)
+            or type(kalshi_frames) is not int
+            or kalshi_frames < 0
+            or kalshi_frames != self._raw_number
+            or event_ticker != session.event_ticker
+            or market_tickers != session.market_tickers
+            or not _valid_digest(self._price_only_session_row_sha256)
+        ):
+            _fail("shadow_evidence_terminal_invalid")
+        self._append_record(
+            {
+                "schema": "inci-tennis-price-only-terminal-v1",
+                "kind": "price_only_terminal",
+                "trust": "PRICE_ONLY",
+                "reason": reason,
+                "code": code,
+                "ended_wall_ns": ended_wall_ns,
+                "ended_monotonic_ns": ended_monotonic_ns,
+                "event_ticker": event_ticker,
+                "market_tickers": list(market_tickers),
+                "kalshi_frames": kalshi_frames,
+                "mapping_mode": "price_only",
+                "session_row_sha256": self._price_only_session_row_sha256,
+            }
+        )
+
+    def ensure_price_only_halted_terminal(self, *, code: str) -> None:
+        """Close a constructed price-only session after an IO-owned failure."""
+
+        if self._terminal_recorded:
+            return
+        session = self._price_only_session
+        if session is None:
+            _fail("shadow_evidence_terminal_invalid")
+        self.append_price_only_terminal(
+            reason="halted",
+            code=code,
+            ended_wall_ns=time.time_ns(),
+            ended_monotonic_ns=time.monotonic_ns(),
+            event_ticker=session.event_ticker,
+            market_tickers=session.market_tickers,
+            kalshi_frames=self._raw_number,
+        )
+
     def append_terminal(
         self,
         *,
@@ -1543,7 +2758,11 @@ class ShadowEvidenceStore:
         kalshi_frames: int,
     ) -> None:
         if (
-            reason not in _TERMINAL_REASONS
+            self._mode == "price_only"
+            or self._closed
+            or self._poisoned
+            or self._terminal_recorded
+            or reason not in _TERMINAL_REASONS
             or (reason == "halted")
             != (
                 type(code) is str
@@ -1658,7 +2877,10 @@ class ShadowEvidenceStore:
 
 
 __all__ = (
+    "KalshiOnlyCredentialMaterial",
     "PersistedKalshiFrame",
+    "PriceOnlyEvidenceObservation",
+    "PriceOnlySessionEvidence",
     "ShadowCredentialMaterial",
     "ShadowEvidenceObservation",
     "ShadowEvidenceError",
@@ -1666,6 +2888,7 @@ __all__ = (
     "ShadowMarketCandidate",
     "ShadowResolutionEvidence",
     "default_shadow_state_root",
+    "load_kalshi_only_credential_material",
     "load_shadow_credential_material",
     "shadow_monotonic_ns",
     "shadow_kalshi_clock_observation",
