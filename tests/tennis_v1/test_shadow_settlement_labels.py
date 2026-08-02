@@ -856,6 +856,108 @@ class ShadowSettlementLabelContractTests(unittest.TestCase):
                         _reconcile(source, root, _Transport(states), _Clocks())
                     self.assertFalse(root.exists())
 
+    def test_generated_artifacts_are_preflighted_at_every_exact_cap(self) -> None:
+        """Catches a successful commit poisoning its own next bounded audit."""
+        from inci_tennis_io import shadow_settlement_labels as labels
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            states = (_market(0), _market(1))
+            probe_source = _source(base / "s99-source")
+            probe_root = base / "r99-labels"
+            real_unlink = labels.os.unlink
+
+            def retain_pending(path: object, *args: object, **kwargs: object) -> None:
+                if Path(path).name == "settlement.pending":
+                    raise OSError("retain pending probe")
+                real_unlink(path, *args, **kwargs)
+
+            with patch.object(labels.os, "unlink", side_effect=retain_pending):
+                with self.assertRaisesRegex(OSError, "retain pending probe"):
+                    _reconcile(probe_source, probe_root, _Transport(states), _Clocks())
+            row_line = (probe_root / "settlements.jsonl").read_bytes()
+            raw_size = max(path.stat().st_size for path in (probe_root / "raw").iterdir())
+            exact_caps = {
+                "_MAX_LEDGER_ROWS": 1,
+                "_MAX_RAW_FILES": 2,
+                "_MAX_EPOCH_BYTES": (probe_root / "settlement.epoch").stat().st_size,
+                "_MAX_COMMIT_BYTES": (probe_root / "settlement.commit").stat().st_size,
+                "_MAX_PENDING_BYTES": (probe_root / "settlement.pending").stat().st_size,
+                "_MAX_RAW_BODY_BYTES": raw_size,
+                "_MAX_LEDGER_LINE_BYTES": len(row_line),
+                "_MAX_LEDGER_BYTES": len(row_line),
+            }
+
+            exact_source = _source(base / "s98-source")
+            exact_root = base / "r98-labels"
+            exact_clocks = _Clocks()
+            with patch.multiple(labels, **exact_caps):
+                result = _reconcile(
+                    exact_source, exact_root, _Transport(states), exact_clocks
+                )
+                self.assertEqual(result.state, "final")
+                self.assertEqual(exact_clocks.calls, ["wall", "monotonic"])
+                no_op_transport = _Transport(states)
+                no_op_clocks = _Clocks()
+                self.assertEqual(
+                    _reconcile(
+                        exact_source, exact_root, no_op_transport, no_op_clocks
+                    ).state,
+                    "final",
+                )
+                self.assertEqual(no_op_clocks.calls, [])
+                self.assertEqual(len(_rows(exact_root)), 1)
+
+            for index, (constant, exact) in enumerate(exact_caps.items()):
+                with self.subTest(constant=constant):
+                    source = _source(base / f"s{index:02d}-source")
+                    root = base / f"r{index:02d}-labels"
+                    clocks = _Clocks()
+                    with patch.object(labels, constant, exact - 1):
+                        with self.assertRaisesRegex(RuntimeError, "capacity|size|count"):
+                            _reconcile(
+                                source, root, _Transport(states), clocks
+                            )
+                    self.assertFalse(root.exists())
+
+    def test_existing_store_count_overflow_is_clockless_and_metadata_read_only(self) -> None:
+        """Catches the original full-store overrun mutating a valid capped root."""
+        from inci_tennis_io import shadow_settlement_labels as labels
+
+        changed = (
+            _market(0, result="no", settlement_value_dollars="0"),
+            _market(1, result="yes", settlement_value_dollars="1"),
+        )
+        for constant, cap in (("_MAX_LEDGER_ROWS", 1), ("_MAX_RAW_FILES", 2)):
+            with self.subTest(constant=constant), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                source = _source(base / "source")
+                root = base / "labels"
+                _reconcile(
+                    source, root, _Transport((_market(0), _market(1))), _Clocks()
+                )
+
+                def durable_snapshot() -> dict[str, tuple[object, ...]]:
+                    snapshot: dict[str, tuple[object, ...]] = {}
+                    for path in (root, *sorted(root.rglob("*"))):
+                        info = path.lstat()
+                        snapshot[str(path.relative_to(root))] = (
+                            stat.S_IFMT(info.st_mode), stat.S_IMODE(info.st_mode),
+                            info.st_uid, info.st_nlink, info.st_mtime_ns,
+                            info.st_ctime_ns,
+                            path.read_bytes() if path.is_file() else None,
+                        )
+                    return snapshot
+
+                before = durable_snapshot()
+                clocks = _Clocks()
+                with patch.object(labels, constant, cap):
+                    with self.assertRaisesRegex(RuntimeError, "capacity"):
+                        _reconcile(source, root, _Transport(changed), clocks)
+                self.assertEqual(clocks.calls, [])
+                self.assertEqual(durable_snapshot(), before)
+
+
     def test_transaction_phase_fault_matrix_never_returns_false_or_duplicates(self) -> None:
         """Catches durability boundary failures returning a label or duplicating a row."""
         from inci_tennis_io import shadow_settlement_labels as labels

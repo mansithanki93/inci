@@ -139,6 +139,21 @@ class _Audit:
     rows: tuple[dict[str, object], ...]
     pending: dict[str, object] | None
     recovery: Literal["advance", "cleanup"] | None
+    ledger_bytes: int
+    raw_files: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCommit:
+    transaction_id: str
+    reconciled_wall_ns: int
+    reconciled_monotonic_ns: int
+    raw_paths: tuple[Path, Path]
+    row: dict[str, object]
+    row_line: bytes
+    pending_payload: bytes
+    epoch_payload: bytes
+    commit_payload: bytes
 
 
 def _canonical_json(value: object) -> bytes:
@@ -651,9 +666,11 @@ def _audit_root(root: Path) -> _Audit:
         )
 
     rows: list[dict[str, object]] = []
+    ledger_bytes = 0
     ledger_path = root / "settlements.jsonl"
     if ledger_path.exists() or ledger_path.is_symlink():
         payload = _read_safe(ledger_path, maximum_bytes=_MAX_LEDGER_BYTES)
+        ledger_bytes = len(payload)
         if not payload:
             raise ShadowSettlementError("shadow_settlement_ledger_empty")
         lines = payload.splitlines(keepends=True)
@@ -764,7 +781,7 @@ def _audit_root(root: Path) -> _Audit:
 
     if not rows and names - {"raw", "settlement.lock", "settlement.epoch"}:
         raise ShadowSettlementError("shadow_settlement_empty_inventory_invalid")
-    return _Audit(tuple(rows), pending, recovery)
+    return _Audit(tuple(rows), pending, recovery, ledger_bytes, len(raw_inventory))
 
 
 def _market_object(state: KalshiFinalMarketState, raw_path: Path) -> dict[str, object]:
@@ -987,8 +1004,19 @@ class ShadowSettlementLabelStore:
         initial = _classify(source, states)
         if initial.state == "pending":
             return initial
+        prepared = self._prepare_commit(
+            _Audit((), None, None, 0, 0),
+            source,
+            states,
+            initial,
+            clocks,
+            None,
+            None,
+        )
         self._bootstrap()
-        return self._under_lock(source, transport, clocks, verify_source, states)
+        return self._under_lock(
+            source, transport, clocks, verify_source, states, prepared
+        )
 
     def _bootstrap(self) -> None:
         root = self.root
@@ -1031,6 +1059,7 @@ class ShadowSettlementLabelStore:
         clocks: ShadowSettlementClocks,
         verify_source: Callable[[], None],
         prefetched: tuple[KalshiFinalMarketState, ...] | None,
+        prepared_seed: _PreparedCommit | None = None,
     ) -> ShadowSettlementResult:
         lock_path = self.root / "settlement.lock"
         expected = _safe_regular(lock_path, empty=True)
@@ -1057,7 +1086,14 @@ class ShadowSettlementLabelStore:
                 if current.state == "pending":
                     return current
                 return self._commit(
-                    audit.rows, source, states, current, clocks, verify_source, None
+                    audit,
+                    source,
+                    states,
+                    current,
+                    clocks,
+                    verify_source,
+                    None,
+                    prepared_seed,
                 )
             if _row_normalized_markets(prior) == tuple(
                 _normalized_market(state) for state in states
@@ -1069,13 +1105,14 @@ class ShadowSettlementLabelStore:
                 )
             conflict = ShadowSettlementResult("conflict", None, None)
             return self._commit(
-                audit.rows,
+                audit,
                 source,
                 states,
                 conflict,
                 clocks,
                 verify_source,
                 prior["row_sha256"],  # type: ignore[arg-type]
+                prepared_seed,
             )
         except BaseException as exc:
             primary = exc
@@ -1126,29 +1163,46 @@ class ShadowSettlementLabelStore:
         matches = [row for row in rows if _row_source_identity(row) == identity]
         return matches[-1] if matches else None
 
-    def _commit(
+    def _prepare_commit(
         self,
-        rows: Sequence[dict[str, object]],
+        audit: _Audit,
         source: AuditedShadowSettlementSource,
         states: Sequence[KalshiFinalMarketState],
         result: ShadowSettlementResult,
         clocks: ShadowSettlementClocks,
-        verify_source: Callable[[], None],
         supersedes: str | None,
-    ) -> ShadowSettlementResult:
+        seed: _PreparedCommit | None,
+    ) -> _PreparedCommit:
         _validate_fetched(states)
-        transaction_id = str(uuid4())
+        next_row_number = len(audit.rows) + 1
+        if next_row_number > _MAX_LEDGER_ROWS:
+            raise ShadowSettlementError("shadow_settlement_row_capacity_invalid")
+        if audit.raw_files + len(states) > _MAX_RAW_FILES:
+            raise ShadowSettlementError("shadow_settlement_raw_count_capacity_invalid")
+        epoch_payload = _epoch_bytes()
+        if len(epoch_payload) > _MAX_EPOCH_BYTES:
+            raise ShadowSettlementError("shadow_settlement_epoch_size_invalid")
+        if seed is None:
+            transaction_id = str(uuid4())
+            wall_ns = _clock_value(clocks.wall_ns())
+            monotonic_ns = _clock_value(clocks.monotonic_ns())
+        else:
+            transaction_id = seed.transaction_id
+            wall_ns = seed.reconciled_wall_ns
+            monotonic_ns = seed.reconciled_monotonic_ns
         raw_paths = tuple(
             self.root
             / "raw"
             / f"settlement-{transaction_id}-{index:02d}-{source.market_tickers[index]}.json"
             for index in range(2)
         )
-        previous = rows[-1]["row_sha256"] if rows else _ZERO_DIGEST
+        if len(raw_paths) != 2:
+            raise ShadowSettlementError("shadow_settlement_raw_path_count_invalid")
+        previous = audit.rows[-1]["row_sha256"] if audit.rows else _ZERO_DIGEST
         row: dict[str, object] = {
             "schema": _ROW_SCHEMA,
             "transaction_id": transaction_id,
-            "row_number": len(rows) + 1,
+            "row_number": next_row_number,
             "source_path": str(source.session_path),
             "source_ledger_sha256": source.ledger_sha256,
             "source_session_id": source.session_id,
@@ -1165,12 +1219,17 @@ class ShadowSettlementLabelStore:
             "state": result.state,
             "winning_market_ticker": result.winning_market_ticker,
             "winning_player_name": result.winning_player_name,
-            "reconciled_wall_ns": _clock_value(clocks.wall_ns()),
-            "reconciled_monotonic_ns": _clock_value(clocks.monotonic_ns()),
+            "reconciled_wall_ns": wall_ns,
+            "reconciled_monotonic_ns": monotonic_ns,
             "supersedes_row_sha256": supersedes,
             "previous_row_sha256": previous,
         }
         row["row_sha256"] = sha256(_canonical_json(row)).hexdigest()
+        row_line = _canonical_json(row) + b"\n"
+        if len(row_line) > _MAX_LEDGER_LINE_BYTES:
+            raise ShadowSettlementError("shadow_settlement_row_line_size_invalid")
+        if audit.ledger_bytes + len(row_line) > _MAX_LEDGER_BYTES:
+            raise ShadowSettlementError("shadow_settlement_ledger_size_capacity_invalid")
         pending = {
             "schema": _PENDING_SCHEMA,
             "transaction_id": transaction_id,
@@ -1182,26 +1241,61 @@ class ShadowSettlementLabelStore:
                 for index in range(2)
             ],
         }
+        pending_payload = _canonical_json(pending) + b"\n"
+        if len(pending_payload) > _MAX_PENDING_BYTES:
+            raise ShadowSettlementError("shadow_settlement_pending_size_invalid")
+        commit_payload = _commit_bytes(next_row_number, row["row_sha256"])  # type: ignore[arg-type]
+        if len(commit_payload) > _MAX_COMMIT_BYTES:
+            raise ShadowSettlementError("shadow_settlement_commit_size_invalid")
+        return _PreparedCommit(
+            transaction_id=transaction_id,
+            reconciled_wall_ns=wall_ns,
+            reconciled_monotonic_ns=monotonic_ns,
+            raw_paths=raw_paths,  # type: ignore[arg-type]
+            row=row,
+            row_line=row_line,
+            pending_payload=pending_payload,
+            epoch_payload=epoch_payload,
+            commit_payload=commit_payload,
+        )
+
+    def _commit(
+        self,
+        audit: _Audit,
+        source: AuditedShadowSettlementSource,
+        states: Sequence[KalshiFinalMarketState],
+        result: ShadowSettlementResult,
+        clocks: ShadowSettlementClocks,
+        verify_source: Callable[[], None],
+        supersedes: str | None,
+        prepared_seed: _PreparedCommit | None,
+    ) -> ShadowSettlementResult:
+        prepared = self._prepare_commit(
+            audit,
+            source,
+            states,
+            result,
+            clocks,
+            supersedes,
+            prepared_seed,
+        )
         epoch_path = self.root / "settlement.epoch"
         if not epoch_path.exists():
-            _publish_new(epoch_path, _epoch_bytes(), self.root)
+            _publish_new(epoch_path, prepared.epoch_payload, self.root)
         verify_source()
         _publish_new(
-            self.root / "settlement.pending", _canonical_json(pending) + b"\n", self.root
+            self.root / "settlement.pending", prepared.pending_payload, self.root
         )
-        for path, state in zip(raw_paths, states, strict=True):
+        for path, state in zip(prepared.raw_paths, states, strict=True):
             _write_new_file(path, state.raw_body)
         _directory_fsync(self.root / "raw")
-        _append_row(
-            self.root / "settlements.jsonl", _canonical_json(row) + b"\n"
-        )
+        _append_row(self.root / "settlements.jsonl", prepared.row_line)
         verify_source()
         commit_path = self.root / "settlement.commit"
-        commit_payload = _commit_bytes(len(rows) + 1, row["row_sha256"])  # type: ignore[arg-type]
         if commit_path.exists():
-            _replace_file(commit_path, commit_payload, self.root)
+            _replace_file(commit_path, prepared.commit_payload, self.root)
         else:
-            _publish_new(commit_path, commit_payload, self.root)
+            _publish_new(commit_path, prepared.commit_payload, self.root)
         verify_source()
         _unlink_and_sync(self.root / "settlement.pending", self.root)
         return result
