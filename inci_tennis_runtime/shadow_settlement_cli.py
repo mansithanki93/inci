@@ -55,13 +55,12 @@ class _Parser(argparse.ArgumentParser):
             allow_abbrev=False,
         )
         self._output = output
-        self._help_output_failed = False
         self.add_argument("session_path", type=Path)
 
     def _print_message(self, message: str | None, file: object | None = None) -> None:
         del file
-        if message is not None and not _write_complete(self._output, message):
-            self._help_output_failed = True
+        if message is not None:
+            _write_complete(self._output, message)
 
     def error(self, message: str) -> None:
         del message
@@ -78,12 +77,7 @@ class _Parser(argparse.ArgumentParser):
 def _arguments(argv: list[str] | None, output: object) -> Path:
     parser = _Parser(output)
     arguments = sys.argv[1:] if argv is None else argv
-    try:
-        parsed = parser.parse_args(arguments)
-    except _HelpRequested:
-        if parser._help_output_failed:
-            raise RuntimeError("shadow_settlement_unavailable") from None
-        raise
+    parsed = parser.parse_args(arguments)
     path = parsed.session_path
     if not isinstance(path, Path) or not path.is_absolute():
         raise _UsageError

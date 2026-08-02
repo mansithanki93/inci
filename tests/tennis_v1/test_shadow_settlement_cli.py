@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import FrozenInstanceError
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -16,11 +17,21 @@ from inci_tennis_runtime.shadow_settlement_cli import (
 
 
 _SESSION = Path("/private/tmp/session-00000000-0000-4000-8000-000000000000.jsonl")
-_FORBIDDEN_AUTHORITY = frozenset({
-    "provider", "score", "price", "book", "strategy", "signal", "fee",
-    "pnl", "expert", "account", "portfolio", "order", "fill", "position",
-    "engine", "executor", "websocket", "credential", "authenticated",
-})
+_REVIEWED_CLI_AST_SHA256 = "11030cf9651e60b4364310d8685b51093531a521daa231eaf7bb639f119d94a6"
+_ALLOWED_IMPORTS = (
+    ("from", "__future__", ("annotations",)),
+    ("import", ("argparse",)),
+    ("from", "dataclasses", ("dataclass",)),
+    ("from", "pathlib", ("Path",)),
+    ("from", "re", ("compile",)),
+    ("import", ("sys",)),
+    ("import", ("time",)),
+    ("from", "typing", ("Callable",)),
+    ("from", "inci_tennis_io.kalshi_shadow_settlement", ("KalshiShadowSettlementTransport",)),
+    ("from", "inci_tennis_io.shadow_settlement_labels", (
+        "ShadowSettlementLabelStore", "reconcile_shadow_settlement",
+    )),
+)
 
 
 class _Factory:
@@ -49,8 +60,9 @@ class _TextStream:
     def write(self, text: str) -> int:
         if self.write_error is not None:
             raise self.write_error
-        self.value += text
-        return len(text) - 1 if self.short and text else len(text)
+        accepted = len(text) - 1 if self.short and text else len(text)
+        self.value += text[:accepted]
+        return accepted
 
     def flush(self) -> None:
         if self.flush_error is not None:
@@ -87,22 +99,26 @@ def _dependencies(
     )
 
 
-def _assert_authority_free(tree: ast.AST) -> None:
-    for node in ast.walk(tree):
-        names: tuple[str, ...] = ()
+def _canonical_ast_sha256(source: str) -> str:
+    return hashlib.sha256(
+        ast.dump(ast.parse(source), include_attributes=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _imports(tree: ast.AST) -> tuple[object, ...]:
+    values: list[object] = []
+    for node in tree.body:
         if isinstance(node, ast.Import):
-            names = tuple(alias.name for alias in node.names)
+            values.append(("import", tuple(alias.name for alias in node.names)))
         elif isinstance(node, ast.ImportFrom):
-            names = (node.module or "",) + tuple(alias.name for alias in node.names)
-        elif isinstance(node, (ast.Name, ast.Attribute)):
-            names = (node.id if isinstance(node, ast.Name) else node.attr,)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names = (node.name,)
-        assert not any(
-            forbidden in name.casefold()
-            for name in names
-            for forbidden in _FORBIDDEN_AUTHORITY
-        ), names
+            values.append(("from", node.module, tuple(alias.name for alias in node.names)))
+    return tuple(values)
+
+
+def _assert_reviewed_cli_ast(source: str) -> None:
+    tree = ast.parse(source)
+    assert _imports(tree) == _ALLOWED_IMPORTS
+    assert _canonical_ast_sha256(source) == _REVIEWED_CLI_AST_SHA256
 
 
 class ShadowSettlementCliContractTests(unittest.TestCase):
@@ -135,6 +151,26 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
         self.assertIn("usage:", stdout.value)
         self.assertEqual(stderr.value, "")
         self.assertEqual(calls, [])
+
+    def test_help_output_failure_is_still_successful_and_silent_on_stderr(self) -> None:
+        """Catches failed help output being converted into a normal command halt."""
+        for stdout in (
+            _TextStream(short=True), _TextStream(write_error=OSError()),
+            _TextStream(flush_error=OSError()),
+            _TextStream(write_error=KeyboardInterrupt()),
+            _TextStream(flush_error=SystemExit()),
+        ):
+            with self.subTest(stdout=stdout):
+                calls: list[str] = []
+                dependencies, _ = _dependencies(calls)
+                stderr = _TextStream()
+                self.assertEqual(
+                    run_cli(["--help"], stdout=stdout, stderr=stderr,
+                            dependencies=dependencies),
+                    0,
+                )
+                self.assertEqual(stderr.value, "")
+                self.assertEqual(calls, [])
 
     def test_missing_extra_and_relative_arguments_are_silent_usage_failures(self) -> None:
         """Catches native argparse output or dependency work before validation."""
@@ -201,14 +237,22 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
 
     def test_short_or_failed_success_output_halts_without_changing_to_a_usage_error(self) -> None:
         """Catches accepting a partial stdout state as a completed reconciliation."""
-        for stdout in (_TextStream(short=True), _TextStream(write_error=OSError()),
-                       _TextStream(flush_error=OSError())):
+        cases = (
+            (_TextStream(short=True), "final"),
+            (_TextStream(write_error=OSError()), ""),
+            (_TextStream(flush_error=OSError()), "final\n"),
+            (_TextStream(write_error=KeyboardInterrupt()), ""),
+            (_TextStream(flush_error=SystemExit()), "final\n"),
+        )
+        for stdout, expected_stdout in cases:
             with self.subTest(stdout=stdout):
                 calls: list[str] = []
                 dependencies, _ = _dependencies(calls, result=SimpleNamespace(state="final"))
                 stderr = _TextStream()
                 self.assertEqual(run_cli([str(_SESSION)], stdout=stdout, stderr=stderr,
                                          dependencies=dependencies), 1)
+                # A stream can retain bytes it has already accepted; a CLI cannot retract them.
+                self.assertEqual(stdout.value, expected_stdout)
                 self.assertEqual(stderr.value, "HALTED: shadow_settlement_unavailable\n")
 
     def test_failed_stderr_is_best_effort_and_preserves_chosen_exit(self) -> None:
@@ -225,6 +269,8 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
                 for stderr in (
                     _TextStream(short=True), _TextStream(write_error=OSError()),
                     _TextStream(flush_error=OSError()),
+                    _TextStream(write_error=KeyboardInterrupt()),
+                    _TextStream(flush_error=SystemExit()),
                 ):
                     with self.subTest(stderr=stderr):
                         self.assertEqual(
@@ -233,23 +279,36 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
                             expected,
                         )
 
-    def test_dependency_container_is_frozen_and_lazy(self) -> None:
-        """Catches dependency construction allocating an external boundary early."""
-        dependencies = ShadowSettlementCliDependencies()
-        with self.assertRaises(FrozenInstanceError):
-            dependencies.transport_factory = lambda: object()  # type: ignore[misc]
-        self.assertTrue(callable(dependencies.transport_factory))
-        self.assertTrue(callable(dependencies.store_factory))
-        self.assertTrue(callable(dependencies.clocks_factory))
-        self.assertTrue(callable(dependencies.reconcile))
-
-    def test_cli_never_loads_an_environment_capability(self) -> None:
-        """Catches configuration or credential lookup in the command layer."""
+    def test_default_factories_are_frozen_lazy_and_use_reviewed_constructors(self) -> None:
+        """Catches default composition acquiring a boundary early or with changed inputs."""
         calls: list[str] = []
-        dependencies, _ = _dependencies(calls)
-        self.assertNotIn("os", vars(settlement_cli))
-        self.assertEqual(run_cli([str(_SESSION)], stdout=_TextStream(),
-                                 stderr=_TextStream(), dependencies=dependencies), 0)
+        transport, store = object(), object()
+        clock_type = settlement_cli._SystemClocks
+        with patch.object(settlement_cli, "KalshiShadowSettlementTransport",
+                          side_effect=lambda: calls.append("transport") or transport) as transport_ctor, patch.object(
+                settlement_cli, "ShadowSettlementLabelStore",
+                side_effect=lambda: calls.append("store") or store,
+        ) as store_ctor, patch.object(
+                settlement_cli, "_SystemClocks",
+                side_effect=lambda: calls.append("clock") or clock_type(),
+        ) as clock_ctor, patch.object(settlement_cli.time, "time_ns", return_value=11) as wall, patch.object(
+                settlement_cli.time, "monotonic_ns", return_value=12,
+        ) as monotonic:
+            dependencies = ShadowSettlementCliDependencies()
+            with self.assertRaises(FrozenInstanceError):
+                dependencies.transport_factory = lambda: object()  # type: ignore[misc]
+            self.assertEqual(calls, [])
+            self.assertIs(dependencies.transport_factory(), transport)
+            self.assertIs(dependencies.store_factory(), store)
+            clocks = dependencies.clocks_factory()
+            self.assertEqual(calls, ["transport", "store", "clock"])
+            self.assertEqual(clocks.wall_ns(), 11)
+            self.assertEqual(clocks.monotonic_ns(), 12)
+        transport_ctor.assert_called_once_with()
+        store_ctor.assert_called_once_with()
+        clock_ctor.assert_called_once_with()
+        wall.assert_called_once_with()
+        monotonic.assert_called_once_with()
 
     def test_main_delegates_to_run_cli(self) -> None:
         """Catches the module entry point bypassing the injected command boundary."""
@@ -257,19 +316,25 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
             self.assertEqual(main(), 17)
         run.assert_called_once_with()
 
-    def test_static_policy_rejects_forbidden_authority_mutations(self) -> None:
-        """Catches adding a provider, account, order, or execution capability."""
+    def test_static_policy_seals_the_exact_module_and_rejects_dynamic_authority_mutations(self) -> None:
+        """Catches imports or indirect calls that add environment or external authority."""
         source_path = Path(__file__).parents[2] / "inci_tennis_runtime" / "shadow_settlement_cli.py"
         source = source_path.read_text(encoding="utf-8")
-        _assert_authority_free(ast.parse(source))
+        _assert_reviewed_cli_ast(source)
         for mutation in (
-            "\nfrom external_provider import ScoreClient\n",
-            "\nportfolio.execute_order()\n",
-            "\ndef credentials(): pass\n",
+            "\n__import__(\"external_\" + \"provider\")\n",
+            "\nimport importlib\nimportlib.import_module(\"network\")\n",
+            "\ngetattr(object(), \"execute_\" + \"order\")()\n",
+            "\nfrom os import getenv as read_setting\n",
+            "\nfrom configparser import ConfigParser as Settings\n",
+            "\nfrom secrets import token_urlsafe as secret_text\n",
+            "\nfrom requests import Session as PublicSession\n",
         ):
             with self.subTest(mutation=mutation):
+                self.assertNotEqual(_canonical_ast_sha256(source + mutation),
+                                    _REVIEWED_CLI_AST_SHA256)
                 with self.assertRaises(AssertionError):
-                    _assert_authority_free(ast.parse(source + mutation))
+                    _assert_reviewed_cli_ast(source + mutation)
 
 
 if __name__ == "__main__":
