@@ -5,6 +5,7 @@ import copy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -269,6 +270,102 @@ class KalshiShadowCatalogTests(unittest.TestCase):
                         now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
                     )
 
+    def test_series_cursor_incompleteness_is_sanitized(self) -> None:
+        """Catches incomplete or malformed Series inventory being accepted."""
+
+        from inci_tennis_io.kalshi_shadow_catalog import KalshiShadowCatalogError
+
+        for cursor in ("series-next", 7):
+            with self.subTest(cursor=cursor):
+                pages = _base_pages()
+                pages["/trade-api/v2/series"] = [{
+                    "series": [{
+                        "ticker": "KXATP",
+                        "category": "Sports",
+                        "tags": ["Tennis"],
+                    }],
+                    "cursor": cursor,
+                }]
+                result = None
+                with self.assertRaisesRegex(
+                    KalshiShadowCatalogError,
+                    "kalshi_catalog_schema_invalid",
+                ):
+                    result = _transport(_Session(pages)).discover_tennis_games(
+                        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+                    )
+                self.assertIsNone(result)
+
+    def test_event_cursor_failures_never_return_page_one_games(self) -> None:
+        """Catches malformed, repeated, or excessive Event pagination."""
+
+        from inci_tennis_io.kalshi_shadow_catalog import KalshiShadowCatalogError
+
+        cases: tuple[tuple[str, list[object]], ...] = (
+            (
+                "repeated",
+                [
+                    {"events": [_event()], "cursor": "again"},
+                    {"events": [], "cursor": "again"},
+                ],
+            ),
+            (
+                "malformed",
+                [{"events": [_event()], "cursor": 7}],
+            ),
+            (
+                "excessive",
+                [
+                    {
+                        "events": [_event()] if index == 0 else [],
+                        "cursor": f"event-page-{index}",
+                    }
+                    for index in range(20)
+                ],
+            ),
+        )
+        for name, event_pages in cases:
+            with self.subTest(name=name):
+                pages = _base_pages()
+                pages["/trade-api/v2/events"] = event_pages
+                result = None
+                with self.assertRaisesRegex(
+                    KalshiShadowCatalogError,
+                    "kalshi_catalog_(schema|pagination)_invalid",
+                ):
+                    result = _transport(_Session(pages)).discover_tennis_games(
+                        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+                    )
+                self.assertIsNone(result)
+
+    def test_later_event_page_failure_never_returns_page_one_games(self) -> None:
+        """Catches usable first-page rows escaping a later boundary failure."""
+
+        from inci_tennis_io.kalshi_shadow_catalog import KalshiShadowCatalogError
+
+        second_pages = (
+            _Response(raw=b"private response", status=503),
+            {"events": "malformed", "cursor": ""},
+        )
+        for second_page in second_pages:
+            with self.subTest(second_page=type(second_page).__name__):
+                pages = _base_pages()
+                pages["/trade-api/v2/events"] = [
+                    {"events": [_event()], "cursor": "events-next"},
+                    second_page,
+                ]
+                result = None
+                with self.assertRaises(KalshiShadowCatalogError) as caught:
+                    result = _transport(_Session(pages)).discover_tennis_games(
+                        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+                    )
+                self.assertIsNone(result)
+                self.assertRegex(
+                    str(caught.exception),
+                    r"\Akalshi_catalog_[a-z_]+\Z",
+                )
+                self.assertNotIn("private response", str(caught.exception))
+
     def test_response_failures_are_sanitized(self) -> None:
         """Catches response text, query values, and player names escaping errors."""
 
@@ -371,24 +468,147 @@ class KalshiShadowCatalogTests(unittest.TestCase):
 
         source_path = Path(__file__).parents[2] / "inci_tennis_io" / "kalshi_shadow_catalog.py"
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
-        imported_modules = {
-            node.module
+        imported_symbols: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_symbols.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                imported_symbols.add(module)
+                imported_symbols.update(
+                    f"{module}.{alias.name}" for alias in node.names
+                )
+        self.assertFalse(
+            any(
+                part == "kalshi_client"
+                for symbol in imported_symbols
+                for part in symbol.split(".")
+            ),
+            imported_symbols,
+        )
+
+        request_calls = [
+            node
             for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "request"
+        ]
+        self.assertEqual(len(request_calls), 1)
+        for call in request_calls:
+            self.assertGreaterEqual(len(call.args), 1)
+            self.assertIsInstance(call.args[0], ast.Constant)
+            self.assertEqual(call.args[0].value, "GET")
+
+        forbidden = {
+            "credential", "credentials", "sign", "signing", "signature",
+            "portfolio", "order", "orders", "fill", "fills", "position",
+            "positions", "websocket", "post", "put", "patch", "delete",
         }
-        called_methods = {
-            node.func.attr
+        forbidden_verbs = {"post", "put", "patch", "delete"}
+        string_literals = {
+            node.value.casefold()
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
         }
-        executable_names = {
-            node.id.casefold()
+        self.assertFalse(forbidden_verbs & string_literals)
+
+        executable_identifiers: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                executable_identifiers.append(node.name)
+            elif isinstance(node, ast.alias):
+                executable_identifiers.extend(
+                    (node.name, node.asname or node.name.rsplit(".", 1)[-1])
+                )
+            elif isinstance(node, ast.arg):
+                executable_identifiers.append(node.arg)
+            elif isinstance(node, ast.Name):
+                executable_identifiers.append(node.id)
+            elif isinstance(node, ast.Attribute):
+                executable_identifiers.append(node.attr)
+
+        def identifier_words(value: str) -> set[str]:
+            return {
+                word.casefold()
+                for word in re.findall(
+                    r"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+",
+                    value,
+                )
+            }
+
+        violations = {
+            word
+            for identifier in executable_identifiers
+            for word in identifier_words(identifier)
+            if word in forbidden
+        }
+        self.assertEqual(violations, set())
+
+        constants: dict[str, str] = {}
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                constants[node.targets[0].id] = node.value.value
+
+        def string_expression(node: ast.expr) -> str:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return node.value
+            if isinstance(node, ast.Name) and node.id in constants:
+                return constants[node.id]
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                return string_expression(node.left) + string_expression(node.right)
+            self.fail(f"dynamic catalog path expression: {ast.dump(node)}")
+
+        path_calls = [
+            node
             for node in ast.walk(tree)
-            if isinstance(node, ast.Name)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"_read", "_pages"}
+        ]
+        allowed_paths = {
+            "/trade-api/v2/search/filters_by_sport",
+            "/trade-api/v2/series",
+            "/trade-api/v2/milestones",
+            "/trade-api/v2/events",
         }
-        self.assertNotIn("kalshi_client", imported_modules)
-        self.assertFalse({"post", "put", "patch", "delete"} & called_methods)
-        self.assertFalse({"credential", "signature", "portfolio", "position", "fill"} & executable_names)
+        dynamic_path_calls = [
+            call
+            for call in path_calls
+            if isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "path"
+        ]
+        pages_functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_pages"
+        ]
+        self.assertEqual(len(pages_functions), 1)
+        self.assertEqual(dynamic_path_calls, [
+            node
+            for node in ast.walk(pages_functions[0])
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_read"
+        ])
+        resolved_paths = {
+            string_expression(call.args[0])
+            for call in path_calls
+            if call not in dynamic_path_calls
+        }
+        self.assertEqual(resolved_paths, allowed_paths)
+        self.assertEqual(constants.get("_ORIGIN"), _ORIGIN)
+        request_url = request_calls[0].args[1]
+        self.assertIsInstance(request_url, ast.BinOp)
+        self.assertIsInstance(request_url.op, ast.Add)
+        self.assertEqual(ast.dump(request_url.left), ast.dump(ast.Name(id="_ORIGIN")))
+        self.assertEqual(ast.dump(request_url.right), ast.dump(ast.Name(id="path")))
 
 
 if __name__ == "__main__":
