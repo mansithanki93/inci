@@ -486,6 +486,17 @@ class KalshiShadowCatalogTests(unittest.TestCase):
             ),
             imported_symbols,
         )
+        frozen_root_modules = {
+            path.stem for path in source_path.parents[1].glob("*.py")
+        }
+        self.assertEqual(
+            {
+                symbol.split(".", 1)[0]
+                for symbol in imported_symbols
+            }
+            & frozen_root_modules,
+            set(),
+        )
 
         request_calls = [
             node
