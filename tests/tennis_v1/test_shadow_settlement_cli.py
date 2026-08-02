@@ -316,6 +316,40 @@ class ShadowSettlementCliContractTests(unittest.TestCase):
             self.assertEqual(main(), 17)
         run.assert_called_once_with()
 
+    def test_operator_docs_match_settlement_and_failover_contracts(self) -> None:
+        """Catches operator guidance contradicting durable runtime semantics."""
+
+        root = Path(__file__).parents[2]
+        required = (
+            (
+                "An initial reconciliation with either Market in a recognized "
+                "non-final status is `pending` and writes nothing."
+            ),
+            (
+                "After both Markets are finalized, a syntactically admitted "
+                "`void`, semantically invalid, or noncomplementary result is "
+                "a durable `conflict`."
+            ),
+            (
+                "Any changed normalized evidence after a durable final appends "
+                "a permanent conflict that supersedes the prior row without "
+                "erasing it."
+            ),
+            (
+                "Exit codes are `0` for a result or help, `1` for a halt, `2` "
+                "for usage, and `130` for an interrupt."
+            ),
+            (
+                "If verified failover leaves fewer than ten seconds, the "
+                "collector halts instead of opening a price-only session."
+            ),
+        )
+        for relative in (Path("README.md"), Path("docs/tennis_v1/README.md")):
+            text = " ".join((root / relative).read_text(encoding="utf-8").split())
+            with self.subTest(relative=str(relative)):
+                for statement in required:
+                    self.assertIn(statement, text)
+
     def test_static_policy_seals_the_exact_module_and_rejects_dynamic_authority_mutations(self) -> None:
         """Catches imports or indirect calls that add environment or external authority."""
         source_path = Path(__file__).parents[2] / "inci_tennis_runtime" / "shadow_settlement_cli.py"

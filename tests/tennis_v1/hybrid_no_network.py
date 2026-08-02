@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+import socket
 import sys
 import unittest
 from unittest.mock import patch
@@ -19,32 +20,37 @@ def _forbidden(label: str):
 
 @contextmanager
 def deny_network() -> Iterator[None]:
-    with (
-        patch(
-            "socket.create_connection",
-            _forbidden("socket.create_connection"),
-        ),
-        patch(
-            "socket.socket.connect",
-            _forbidden("socket.socket.connect"),
-        ),
-        patch(
-            "socket.socket.connect_ex",
-            _forbidden("socket.socket.connect_ex"),
-        ),
-        patch(
-            "socket.getaddrinfo",
-            _forbidden("socket.getaddrinfo"),
-        ),
-        patch(
-            "requests.sessions.Session.request",
-            _forbidden("requests.Session.request"),
-        ),
-        patch(
-            "websockets.connect",
-            _forbidden("websockets.connect"),
-        ),
-    ):
+    targets = [
+        ("socket.create_connection", "socket.create_connection"),
+        ("socket.create_server", "socket.create_server"),
+        ("socket.socket.connect", "socket.socket.connect"),
+        ("socket.socket.connect_ex", "socket.socket.connect_ex"),
+        ("socket.socket.bind", "socket.socket.bind"),
+        ("socket.socket.listen", "socket.socket.listen"),
+        ("socket.socket.accept", "socket.socket.accept"),
+        ("socket.socket.sendto", "socket.socket.sendto"),
+        ("socket.getaddrinfo", "socket.getaddrinfo"),
+        ("socket.gethostbyname", "socket.gethostbyname"),
+        ("socket.gethostbyname_ex", "socket.gethostbyname_ex"),
+        ("socket.gethostbyaddr", "socket.gethostbyaddr"),
+        ("socket.getnameinfo", "socket.getnameinfo"),
+        ("requests.sessions.Session.request", "requests.Session.request"),
+        ("websockets.connect", "websockets.connect"),
+    ]
+    optional_socket_methods = (
+        "sendall",
+        "sendfile",
+        "sendmsg",
+        "sendmsg_afalg",
+    )
+    targets.extend(
+        (f"socket.socket.{name}", f"socket.socket.{name}")
+        for name in optional_socket_methods
+        if hasattr(socket.socket, name)
+    )
+    with ExitStack() as stack:
+        for target, label in targets:
+            stack.enter_context(patch(target, _forbidden(label)))
         yield
 
 
@@ -61,8 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     names = sys.argv[1:] if argv is None else argv
     if not names:
         return 2
-    suite = unittest.defaultTestLoader.loadTestsFromNames(names)
-    return 0 if run_suite(suite).wasSuccessful() else 1
+    with deny_network():
+        suite = unittest.defaultTestLoader.loadTestsFromNames(names)
+        result = unittest.TextTestRunner(stream=sys.stderr).run(suite)
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":

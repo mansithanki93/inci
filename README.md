@@ -88,6 +88,8 @@ provider transport/parser failure. It carries no score or book state and does
 not relabel earlier evidence. Kalshi transport, catalog, projection, identity,
 evidence-integrity, terminal, cleanup, and unknown failures halt without
 failover.
+If verified failover leaves fewer than ten seconds, the collector halts instead
+of opening a price-only session.
 
 Provider quota is staged: discovery reserves at most one call; choosing
 `PRICE_ONLY` reserves no collection-provider calls; choosing `VERIFIED`
@@ -130,16 +132,19 @@ python -m inci_tennis_runtime.shadow_settlement_cli \
   /absolute/path/to/session-<uuid>.jsonl
 ```
 
-It prints `pending`, `final`, or `conflict`. `pending` writes nothing. Only two
-finalized Kalshi Markets with complementary binary results can produce
-`final`; contradictory finalized evidence produces `conflict`. Final and
+It prints `pending`, `final`, or `conflict`. An initial reconciliation with
+either Market in a recognized non-final status is `pending` and writes nothing.
+After both Markets are finalized, a syntactically admitted `void`, semantically
+invalid, or noncomplementary result is a durable `conflict`. Only two finalized
+Kalshi Markets with complementary binary results can produce `final`. Final and
 conflict rows plus their raw responses are append-only under
 `~/.local/state/inci/tennis-shadow-settlement/`. The exact production root is
 `Path(pwd.getpwuid(os.getuid()).pw_dir) / '.local/state/inci/tennis-shadow-settlement'`:
 the `~` above denotes the OS account home and is explicitly not configurable
 through `HOME`.
-Once a durable final exists, later changed Kalshi evidence is a permanent
-conflict rather than a replacement of the prior final.
+Any changed normalized evidence after a durable final appends a permanent
+conflict that supersedes the prior row without erasing it. Exit codes are `0`
+for a result or help, `1` for a halt, `2` for usage, and `130` for an interrupt.
 
 This workflow is observation-only. It has no signal, strategy, fee, P&L,
 executor, order, portfolio, or expert-synchronization call path. `VERIFIED`

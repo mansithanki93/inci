@@ -31,6 +31,7 @@ from inci_tennis_adapters.shadow_match_chooser import (
 _ORIGIN = "https://external-api.kalshi.com"
 _API_PREFIX = "/trade-api/v2"
 _MAXIMUM_BODY_BYTES = 8_388_608
+_STREAM_CHUNK_BYTES = 65_536
 _MAXIMUM_PAGES = 20
 _MAXIMUM_SIGNED_64 = 9_223_372_036_854_775_807
 _PUBLIC_METADATA_MIN_INTERVAL_SECONDS = 0.05
@@ -560,9 +561,79 @@ class KalshiShadowCatalogTransport:
         except Exception:
             _fail("kalshi_catalog_transport_invalid")
 
+    @staticmethod
+    def _close_after(response: object, operation: object) -> object:
+        primary_error: BaseException | None = None
+        try:
+            return operation()  # type: ignore[operator]
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                response.close()  # type: ignore[attr-defined]
+            except BaseException as close_error:
+                if primary_error is None and isinstance(close_error, Exception):
+                    _fail("kalshi_catalog_close_invalid")
+                if primary_error is None:
+                    raise
+
+    @staticmethod
+    def _stream_body(response: object) -> bytes:
+        try:
+            headers = response.headers  # type: ignore[attr-defined]
+            content_type = headers.get("Content-Type")
+            content_encoding = headers.get("Content-Encoding")
+            content_length = headers.get("Content-Length")
+        except Exception:
+            _fail("kalshi_catalog_headers_invalid")
+        if (
+            type(content_type) is not str
+            or content_type.split(";", 1)[0].strip().casefold()
+            != "application/json"
+        ):
+            _fail("kalshi_catalog_content_type_invalid")
+        if content_encoding is not None and (
+            type(content_encoding) is not str
+            or content_encoding.strip().casefold() != "identity"
+        ):
+            _fail("kalshi_catalog_content_encoding_invalid")
+        expected_size: int | None = None
+        if content_length is not None:
+            if (
+                type(content_length) is not str
+                or not content_length.isascii()
+                or not content_length.isdigit()
+                or len(content_length) > 20
+            ):
+                _fail("kalshi_catalog_headers_invalid")
+            expected_size = int(content_length)
+            if expected_size > _MAXIMUM_BODY_BYTES:
+                _fail("kalshi_catalog_body_too_large")
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            iterator = response.iter_content(  # type: ignore[attr-defined]
+                chunk_size=_STREAM_CHUNK_BYTES
+            )
+            for chunk in iterator:
+                if type(chunk) is not bytes or not chunk:
+                    _fail("kalshi_catalog_body_invalid")
+                size += len(chunk)
+                if size > _MAXIMUM_BODY_BYTES:
+                    _fail("kalshi_catalog_body_too_large")
+                chunks.append(chunk)
+        except KalshiShadowCatalogError:
+            raise
+        except Exception:
+            _fail("kalshi_catalog_body_invalid")
+        if size == 0 or (expected_size is not None and size != expected_size):
+            _fail("kalshi_catalog_body_invalid")
+        return b"".join(chunks)
+
     def _read(self, path: str, params: dict[str, object]) -> dict[str, object]:
         self._pace()
-        response = None
+        body: bytes | None = None
         for attempt in range(len(_GET_429_DELAYS) + 1):
             try:
                 response = self._session.request(
@@ -574,11 +645,29 @@ class KalshiShadowCatalogTransport:
                         "Accept-Encoding": "identity",
                     },
                     allow_redirects=False,
+                    stream=True,
                     timeout=(3, 10),
                 )
             except Exception:
                 _fail("kalshi_catalog_transport_invalid")
-            if getattr(response, "status_code", None) == 429:
+
+            def disposition() -> tuple[int, bytes | None]:
+                status = getattr(response, "status_code", None)
+                if type(status) is not int:
+                    _fail("kalshi_catalog_response_invalid")
+                if 300 <= status < 400:
+                    _fail("kalshi_catalog_redirect_invalid")
+                if status == 429:
+                    return status, None
+                if status != 200:
+                    _fail("kalshi_catalog_status_invalid")
+                return status, self._stream_body(response)
+
+            status, body = self._close_after(  # type: ignore[misc]
+                response,
+                disposition,
+            )
+            if status == 429:
                 if attempt == len(_GET_429_DELAYS):
                     _fail("kalshi_catalog_rate_limited")
                 try:
@@ -588,44 +677,8 @@ class KalshiShadowCatalogTransport:
                 continue
             break
         self._last_public_metadata_at = self._monotonic()
-        status = getattr(response, "status_code", None)
-        if isinstance(status, bool) or not isinstance(status, int):
-            _fail("kalshi_catalog_response_invalid")
-        if 300 <= status < 400:
-            _fail("kalshi_catalog_redirect_invalid")
-        if status != 200:
-            _fail("kalshi_catalog_status_invalid")
-        try:
-            headers = response.headers
-            content_type = headers.get("Content-Type")
-            content_encoding = headers.get("Content-Encoding")
-            content_length = headers.get("Content-Length")
-        except Exception:
-            _fail("kalshi_catalog_headers_invalid")
-        if type(content_type) is not str or content_type.split(";", 1)[0].strip().casefold() != "application/json":
-            _fail("kalshi_catalog_content_type_invalid")
-        if content_encoding is not None and (
-            type(content_encoding) is not str
-            or content_encoding.strip().casefold() != "identity"
-        ):
-            _fail("kalshi_catalog_content_encoding_invalid")
-        try:
-            body = response.content
-        except Exception:
+        if body is None:
             _fail("kalshi_catalog_body_invalid")
-        if type(body) is not bytes or not body:
-            _fail("kalshi_catalog_body_invalid")
-        if len(body) > _MAXIMUM_BODY_BYTES:
-            _fail("kalshi_catalog_body_too_large")
-        if content_length is not None:
-            if (
-                type(content_length) is not str
-                or not content_length.isascii()
-                or not content_length.isdigit()
-            ):
-                _fail("kalshi_catalog_headers_invalid")
-            if int(content_length) != len(body):
-                _fail("kalshi_catalog_body_invalid")
         try:
             value = json.loads(body, object_pairs_hook=_duplicate_keys)
         except KalshiShadowCatalogError:

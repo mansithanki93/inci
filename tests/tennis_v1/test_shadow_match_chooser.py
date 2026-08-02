@@ -706,6 +706,52 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             [("KXATP-DUP-A", "KXATP-DUP-B")] * 2,
         )
 
+    def test_parser_duplicate_identity_cannot_collapse_into_verified(self) -> None:
+        """Catches row isolation erasing duplicate provider-ID conflicts."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            parse_live_summaries_for_hybrid,
+        )
+        from tests.tennis_v1.test_live_shadow_cli import _live_payload
+
+        baseline = json.loads(_live_payload(include_second=False))
+        duplicate = json.loads(json.dumps(baseline["summaries"][0]))
+        malformed = json.loads(json.dumps(duplicate))
+        del malformed["sport_event_status"]["status"]
+
+        for second in (duplicate, malformed):
+            with self.subTest(malformed=second is malformed):
+                document = json.loads(json.dumps(baseline))
+                document["summaries"].append(second)
+                discovery = parse_live_summaries_for_hybrid(
+                    json.dumps(document, separators=(",", ":")).encode("utf-8")
+                )
+                retained = discovery.matches[0].score
+                game = self.game(
+                    "KXATP-PARSER-DUP",
+                    home=retained.home_name,
+                    away=retained.away_name,
+                    start=retained.start_wall_ns,
+                )
+                state = self.provider_state(
+                    "available",
+                    "provider_discovery_available",
+                    discovery.payload_sha256,
+                    retained.generated_wall_ns,
+                )
+
+                row = self.resolve(
+                    self.catalog(game),
+                    discovery,
+                    provider_state=state,
+                ).rows[0]
+
+                self.assertEqual(row.status, HybridStatus.CONFLICT)
+                self.assertFalse(row.selectable)
+                self.assertIsNone(row.provider_match)
+                self.assertIn("provider_duplicate_id", row.diagnostics)
+
     def test_malformed_typed_catalog_game_fails_closed_before_row_construction(self) -> None:
         """Catches a malformed catalog game escaping as a conflict with no two-ticker mapping."""
         malformed = replace(self.game("KXATP-BAD"), markets=())
@@ -902,6 +948,11 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         diagnostics = (
             SportradarHybridDiagnostic(7, "bad_row"),
             SportradarHybridDiagnostic(2, "other_bad_row"),
+            SportradarHybridDiagnostic(
+                5,
+                "identity_bad_row",
+                "sr:sport_event:999",
+            ),
         )
         first_discovery = self.discovery(*rows, diagnostics=diagnostics)
         second_discovery = self.discovery(*reversed(rows), diagnostics=tuple(reversed(diagnostics)))
@@ -913,6 +964,10 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             first.provider_diagnostics,
             (
                 "provider_diagnostic:2:other_bad_row",
+                (
+                    "provider_diagnostic:5:identity_bad_row:"
+                    "sr:sport_event:999"
+                ),
                 "provider_diagnostic:7:bad_row",
                 "provider_only:sr:only-a",
                 "provider_only:sr:only-z",

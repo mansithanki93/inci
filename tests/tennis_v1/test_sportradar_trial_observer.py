@@ -506,9 +506,21 @@ class SportradarWireContractTests(unittest.TestCase):
         self.assertEqual(
             (
                 len(snapshot.matches),
-                [(item.index, item.code) for item in snapshot.diagnostics],
+                [
+                    (item.index, item.code, item.provider_match_id)
+                    for item in snapshot.diagnostics
+                ],
             ),
-            (1, [(1, "sportradar_wire_contract_invalid")]),
+            (
+                1,
+                [
+                    (
+                        1,
+                        "sportradar_wire_contract_invalid",
+                        "sr:sport_event:123456",
+                    )
+                ],
+            ),
         )
 
 

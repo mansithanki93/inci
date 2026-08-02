@@ -302,6 +302,7 @@ class SportradarHybridMatch:
 class SportradarHybridDiagnostic:
     index: int
     code: str
+    provider_match_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +555,17 @@ def _hybrid_competition(
     )
 
 
+def _hybrid_provider_identity_hint(raw: object) -> str | None:
+    """Return only a strict stable ID that can bind a rejected row conflict."""
+
+    try:
+        summary = _object(raw)
+        sport_event = _object(summary.get("sport_event"))
+        return _provider_id(sport_event.get("id"), _MATCH_ID)
+    except SportradarWireContractError:
+        return None
+
+
 def parse_live_summaries_for_hybrid(
     payload: bytes,
 ) -> SportradarHybridDiscoverySnapshot:
@@ -575,6 +587,7 @@ def parse_live_summaries_for_hybrid(
     diagnostics: list[SportradarHybridDiagnostic] = []
     seen_match_ids: set[str] = set()
     for index, raw in enumerate(summaries):
+        provider_match_id = _hybrid_provider_identity_hint(raw)
         try:
             summary = _object(raw)
             if not set(summary).issubset(_LIVE_SUMMARY_KEYS):
@@ -596,11 +609,12 @@ def parse_live_summaries_for_hybrid(
                 )
             )
             seen_match_ids.add(score.provider_match_id)
-        except (KeyError, SportradarWireContractError):
+        except SportradarWireContractError:
             diagnostics.append(
                 SportradarHybridDiagnostic(
                     index=index,
                     code="sportradar_wire_contract_invalid",
+                    provider_match_id=provider_match_id,
                 )
             )
     return SportradarHybridDiscoverySnapshot(

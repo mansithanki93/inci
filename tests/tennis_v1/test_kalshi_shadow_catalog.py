@@ -121,13 +121,60 @@ def _base_pages(
 
 class _Response:
     def __init__(self, payload: object, *, status: int = 200) -> None:
-        self.content = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self._content = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.status_code = status
         self.headers = {
             "Content-Type": "application/json",
             "Content-Encoding": "identity",
-            "Content-Length": str(len(self.content)),
+            "Content-Length": str(len(self._content)),
         }
+        self.close_count = 0
+
+    @property
+    def content(self) -> bytes:
+        raise AssertionError("catalog transport must stream response bytes")
+
+    def iter_content(self, chunk_size: int) -> object:
+        self.chunk_size = chunk_size
+        yield self._content
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+class _StreamingResponse:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        status: int = 200,
+        content_length: str | None = None,
+        close_error: BaseException | None = None,
+    ) -> None:
+        self.status_code = status
+        self._chunks = list(chunks)
+        self.headers: dict[str, object] = {
+            "Content-Type": "application/json",
+            "Content-Encoding": "identity",
+        }
+        if content_length is not None:
+            self.headers["Content-Length"] = content_length
+        self.close_error = close_error
+        self.close_count = 0
+        self.chunk_sizes: list[int] = []
+
+    @property
+    def content(self) -> bytes:
+        raise AssertionError("catalog transport must stream response bytes")
+
+    def iter_content(self, chunk_size: int) -> object:
+        self.chunk_sizes.append(chunk_size)
+        yield from self._chunks
+
+    def close(self) -> None:
+        self.close_count += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _Session:
@@ -136,14 +183,18 @@ class _Session:
         self.pages = {path: list(values) for path, values in pages.items()}
         self.calls: list[dict[str, object]] = []
 
-    def request(self, method: str, url: str, **kwargs: object) -> _Response:
+    def request(self, method: str, url: str, **kwargs: object) -> object:
         path = urlsplit(url).path
         self.calls.append({"method": method, "url": url, **kwargs})
         values = self.pages.get(path)
         if not values:
             raise AssertionError(f"unexpected request path: {path}")
         value = values.pop(0)
-        return value if isinstance(value, _Response) else _Response(value)
+        return (
+            value
+            if isinstance(value, (_Response, _StreamingResponse))
+            else _Response(value)
+        )
 
 
 def _transport(session: _Session):
@@ -448,13 +499,94 @@ class KalshiShadowCatalogTests(unittest.TestCase):
             self.assertRegex(str(caught.exception), r"\Akalshi_catalog_[a-z_]+\Z")
             self.assertNotIn("Alice Smith", str(caught.exception))
 
+    def test_catalog_streams_success_without_touching_eager_content(self) -> None:
+        """Catches requests buffering the full body before the transport cap."""
+
+        payload = json.dumps(
+            _base_pages()["/trade-api/v2/search/filters_by_sport"][0],
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = _StreamingResponse([payload[:13], payload[13:]])
+        session = _Session(
+            {"/trade-api/v2/search/filters_by_sport": [response]}
+        )
+
+        filters = _transport(session).get_sports_filters()
+
+        self.assertEqual(filters["sport_ordering"], ("All sports", "Tennis"))
+        self.assertEqual(session.calls[0]["stream"], True)
+        self.assertEqual(response.close_count, 1)
+        self.assertEqual(len(response.chunk_sizes), 1)
+
+    def test_catalog_stream_cap_closes_oversize_body_without_content_length(
+        self,
+    ) -> None:
+        """Catches chunked or dishonest upstream bodies exhausting memory."""
+
+        from inci_tennis_io import kalshi_shadow_catalog as catalog
+
+        response = _StreamingResponse([b"12345", b"6789"])
+        session = _Session(
+            {"/trade-api/v2/search/filters_by_sport": [response]}
+        )
+        transport = _transport(session)
+
+        with patch.object(catalog, "_MAXIMUM_BODY_BYTES", 8), self.assertRaisesRegex(
+            ValueError,
+            "kalshi_catalog_body_too_large",
+        ):
+            transport.get_sports_filters()
+
+        self.assertEqual(session.calls[0]["stream"], True)
+        self.assertEqual(response.close_count, 1)
+
+    def test_catalog_primary_error_wins_and_successful_close_error_halts(
+        self,
+    ) -> None:
+        """Catches response cleanup hiding evidence or failing silently."""
+
+        from inci_tennis_io import kalshi_shadow_catalog as catalog
+
+        oversized = _StreamingResponse(
+            [b"12345", b"6789"],
+            close_error=OSError("close failed"),
+        )
+        with patch.object(catalog, "_MAXIMUM_BODY_BYTES", 8), self.assertRaisesRegex(
+            ValueError,
+            "kalshi_catalog_body_too_large",
+        ):
+            _transport(
+                _Session(
+                    {"/trade-api/v2/search/filters_by_sport": [oversized]}
+                )
+            ).get_sports_filters()
+        self.assertEqual(oversized.close_count, 1)
+
+        payload = json.dumps(
+            _base_pages()["/trade-api/v2/search/filters_by_sport"][0],
+            separators=(",", ":"),
+        ).encode("utf-8")
+        valid = _StreamingResponse(
+            [payload],
+            close_error=OSError("close failed"),
+        )
+        with self.assertRaisesRegex(ValueError, "kalshi_catalog_close_invalid"):
+            _transport(
+                _Session({"/trade-api/v2/search/filters_by_sport": [valid]})
+            ).get_sports_filters()
+        self.assertEqual(valid.close_count, 1)
+
     def test_public_pacing_and_429_retry_remain_bounded_for_direct_census(self) -> None:
         """Catches unbounded metadata retries or a post-census pacing delay."""
 
         pages = _base_pages()
         first = pages["/trade-api/v2/search/filters_by_sport"][0]
+        first_limit = _Response({}, status=429)
+        second_limit = _Response({}, status=429)
         pages["/trade-api/v2/search/filters_by_sport"] = [
-            _Response({}, status=429), _Response({}, status=429), first,
+            first_limit,
+            second_limit,
+            first,
         ]
         transport = _transport(_Session(pages))
         sleeps: list[float] = []
@@ -464,6 +596,10 @@ class KalshiShadowCatalogTests(unittest.TestCase):
         transport.discover_tennis_catalog(now=_NOW)
 
         self.assertEqual(sleeps, [0.25, 0.5, 0.05, 0.05, 0.05])
+        self.assertEqual(
+            (first_limit.close_count, second_limit.close_count),
+            (1, 1),
+        )
 
     def test_invalid_sibling_groups_are_excluded_without_dropping_valid_games(self) -> None:
         """Catches accepting partial, MVE, scalar, or duplicate-player game groups."""

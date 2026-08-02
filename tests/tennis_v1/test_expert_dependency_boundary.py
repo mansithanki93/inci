@@ -79,7 +79,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "44ec46b550a48c0d8a7e456b4620f044123b91ce1f330a1c4b0b75680090b2df"
         ),
         "kalshi_shadow_catalog.py": (
-            "5debd49b92121118d6a286853eeb34c648c3ec399faeb4fa85315808d8947aaf"
+            "7e6baa8087dfa422c5d93aadc485ba3e884f590fd56e3924c2a88403f8b4035d"
         ),
         "kalshi_shadow_settlement.py": (
             "00128b2f077dae03c0a62a4c28fa60cd2f704899c50852b13a895c4c6dd7b954"
@@ -124,7 +124,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "711a2704dc2c873fe166c0704f79f7f47066bf098f6845fc15990f1a1836441f"
         ),
         "shadow_match_chooser.py": (
-            "83932fea390e7a9ebc5cce7667b825fe95af102a3ab7c0049049be4f5d622cbc"
+            "eac1f6b69b7e398c4c14c2e44c37e3f3ea0f09ec1b448c37280cdd48ab4d6184"
         ),
         "shadow_provider_coverage.py": (
             "960a386abe0ee85000f522b6f3438bc4b3e42c3e2c095b4913fa9ccd38515cec"
@@ -133,7 +133,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "7a0757de48b66bd28f0547f2574216a2408a88b70fdf2e259776e067b6aa261f"
         ),
         "sportradar_trial_v3.py": (
-            "7b21180a3ccf4129c080eae744cc35f3dc590befd28b6b1837afd3bae7d1efeb"
+            "7cf66a643ec0e15694022ae3f224d9347b25d8fcacbb93c07bcb6325ec96d90d"
         ),
     },
     "inci_tennis_runtime": {
@@ -951,6 +951,14 @@ TASK7_RUNTIME_EXPERT_IMPORTS = {
         }
     ),
 }
+TASK8_OBSERVATION_ONLY_RUNTIME_FILES = frozenset(
+    {
+        "live_price_only_collector.py",
+        "live_shadow_cli.py",
+        "live_shadow_collector.py",
+        "shadow_settlement_cli.py",
+    }
+)
 
 FROZEN_ROOT_V6_IMPORT_ROOTS = frozenset(
     Path(relative_path).stem
@@ -2820,6 +2828,13 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
                     f"{filename}:runtime_io_import_forbidden:{module}"
                 )
             if (
+                filename in TASK8_OBSERVATION_ONLY_RUNTIME_FILES
+                and module.startswith("inci_tennis_expert.")
+            ):
+                raise ExpertBoundaryViolation(
+                    f"{filename}:runtime_expert_import_forbidden:{module}"
+                )
+            if (
                 filename in TASK7_RUNTIME_EXPERT_IMPORTS
                 and module.startswith("inci_tennis_expert.")
                 and module not in scoped_expert_imports
@@ -3323,6 +3338,38 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                     package_name=package_name,
                     filename=filename,
                 )
+
+    def test_task8_observation_runtime_rejects_expert_authority_after_reseal(
+        self,
+    ) -> None:
+        """Catches a seal refresh approving synchronization authority."""
+
+        source = """
+            from inci_tennis_expert.synchronizer import (
+                validate_synchronization_transition,
+            )
+
+            def collect(*args, **kwargs):
+                return validate_synchronization_transition(*args, **kwargs)
+        """
+        normalized = textwrap.dedent(source)
+        expected = EXPECTED_PACKAGE_AST_SHA256["inci_tennis_runtime"]
+        for filename in sorted(TASK8_OBSERVATION_ONLY_RUNTIME_FILES):
+            with self.subTest(filename=filename):
+                original = expected[filename]
+                expected[filename] = canonical_ast_sha256(normalized, filename)
+                try:
+                    with self.assertRaisesRegex(
+                        ExpertBoundaryViolation,
+                        "runtime_expert_import_forbidden",
+                    ):
+                        check_source(
+                            normalized,
+                            package_name="inci_tennis_runtime",
+                            filename=filename,
+                        )
+                finally:
+                    expected[filename] = original
 
     def test_task7_adapters_reject_unreviewed_phase_one_bindings(self) -> None:
         added_import = (

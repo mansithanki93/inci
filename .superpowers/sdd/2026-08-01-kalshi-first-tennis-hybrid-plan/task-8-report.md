@@ -249,3 +249,42 @@ was performed.
   evidence or settlement root; external immutable archival remains required.
 - Historical CSV evidence already tracked on the inherited branch is
   preserved. Task 8 neither stages nor removes runtime evidence.
+
+## Independent review and remediation
+
+The Task-8 and whole-branch adversarial reviews found no Critical issue and
+five Important gaps. All were reproduced before correction:
+
+- finalized-void and post-final supersession semantics were described
+  incorrectly, and the settlement exit-code contract was omitted;
+- exactly sealed observation-only runtime files could acquire expert
+  synchronization imports during a seal refresh;
+- the initial network sentinel left raw datagram/server/DNS paths and
+  import-time test loading outside its denial window;
+- the Kalshi catalog buffered an unbounded response before applying its
+  advertised 8 MiB cap;
+- a duplicate provider ID rejected by the row-isolating parser could leave its
+  first row selectable as `VERIFIED` in the resolver.
+
+Regression tests first failed on each exact path. The fixes now bind rejected
+provider rows to any strict stable ID they expose, convert a linked duplicate
+identity to non-selectable `CONFLICT`, stream/cap/close every catalog response,
+install the network sentinel before test-module loading, deny raw
+datagram/server/DNS paths, and reject expert imports for the four
+observation-only runtime modules even after their AST digests are refreshed.
+The broad row-level `KeyError` catch noted in Task 1 was also removed.
+
+Post-remediation verification:
+
+- hybrid, settlement, source-audit, and sentinel suite: `328/328` OK;
+- root suite: `202/202` PASS;
+- expert contracts: `84/84` OK;
+- expert journal/store: `114/114` OK;
+- passing dependency-boundary subset: `42/42` OK;
+- full boundary: `43` tests with only the unchanged
+  `tennis_v1/ingress.py:new_package_import_forbidden` error;
+- `pip check` and `git diff --check`: clean.
+
+The remediation still has no order, portfolio, signal, P&L, demo, or live
+execution authority. A fresh scoped re-review and whole-branch re-review are
+required before push.

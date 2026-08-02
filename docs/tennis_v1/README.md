@@ -88,6 +88,8 @@ session for the remaining duration. No provider score, reducer, book, or
 generation state is carried forward, and earlier verified rows are not
 relabeled. Kalshi, catalog, projection, identity, evidence, terminal, cleanup,
 unknown, or falsely provider-coded failures halt without failover.
+If verified failover leaves fewer than ten seconds, the collector halts instead
+of opening a price-only session.
 
 Provider quota is staged. Discovery reserves at most one call. A selected
 `PRICE_ONLY` row reserves no collection-provider calls. A selected `VERIFIED`
@@ -111,12 +113,15 @@ python -m inci_tennis_runtime.shadow_settlement_cli \
 ```
 
 The command uses only fixed public Kalshi Market GETs and prints `pending`,
-`final`, or `conflict`. Nonfinal, disputed, amended, void, or incomplete
-evidence stays pending and writes nothing. Only finalized Kalshi evidence is
-eligible for an append: complementary binary results yield `final`, while
-contradictory finalized results yield `conflict`. Raw Market responses and
-the label row are append-only. Changed evidence after a durable final is a
-permanent conflict; it cannot supersede that final. The exact sidecar root is
+`final`, or `conflict`. An initial reconciliation with either Market in a
+recognized non-final status is `pending` and writes nothing. After both Markets
+are finalized, a syntactically admitted `void`, semantically invalid, or
+noncomplementary result is a durable `conflict`. Only complementary finalized
+binary results yield `final`. Raw Market responses and the label row are
+append-only. Any changed normalized evidence after a durable final appends a
+permanent conflict that supersedes the prior row without erasing it. Exit codes
+are `0` for a result or help, `1` for a halt, `2` for usage, and `130` for an
+interrupt. The exact sidecar root is
 `Path(pwd.getpwuid(os.getuid()).pw_dir) / '.local/state/inci/tennis-shadow-settlement'`,
 shown to operators as `~/.local/state/inci/tennis-shadow-settlement`. It is
 explicitly not `HOME`-configurable.

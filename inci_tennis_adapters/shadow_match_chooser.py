@@ -659,7 +659,18 @@ def _hybrid_provider_diagnostics(
         return ()
     for diagnostic in provider.diagnostics:
         if type(diagnostic) is SportradarHybridDiagnostic:
-            diagnostics.append(f"provider_diagnostic:{diagnostic.index}:{diagnostic.code}")
+            identity = diagnostic.provider_match_id
+            if identity is None:
+                diagnostics.append(
+                    f"provider_diagnostic:{diagnostic.index}:{diagnostic.code}"
+                )
+            elif _provider_identity(identity) == identity:
+                diagnostics.append(
+                    "provider_diagnostic:"
+                    f"{diagnostic.index}:{diagnostic.code}:{identity}"
+                )
+            else:
+                diagnostics.append("provider_diagnostic:invalid")
         else:
             diagnostics.append("provider_diagnostic:invalid")
     for index, (match, _) in enumerate(provider_entries):
@@ -815,6 +826,22 @@ def resolve_hybrid_shadow_matches(
         provider_ids.setdefault(candidate.identity, []).append(index)
         provider_pairs.setdefault(candidate.pair, []).append(index)
     provider_conflicts: dict[int, set[str]] = {}
+    diagnostic_provider_ids = {
+        diagnostic.provider_match_id
+        for diagnostic in (() if provider is None else provider.diagnostics)
+        if type(diagnostic) is SportradarHybridDiagnostic
+        and diagnostic.provider_match_id is not None
+        and _provider_identity(diagnostic.provider_match_id)
+        == diagnostic.provider_match_id
+    }
+    for index, (_, candidate) in enumerate(provider_entries):
+        if (
+            candidate is not None
+            and candidate.identity in diagnostic_provider_ids
+        ):
+            provider_conflicts.setdefault(index, set()).add(
+                "provider_duplicate_id"
+            )
     for indexes in provider_ids.values():
         if len(indexes) > 1:
             for index in indexes:
