@@ -391,6 +391,15 @@ class PriceOnlyShadowCollector:
             raise exhausted from last_error
         raise exhausted
 
+    async def _disconnect_and_reconnect(self) -> None:
+        self._books = self._empty_books()
+        self._kalshi_status = "disconnected"
+        self._projector.disconnect(self._kalshi_generation)
+        self._kalshi_generation = None
+        self._kalshi_sequence = None
+        await self._append_observation("kalshi_stream_disconnected")
+        await self._reconnect()
+
     async def _receive(self, timeout_seconds: float) -> None:
         try:
             frame = await self._kalshi.receive_one(timeout_seconds)
@@ -402,13 +411,7 @@ class PriceOnlyShadowCollector:
                 return
             if code in _TERMINAL_KALSHI_CODES:
                 raise ShadowCollectorError(code) from error
-            self._books = self._empty_books()
-            self._kalshi_status = "disconnected"
-            self._projector.disconnect(self._kalshi_generation)
-            self._kalshi_generation = None
-            self._kalshi_sequence = None
-            await self._append_observation("kalshi_stream_disconnected")
-            await self._reconnect()
+            await self._disconnect_and_reconnect()
             return
 
         reference, persistence_cancellation = await _durable_to_thread_result(
@@ -465,13 +468,22 @@ class PriceOnlyShadowCollector:
             }
         else:
             self._books = self._empty_books()
+        await self._append_observation(projection.reason)
         if projection.snapshot_needed:
             assert projection.subscription_id is not None
-            receipt = await self._kalshi.request_snapshot(
-                projection.subscription_id
-            )
+            try:
+                receipt = await self._kalshi.request_snapshot(
+                    projection.subscription_id
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                code = _error_code(error)
+                if code in _TERMINAL_KALSHI_CODES:
+                    raise ShadowCollectorError(code) from error
+                await self._disconnect_and_reconnect()
+                return
             self._projector.snapshot_requested(receipt)
-        await self._append_observation(projection.reason)
 
     async def _finalize(
         self,

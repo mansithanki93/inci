@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 from dataclasses import replace
 from hashlib import sha256
 import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import threading
 import unittest
@@ -82,12 +84,16 @@ class _Transport:
         *,
         open_failures: set[int] | None = None,
         close_failures: set[int] | None = None,
+        snapshot_failures: set[int] | None = None,
     ) -> None:
         self.clock = clock
         self.outcomes = list(outcomes)
         self.events = [] if events is None else events
         self.open_failures = set() if open_failures is None else open_failures
         self.close_failures = set() if close_failures is None else close_failures
+        self.snapshot_failures = (
+            set() if snapshot_failures is None else snapshot_failures
+        )
         self.open_calls = 0
         self.subscribe_calls = 0
         self.close_calls = 0
@@ -120,6 +126,8 @@ class _Transport:
     async def request_snapshot(self, sid: int) -> object:
         self.events.append("snapshot")
         self.snapshot_requests.append(sid)
+        if len(self.snapshot_requests) in self.snapshot_failures:
+            raise _CodedError("kalshi_ws_snapshot_failed")
         return SimpleNamespace(
             request_id=100 + len(self.snapshot_requests),
             physical_connection_generation=self.open_calls,
@@ -316,6 +324,24 @@ class PriceOnlyCollectorPublicApiTests(unittest.TestCase):
     def test_public_constructor_and_state_have_no_provider_shape(self) -> None:
         """Catches coupling the independent collector back to a score feed."""
 
+        source = Path(inspect.getfile(PriceOnlyShadowCollector)).read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+        imported_modules = tuple(
+            node.module or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        ) + tuple(
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
+        for module in imported_modules:
+            lowered = module.casefold()
+            for forbidden in ("provider", "trial", "sportradar"):
+                self.assertNotIn(forbidden, lowered, module)
         parameters = inspect.signature(PriceOnlyShadowCollector).parameters
         self.assertEqual(
             tuple(parameters),
@@ -419,7 +445,6 @@ class PriceOnlyShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
         transport = _Transport(clock, [frame], events)
         evidence = _Evidence(events)
         projector = _Projector(lambda _: _projection(), events)
-        provider_calls: list[object] = []
         collector = _collector(
             clock=clock,
             transport=transport,
@@ -435,9 +460,43 @@ class PriceOnlyShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
         for later in ("project", "observation", "render"):
             self.assertLess(events.index("persist"), events.index(later))
         self.assertLess(events.index("observation"), events.index("render"))
-        self.assertEqual(provider_calls, [])
         self.assertEqual(evidence.sessions, [_session()])
         self.assertEqual(evidence.terminals[-1]["reason"], "duration_elapsed")
+
+    async def test_injected_ports_never_probe_provider_or_trial_state(self) -> None:
+        """Catches hidden provider access through an otherwise neutral port."""
+
+        forbidden_accesses: list[str] = []
+
+        class TrapMixin:
+            def __getattr__(self, name: str) -> object:
+                if any(
+                    token in name.casefold()
+                    for token in ("provider", "trial", "sportradar")
+                ):
+                    forbidden_accesses.append(name)
+                    raise AssertionError(f"forbidden dependency access: {name}")
+                raise AttributeError(name)
+
+        class TrapTransport(TrapMixin, _Transport):
+            pass
+
+        class TrapProjector(TrapMixin, _Projector):
+            pass
+
+        class TrapEvidence(TrapMixin, _Evidence):
+            pass
+
+        clock = _Clock()
+        result = await _collector(
+            clock=clock,
+            transport=TrapTransport(clock, [_Frame(b"neutral", clock)]),
+            projector=TrapProjector(lambda _: _projection()),
+            evidence=TrapEvidence(),
+        ).run(duration_seconds=10)
+
+        self.assertEqual(result, "duration_elapsed")
+        self.assertEqual(forbidden_accesses, [])
 
     async def test_real_projector_holds_aggregate_two_book_barrier(self) -> None:
         """Catches exposing one ticker before both complete books are ready."""
@@ -603,6 +662,62 @@ class PriceOnlyShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(gap.market_b.yes_bid)
         self.assertEqual(transport.snapshot_requests, [27])
         self.assertEqual(len(projector.snapshots), 1)
+        self.assertEqual(projector.snapshots[0].request_id, 101)
+        self.assertEqual(projector.snapshots[0].command, "get_snapshot")
+
+    async def test_snapshot_failure_observes_gap_then_recovers_transport(self) -> None:
+        """Catches snapshot I/O orphaning an already durable raw frame."""
+
+        events: list[str] = []
+        clock = _Clock()
+        evidence = _Evidence(events)
+        transport = _Transport(
+            clock,
+            [_Frame(b"gap", clock)],
+            events,
+            snapshot_failures={1},
+        )
+        projector = _Projector(
+            lambda _: _projection(
+                status="gap",
+                reason="kalshi_sequence_gap",
+                sequence=4,
+                sid=73,
+                snapshot_needed=True,
+            ),
+            events,
+        )
+
+        result = await _collector(
+            clock=clock,
+            transport=transport,
+            projector=projector,
+            evidence=evidence,
+            render=lambda _: events.append("render"),
+        ).run(duration_seconds=10)
+
+        self.assertEqual(result, "duration_elapsed")
+        self.assertEqual(len(evidence.frames), 1)
+        self.assertLess(events.index("persist"), events.index("project"))
+        self.assertLess(events.index("project"), events.index("observation"))
+        self.assertLess(events.index("observation"), events.index("render"))
+        self.assertLess(events.index("render"), events.index("snapshot"))
+        self.assertEqual(transport.snapshot_requests, [73])
+        self.assertEqual(
+            [row.reason for row in evidence.observations[:3]],
+            [
+                "kalshi_sequence_gap",
+                "kalshi_stream_disconnected",
+                "kalshi_reconnected",
+            ],
+        )
+        gap = evidence.observations[0]
+        self.assertEqual(gap.kalshi_status, "gap")
+        self.assertIsNone(gap.market_a.yes_bid)
+        self.assertIsNone(gap.market_b.yes_bid)
+        self.assertEqual(projector.disconnects, [1])
+        self.assertEqual((transport.open_calls, transport.subscribe_calls), (2, 2))
+        self.assertEqual(clock.pauses, [1.0])
 
     async def test_duplicate_out_of_order_and_ignored_clear_both_books(self) -> None:
         """Catches any noncandidate projection leaking stale prices."""
