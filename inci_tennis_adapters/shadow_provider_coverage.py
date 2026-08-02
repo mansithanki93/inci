@@ -12,7 +12,12 @@ from inci_tennis_adapters.sportradar_trial_v3 import (
 )
 
 
-_REGISTRY_VERSION = "kalshi-first-provider-coverage-v1"
+_REGISTRY_VERSION = "kalshi-first-provider-coverage-v2"
+_KALSHI_SPORT = "Tennis"
+_KALSHI_SCOPE = "Games"
+_KALSHI_MILESTONE_TYPE = "tennis_tournament_singles"
+_PROVIDER_SPORT_ID = "sr:sport:5"
+_PROVIDER_SPORT_NAME = "Tennis"
 _SUPPORTED_RULES = (
     ("KXATP", "sr:category:3", "singles", "ATP"),
     ("KXCHALLENGER", "sr:category:72", "singles", "Challenger"),
@@ -46,6 +51,13 @@ def coverage_registry_sha256_for_tables(
         "provider_id": "sportradar",
         "supported": [list(rule) for rule in sorted(supported)],
         "unsupported": [list(rule) for rule in sorted(unsupported)],
+        "verification_gates": {
+            "kalshi_milestone_type": _KALSHI_MILESTONE_TYPE,
+            "kalshi_scope": _KALSHI_SCOPE,
+            "kalshi_sport": _KALSHI_SPORT,
+            "provider_sport_id": _PROVIDER_SPORT_ID,
+            "provider_sport_name": _PROVIDER_SPORT_NAME,
+        },
         "version": _REGISTRY_VERSION,
     }
     return sha256(
@@ -77,9 +89,20 @@ def assess_provider_route(
             "unclassified", "coverage_input_invalid", None
         )
     provenance = game.provenance
-    if provenance.sport != "Tennis" or provenance.scope != "Games":
+    if provenance.sport != _KALSHI_SPORT or provenance.scope != _KALSHI_SCOPE:
         return ProviderCoverageAssessment(
             "unclassified", "kalshi_provenance_unclassified", None
+        )
+    if provenance.milestone_type != _KALSHI_MILESTONE_TYPE:
+        return ProviderCoverageAssessment(
+            "unclassified", "kalshi_milestone_type_price_only", None
+        )
+    if (
+        provider.sport_id != _PROVIDER_SPORT_ID
+        or provider.sport_name != _PROVIDER_SPORT_NAME
+    ):
+        return ProviderCoverageAssessment(
+            "unclassified", "provider_sport_unclassified", None
         )
     key = (
         provenance.series_ticker,

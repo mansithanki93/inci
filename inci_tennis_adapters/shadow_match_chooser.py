@@ -477,11 +477,24 @@ def resolve_shadow_matches(
     )
 
 
-_HYBRID_RESOLVER_VERSION = "kalshi-first-hybrid-v1"
+_HYBRID_RESOLVER_VERSION = "kalshi-first-hybrid-v2"
 _START_WINDOW_NS = 900_000_000_000
 _PROVIDER_MAX_AHEAD_NS = 5_000_000_000
 _PROVIDER_MAX_AGE_NS = 60_000_000_000
-_PRESTART_PROVIDER_STATUSES = frozenset({"not_started", "scheduled"})
+_LIVE_PROVIDER_MATCH_STATUSES = frozenset(
+    {"1st_set", "2nd_set", "3rd_set", "4th_set", "5th_set"}
+)
+_PRICE_ONLY_PROVIDER_STATUS_PAIRS = frozenset(
+    {
+        ("delayed", "start_delayed"),
+        ("interrupted", "interrupted"),
+        ("started", "started"),
+        ("suspended", "suspended"),
+        ("not_started", "not_started"),
+        ("not_started", "start_delayed"),
+        ("match_about_to_start", "match_about_to_start"),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -537,6 +550,7 @@ def _hybrid_game_candidate(game: object) -> _HybridGameCandidate | None:
             for value in (
                 provenance.sport,
                 provenance.scope,
+                provenance.milestone_type,
                 provenance.series_ticker,
                 provenance.milestone_id,
             )
@@ -549,6 +563,11 @@ def _hybrid_game_candidate(game: object) -> _HybridGameCandidate | None:
         )
         or provenance.queried_competitions
         != tuple(sorted(set(provenance.queried_competitions)))
+        or provenance.milestone_type
+        not in {
+            "tennis_tournament_singles",
+            "tennis_tournament_doubles",
+        }
         or provenance.milestone_league is not None
         and not _valid_identity_text(provenance.milestone_league)
     ):
@@ -615,10 +634,13 @@ def _hybrid_provider_identity(match: object) -> str:
 
 def _hybrid_provider_status(candidate: _HybridProviderCandidate) -> str:
     score = candidate.score
-    if score.status == "live" and score.match_status == "live":
+    if (
+        score.status == "live"
+        and score.match_status in _LIVE_PROVIDER_MATCH_STATUSES
+    ):
         return "live"
-    if score.status in _PRESTART_PROVIDER_STATUSES and score.match_status in _PRESTART_PROVIDER_STATUSES:
-        return "prestart"
+    if (score.status, score.match_status) in _PRICE_ONLY_PROVIDER_STATUS_PAIRS:
+        return "price_only"
     return "contradictory"
 
 
@@ -663,6 +685,7 @@ def _hybrid_game_projection(game: HybridKalshiShadowGame) -> dict[str, object]:
         "provenance": {
             "milestone_id": game.provenance.milestone_id,
             "milestone_league": game.provenance.milestone_league,
+            "milestone_type": game.provenance.milestone_type,
             "queried_competitions": list(game.provenance.queried_competitions),
             "scope": game.provenance.scope,
             "series_ticker": game.provenance.series_ticker,
@@ -949,7 +972,7 @@ def resolve_hybrid_shadow_matches(
                         )
                     live_edges.setdefault(provider_index, []).append(game_index)
                     game_live_edges.setdefault(game_index, []).append(provider_index)
-                elif status == "prestart":
+                elif status == "price_only":
                     game_price_reasons.setdefault(game_index, set()).add("provider_not_live")
                 else:
                     game_provider_conflicts.setdefault(game_index, set()).add(

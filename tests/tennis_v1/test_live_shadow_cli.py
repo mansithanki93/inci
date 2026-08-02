@@ -43,14 +43,14 @@ def _live_payload(*, include_second: bool = True) -> bytes:
                         "name": "Washington",
                         "type": "singles",
                         "gender": "men",
-                        "level": "professional",
+                        "level": "atp_500",
                     },
                     "mode": {"best_of": 3},
                 },
             },
             "sport_event_status": {
                 "status": "live",
-                "match_status": "live",
+                "match_status": "1st_set",
                 "home_score": 0,
                 "away_score": 0,
                 "period_scores": [],
@@ -136,6 +136,7 @@ def _hybrid_game(
     away: str = "Player Away",
     start_wall_ns: int = 1_785_607_200_000_000_000,
     initial_book_state: str = "two_sided",
+    milestone_type: str = "tennis_tournament_singles",
 ) -> object:
     from inci_tennis_adapters.shadow_discovery_contracts import (
         KalshiCompetitionProvenance,
@@ -146,6 +147,7 @@ def _hybrid_game(
     provenance = KalshiCompetitionProvenance(
         sport="Tennis",
         scope="Games",
+        milestone_type=milestone_type,
         queried_competitions=("ATP",),
         series_ticker="KXATP",
         milestone_id="milestone-1",
@@ -995,6 +997,33 @@ class LiveShadowCliTests(unittest.TestCase):
         self.assertEqual(catalog.calls, 1)
         self.assertEqual(forbidden, [])
         self.assertIn("shadow_selection_identity_changed", errors.getvalue())
+
+    def test_selection_identity_commits_to_exact_kalshi_milestone_type(self) -> None:
+        """Catches singles and doubles choices sharing one selection identity."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            HybridMatchRow,
+            HybridStatus,
+        )
+        from inci_tennis_runtime.live_shadow_cli import _row_identity
+
+        def row(milestone_type: str) -> HybridMatchRow:
+            game = _hybrid_game(milestone_type=milestone_type)
+            return HybridMatchRow(
+                status=HybridStatus.PRICE_ONLY,
+                game=game,
+                market_tickers=tuple(
+                    market.ticker for market in game.markets
+                ),
+                provider_match=None,
+                reason="provider_not_attested",
+                selectable=True,
+            )
+
+        self.assertNotEqual(
+            _row_identity(row("tennis_tournament_singles")),
+            _row_identity(row("tennis_tournament_doubles")),
+        )
 
     def test_verified_provider_halt_links_fresh_price_session_for_remainder(self) -> None:
         """Catches failover reusing score state or an unbound verified terminal."""

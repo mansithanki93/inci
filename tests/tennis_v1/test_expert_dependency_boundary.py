@@ -79,7 +79,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "dcfad924e5a8a89c2e666eb048284ee57e5258b7c903b17483480f994954a532"
         ),
         "kalshi_shadow_catalog.py": (
-            "333ec550bd9cc1bd28ab61ea93b5ba26499fad570515314a9505337cb2aea0a4"
+            "d8a938f19b20ed403c5a663b06bb27341568fdd9fcd45bee27c9bbd9582a25c5"
         ),
         "kalshi_shadow_settlement.py": (
             "d08a3c297aa901a98b47f57c15f29259475bb1395b9879f07b2d7d80f33462e3"
@@ -121,19 +121,19 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "14e534fd3762d5d6198b1de8762568497bcf1c807fd56177942dab8f4de59229"
         ),
         "shadow_discovery_contracts.py": (
-            "8c3569be814936575cbaae81d0be5796ff9b5953acf5c03644faef136b12257c"
+            "6df84030c62fc1d7b9336cb7430f1f84c0ee4f3fe8eae25d898c040f55f6eff9"
         ),
         "shadow_match_chooser.py": (
-            "12dc4373029cfcc88f28f69abc5ba6553ca062c3a80bdb549394bb46fbd6b9fd"
+            "ec75919e93698402ad57b057e4f85fc47ec5ce5d5902860fc4a84a6c53f7b665"
         ),
         "shadow_provider_coverage.py": (
-            "960a386abe0ee85000f522b6f3438bc4b3e42c3e2c095b4913fa9ccd38515cec"
+            "0d56b4759aec2660949fc4a63666059b77686e9131b063b6eba9bc53604ec111"
         ),
         "sportradar_tennis_v3.py": (
             "7a0757de48b66bd28f0547f2574216a2408a88b70fdf2e259776e067b6aa261f"
         ),
         "sportradar_trial_v3.py": (
-            "4d9356fb5d2ce027e3b97af448286730c129d7e971f8bef8ee2920c239025d03"
+            "f8977e0577f5ac2406b67944ec81e3d0b0a8fc0623fee5b1dd430736db206b39"
         ),
     },
     "inci_tennis_runtime": {

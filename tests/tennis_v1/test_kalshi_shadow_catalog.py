@@ -71,7 +71,7 @@ def _milestone(
     return {
         "id": identity,
         "category": "Sports",
-        "type": "game",
+        "type": "tennis_tournament_singles",
         "start_date": "2026-07-26T18:00:00Z",
         "title": "Washington match",
         "details": {
@@ -334,12 +334,86 @@ class KalshiShadowCatalogTests(unittest.TestCase):
             [_EVENT],
         )
         self.assertEqual(
+            snapshot.games[0].provenance.milestone_type,
+            "tennis_tournament_singles",
+        )
+        self.assertEqual(
             [
                 call["params"]["competition"]
                 for call in session.calls
                 if urlsplit(str(call["url"])).path.endswith("/milestones")
             ],
             ["ATP Washington"],
+        )
+
+    def test_current_singles_milestone_type_is_admitted(self) -> None:
+        """Catches dropping current Kalshi singles matches before Event validation."""
+
+        milestone = _milestone()
+        milestone["type"] = "tennis_tournament_singles"
+
+        snapshot = _transport(
+            _Session(_base_pages(milestones=[milestone]))
+        ).discover_tennis_catalog(now=_NOW)
+
+        self.assertEqual(
+            [game.event_ticker for game in snapshot.games],
+            [_EVENT],
+        )
+        self.assertEqual(
+            snapshot.games[0].provenance.milestone_type,
+            "tennis_tournament_singles",
+        )
+
+    def test_unknown_tennis_milestone_type_remains_outside_the_catalog(self) -> None:
+        """Catches an unknown milestone type bypassing the exact match allowlist."""
+
+        milestone = _milestone()
+        milestone["type"] = "tennis_future_unknown"
+
+        snapshot = _transport(
+            _Session(_base_pages(milestones=[milestone]))
+        ).discover_tennis_catalog(now=_NOW)
+
+        self.assertEqual(snapshot.games, ())
+        self.assertEqual(snapshot.excluded, ())
+
+    def test_catalog_digest_commits_to_exact_milestone_type(self) -> None:
+        """Catches singles and doubles provenance collapsing to one catalog digest."""
+
+        singles = _milestone()
+        doubles = _milestone()
+        doubles["type"] = "tennis_tournament_doubles"
+
+        singles_snapshot = _transport(
+            _Session(_base_pages(milestones=[singles]))
+        ).discover_tennis_catalog(now=_NOW)
+        doubles_snapshot = _transport(
+            _Session(_base_pages(milestones=[doubles]))
+        ).discover_tennis_catalog(now=_NOW)
+
+        self.assertNotEqual(
+            singles_snapshot.catalog_sha256,
+            doubles_snapshot.catalog_sha256,
+        )
+
+    def test_current_doubles_milestone_type_is_admitted(self) -> None:
+        """Catches dropping current Kalshi doubles match-winner evidence."""
+
+        milestone = _milestone()
+        milestone["type"] = "tennis_tournament_doubles"
+
+        snapshot = _transport(
+            _Session(_base_pages(milestones=[milestone]))
+        ).discover_tennis_catalog(now=_NOW)
+
+        self.assertEqual(
+            [game.event_ticker for game in snapshot.games],
+            [_EVENT],
+        )
+        self.assertEqual(
+            snapshot.games[0].provenance.milestone_type,
+            "tennis_tournament_doubles",
         )
 
     def test_each_rejected_expected_event_has_stable_identity_and_provenance(self) -> None:

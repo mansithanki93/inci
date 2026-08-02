@@ -107,6 +107,24 @@ _EVENT_KEYS = frozenset(
         "updated_time",
     }
 )
+_HYBRID_ROW_DIAGNOSTIC_CODES = frozenset(
+    {
+        "sportradar_competitors_invalid",
+        "sportradar_duplicate_match",
+        "sportradar_generated_time_mismatch",
+        "sportradar_identifier_invalid",
+        "sportradar_live_summary_schema_unknown",
+        "sportradar_match_format_unknown",
+        "sportradar_match_status_unknown",
+        "sportradar_period_scores_invalid",
+        "sportradar_point_state_invalid",
+        "sportradar_server_invalid",
+        "sportradar_status_unknown",
+        "sportradar_summary_schema_unknown",
+        "sportradar_timestamp_invalid",
+        "sportradar_wire_contract_invalid",
+    }
+)
 
 
 class SportradarWireContractError(ValueError):
@@ -287,9 +305,9 @@ class SportradarCompetitionProvenance:
     category_name: str
     competition_id: str
     competition_name: str
-    competition_type: str
-    gender: str
-    level: str
+    competition_type: str | None
+    gender: str | None
+    level: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,9 +567,11 @@ def _hybrid_competition(
             competition.get("id"), _COMPETITION_ID
         ),
         competition_name=_text(competition.get("name")),
-        competition_type=_text(competition.get("type"), maximum=32),
-        gender=_text(competition.get("gender"), maximum=32),
-        level=_text(competition.get("level"), maximum=64),
+        competition_type=_optional_text(
+            competition.get("type"), maximum=32
+        ),
+        gender=_optional_text(competition.get("gender"), maximum=32),
+        level=_optional_text(competition.get("level"), maximum=64),
     )
 
 
@@ -609,11 +629,15 @@ def parse_live_summaries_for_hybrid(
                 )
             )
             seen_match_ids.add(score.provider_match_id)
-        except SportradarWireContractError:
+        except SportradarWireContractError as error:
             diagnostics.append(
                 SportradarHybridDiagnostic(
                     index=index,
-                    code="sportradar_wire_contract_invalid",
+                    code=(
+                        error.code
+                        if error.code in _HYBRID_ROW_DIAGNOSTIC_CODES
+                        else "sportradar_wire_contract_invalid"
+                    ),
                     provider_match_id=provider_match_id,
                 )
             )

@@ -134,7 +134,7 @@ def _hybrid_live_summaries_payload(*, include_bad_row: bool = False) -> bytes:
             "name": "Washington",
             "type": "singles",
             "gender": "men",
-            "level": "professional",
+            "level": "atp_500",
         },
         "mode": {"best_of": 3},
     }
@@ -236,8 +236,8 @@ class SportradarWireContractTests(unittest.TestCase):
 
         vectors = (
             ("match_about_to_start", "match_about_to_start"),
-            ("live", "live"),
-            ("closed", "closed"),
+            ("live", "1st_set"),
+            ("closed", "ended"),
         )
         for status, match_status in vectors:
             with self.subTest(status=status, match_status=match_status):
@@ -448,7 +448,7 @@ class SportradarWireContractTests(unittest.TestCase):
                 snapshot.diagnostics[0].index,
                 snapshot.diagnostics[0].code,
             ),
-            ("sr:category:3", 1, 1, "sportradar_wire_contract_invalid"),
+            ("sr:category:3", 1, 1, "sportradar_identifier_invalid"),
         )
         for invalid in (
             b"{",
@@ -462,6 +462,95 @@ class SportradarWireContractTests(unittest.TestCase):
                 SportradarWireContractError
             ):
                 parse_live_summaries_for_hybrid(invalid)
+
+    def test_hybrid_parser_preserves_allowlisted_row_failure_code(self) -> None:
+        """Catches diagnostics erasing a safe, actionable row-level cause."""
+
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            parse_live_summaries_for_hybrid,
+        )
+
+        document = json.loads(_hybrid_live_summaries_payload())
+        malformed = json.loads(json.dumps(document["summaries"][0]))
+        malformed["unexpected_contract_field"] = True
+        document["summaries"].append(malformed)
+
+        snapshot = parse_live_summaries_for_hybrid(
+            json.dumps(document, separators=(",", ":")).encode("utf-8")
+        )
+
+        self.assertEqual(len(snapshot.matches), 1)
+        self.assertEqual(
+            (
+                snapshot.diagnostics[0].provider_match_id,
+                snapshot.diagnostics[0].code,
+            ),
+            (
+                "sr:sport_event:123456",
+                "sportradar_live_summary_schema_unknown",
+            ),
+        )
+
+    def test_hybrid_parser_preserves_absent_optional_competition_metadata(
+        self,
+    ) -> None:
+        """Catches optional Sportradar competition fields rejecting valid rows."""
+
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            parse_live_summaries_for_hybrid,
+        )
+
+        for field, attribute in (
+            ("type", "competition_type"),
+            ("gender", "gender"),
+            ("level", "level"),
+        ):
+            with self.subTest(field=field):
+                document = json.loads(_hybrid_live_summaries_payload())
+                competition = document["summaries"][0]["sport_event"][
+                    "sport_event_context"
+                ]["competition"]
+                del competition[field]
+                snapshot = parse_live_summaries_for_hybrid(
+                    json.dumps(
+                        document,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+
+                self.assertEqual(len(snapshot.matches), 1)
+                self.assertEqual(snapshot.diagnostics, ())
+                self.assertIsNone(
+                    getattr(snapshot.matches[0].competition, attribute)
+                )
+
+    def test_hybrid_parser_still_requires_competition_identity(self) -> None:
+        """Catches optional metadata support weakening stable competition identity."""
+
+        from inci_tennis_adapters.sportradar_trial_v3 import (
+            parse_live_summaries_for_hybrid,
+        )
+
+        for field in ("id", "name"):
+            with self.subTest(field=field):
+                document = json.loads(_hybrid_live_summaries_payload())
+                competition = document["summaries"][0]["sport_event"][
+                    "sport_event_context"
+                ]["competition"]
+                del competition[field]
+                snapshot = parse_live_summaries_for_hybrid(
+                    json.dumps(
+                        document,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+
+                self.assertEqual(snapshot.matches, ())
+                self.assertEqual(len(snapshot.diagnostics), 1)
+                self.assertEqual(
+                    snapshot.diagnostics[0].provider_match_id,
+                    "sr:sport_event:123456",
+                )
 
     def test_hybrid_parser_sanitizes_deep_json_recursion_failure(self) -> None:
         """Catches a nested provider payload escaping as a raw RecursionError."""
@@ -505,7 +594,7 @@ class SportradarWireContractTests(unittest.TestCase):
             ),
             (
                 ["sr:sport_event:123456"],
-                [(1, "sportradar_wire_contract_invalid")],
+                [(1, "sportradar_period_scores_invalid")],
             ),
         )
 
@@ -536,7 +625,7 @@ class SportradarWireContractTests(unittest.TestCase):
                 [
                     (
                         1,
-                        "sportradar_wire_contract_invalid",
+                        "sportradar_duplicate_match",
                         "sr:sport_event:123456",
                     )
                 ],

@@ -28,6 +28,7 @@ class HybridStatus(str, Enum):
 class KalshiCompetitionProvenance:
     sport: str
     scope: str
+    milestone_type: str
     queried_competitions: tuple[str, ...]
     series_ticker: str
     milestone_id: str
@@ -36,7 +37,12 @@ class KalshiCompetitionProvenance:
     def __post_init__(self) -> None:
         keys = self.queried_competitions
         if (
-            type(keys) is not tuple
+            self.milestone_type
+            not in {
+                "tennis_tournament_singles",
+                "tennis_tournament_doubles",
+            }
+            or type(keys) is not tuple
             or not keys
             or any(type(key) is not str or not key for key in keys)
             or keys != tuple(sorted(set(keys)))

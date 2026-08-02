@@ -56,6 +56,12 @@ _MARKET_STATUSES = frozenset(
         "finalized",
     }
 )
+_TENNIS_MATCH_MILESTONE_TYPES = frozenset(
+    {
+        "tennis_tournament_singles",
+        "tennis_tournament_doubles",
+    }
+)
 
 
 class KalshiShadowCatalogError(ValueError):
@@ -427,6 +433,7 @@ def _catalog_digest(
         return None if value is None else {
             "sport": value.sport,
             "scope": value.scope,
+            "milestone_type": value.milestone_type,
             "queried_competitions": value.queried_competitions,
             "series_ticker": value.series_ticker,
             "milestone_id": value.milestone_id,
@@ -960,7 +967,8 @@ class KalshiShadowCatalogTransport:
                         raise ValueError("kalshi_catalog_schema_invalid")
                     seen_milestones[milestone_id] = milestone
                     if (
-                        milestone["type"] != "game"
+                        milestone["type"]
+                        not in _TENNIS_MATCH_MILESTONE_TYPES
                         or milestone["category"] != "Sports"
                     ):
                         continue
@@ -980,6 +988,7 @@ class KalshiShadowCatalogTransport:
                         raise ValueError("kalshi_catalog_schema_invalid")
                     expected = {
                         "milestone_id": milestone_id,
+                        "milestone_type": milestone["type"],
                         "scheduled_start_ts": start_ts,
                         "milestone_league": milestone["league"],
                         "queried_competitions": {competition},
@@ -1014,6 +1023,7 @@ class KalshiShadowCatalogTransport:
                 provenance = KalshiCompetitionProvenance(
                     sport=tennis,
                     scope="Games",
+                    milestone_type=expected["milestone_type"],
                     queried_competitions=tuple(sorted(expected["queried_competitions"])),
                     series_ticker=series_ticker,
                     milestone_id=expected["milestone_id"],

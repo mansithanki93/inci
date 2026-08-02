@@ -9,6 +9,7 @@ def _game(
     series_ticker: str = "KXATP",
     sport: str = "Tennis",
     scope: str = "Games",
+    milestone_type: str = "tennis_tournament_singles",
 ):
     from inci_tennis_adapters.shadow_discovery_contracts import (
         KalshiCompetitionProvenance,
@@ -20,6 +21,7 @@ def _game(
         provenance=KalshiCompetitionProvenance(
             sport=sport,
             scope=scope,
+            milestone_type=milestone_type,
             queried_competitions=("ATP Washington",),
             series_ticker=series_ticker,
             milestone_id="match-1",
@@ -40,14 +42,16 @@ def _provider(
     *,
     category_id: str,
     competition_type: str,
+    sport_id: str = "sr:sport:5",
+    sport_name: str = "Tennis",
 ):
     from inci_tennis_adapters.sportradar_trial_v3 import (
         SportradarCompetitionProvenance,
     )
 
     return SportradarCompetitionProvenance(
-        sport_id="sr:sport:5",
-        sport_name="Tennis",
+        sport_id=sport_id,
+        sport_name=sport_name,
         category_id=category_id,
         category_name="Tour",
         competition_id="sr:competition:1",
@@ -86,6 +90,15 @@ class ShadowProviderCoverageTests(unittest.TestCase):
         self.assertEqual(
             assess_provider_route(_game(), atp).authority_scope,
             "observation_only",
+        )
+        doubles = assess_provider_route(
+            _game(milestone_type="tennis_tournament_doubles"),
+            atp,
+        )
+        self.assertEqual(doubles.state, "unclassified")
+        self.assertEqual(
+            doubles.reason,
+            "kalshi_milestone_type_price_only",
         )
 
     def test_registry_routes_reviewed_and_denied_categories_without_wildcards(self) -> None:
@@ -136,6 +149,37 @@ class ShadowProviderCoverageTests(unittest.TestCase):
             ("unclassified", "kalshi_provenance_unclassified", None),
         )
 
+    def test_registry_rejects_non_tennis_provider_identity(self) -> None:
+        """Catches category/type metadata bypassing provider sport identity."""
+
+        from inci_tennis_adapters.shadow_provider_coverage import (
+            assess_provider_route,
+        )
+
+        for sport_id, sport_name in (
+            ("sr:sport:999", "Tennis"),
+            ("sr:sport:5", "Soccer"),
+        ):
+            with self.subTest(sport_id=sport_id, sport_name=sport_name):
+                assessment = assess_provider_route(
+                    _game(),
+                    _provider(
+                        category_id="sr:category:3",
+                        competition_type="singles",
+                        sport_id=sport_id,
+                        sport_name=sport_name,
+                    ),
+                )
+
+                self.assertEqual(
+                    (
+                        assessment.state,
+                        assessment.reason,
+                        assessment.canonical_tour,
+                    ),
+                    ("unclassified", "provider_sport_unclassified", None),
+                )
+
     def test_registry_digest_is_stable_for_rule_table_permutations(self) -> None:
         """Catches a semantically identical rule table changing its audit digest."""
 
@@ -161,7 +205,7 @@ class ShadowProviderCoverageTests(unittest.TestCase):
         self.assertRegex(coverage_registry_sha256(), r"^[0-9a-f]{64}$")
         self.assertEqual(
             coverage_registry_sha256(),
-            "b3d91969c11e709c0741210fca10420863eaf3936dba33f96d1ebff3f5f3c32e",
+            "bad294478bcfd0150e961ceaa2539b435aa1a4a72de63f29430abd1539aed81d",
         )
 
     def test_discovery_contracts_are_frozen_value_objects(self) -> None:
@@ -189,11 +233,30 @@ class ShadowProviderCoverageTests(unittest.TestCase):
                 KalshiCompetitionProvenance(
                     sport="Tennis",
                     scope="Games",
+                    milestone_type="tennis_tournament_singles",
                     queried_competitions=keys,
                     series_ticker="KXATP",
                     milestone_id="match-1",
                     milestone_league="ATP",
                 )
+
+    def test_competition_provenance_rejects_unknown_milestone_type(self) -> None:
+        """Catches unobserved Kalshi milestone types entering trusted provenance."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            KalshiCompetitionProvenance,
+        )
+
+        with self.assertRaises(ValueError):
+            KalshiCompetitionProvenance(
+                sport="Tennis",
+                scope="Games",
+                milestone_type="tennis_future_unknown",
+                queried_competitions=("ATP",),
+                series_ticker="KXATP",
+                milestone_id="match-1",
+                milestone_league="ATP",
+            )
 
 
 if __name__ == "__main__":

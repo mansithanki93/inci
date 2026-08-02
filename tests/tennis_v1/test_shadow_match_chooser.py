@@ -28,6 +28,11 @@ def score(
     status: str = "live",
     match_status: str | None = None,
 ) -> SportradarScoreSnapshot:
+    resolved_match_status = (
+        "1st_set"
+        if match_status is None and status == "live"
+        else status if match_status is None else match_status
+    )
     return SportradarScoreSnapshot(
         provider_match_id=match_id,
         generated_wall_ns=START,
@@ -38,7 +43,7 @@ def score(
         away_id="sr:competitor:2",
         away_name=away,
         status=status,
-        match_status=status if match_status is None else match_status,
+        match_status=resolved_match_status,
         sets_home=0,
         sets_away=0,
         games_home=0,
@@ -470,6 +475,7 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         away: str = "Grace Hopper",
         start: int = START,
         series: str = "KXATP",
+        milestone_type: str = "tennis_tournament_singles",
     ) -> object:
         from inci_tennis_adapters.shadow_discovery_contracts import (
             KalshiCompetitionProvenance,
@@ -481,6 +487,7 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             provenance=KalshiCompetitionProvenance(
                 sport="Tennis",
                 scope="Games",
+                milestone_type=milestone_type,
                 queried_competitions=("ATP Washington",),
                 series_ticker=series,
                 milestone_id=f"milestone-{event}",
@@ -509,7 +516,7 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         self,
         *,
         category: str = "sr:category:3",
-        competition_type: str = "singles",
+        competition_type: str | None = "singles",
     ) -> object:
         from inci_tennis_adapters.sportradar_trial_v3 import (
             SportradarCompetitionProvenance,
@@ -524,7 +531,7 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             competition_name="Washington",
             competition_type=competition_type,
             gender="men",
-            level="professional",
+            level="atp_500",
         )
 
     def discovery(
@@ -533,7 +540,7 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         digest: str = SHA_A,
         generated: int = START,
         category: str = "sr:category:3",
-        competition_type: str = "singles",
+        competition_type: str | None = "singles",
         diagnostics: tuple[object, ...] = (),
     ) -> object:
         from inci_tennis_adapters.sportradar_trial_v3 import (
@@ -630,6 +637,156 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         self.assertEqual(row.status, HybridStatus.VERIFIED)
         self.assertEqual(row.provider_match.home_player_name, "GRACE\u2003HOPPER")
         self.assertEqual(row.diagnostics, ())
+
+    def test_official_live_set_states_verify(self) -> None:
+        """Catches requiring the impossible Sportradar match_status=live pair."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        for match_status in (
+            "1st_set",
+            "2nd_set",
+            "3rd_set",
+            "4th_set",
+            "5th_set",
+        ):
+            with self.subTest(match_status=match_status):
+                discovery = self.discovery(
+                    score(
+                        "sr:1",
+                        status="live",
+                        match_status=match_status,
+                    )
+                )
+                row = self.resolve(
+                    self.catalog(self.game("KXATP-LIVE")),
+                    discovery,
+                    provider_state=self.fresh_state(discovery),
+                ).rows[0]
+
+                self.assertEqual(row.status, HybridStatus.VERIFIED)
+                self.assertTrue(row.selectable)
+                self.assertEqual(row.diagnostics, ())
+
+    def test_official_prestart_states_remain_price_only(self) -> None:
+        """Catches prestart lifecycle states being promoted or quarantined."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        for status, match_status in (
+            ("not_started", "not_started"),
+            ("not_started", "start_delayed"),
+            ("match_about_to_start", "match_about_to_start"),
+        ):
+            with self.subTest(status=status, match_status=match_status):
+                discovery = self.discovery(
+                    score(
+                        "sr:1",
+                        status=status,
+                        match_status=match_status,
+                    )
+                )
+                row = self.resolve(
+                    self.catalog(self.game("KXATP-PRESTART")),
+                    discovery,
+                    provider_state=self.fresh_state(discovery),
+                ).rows[0]
+
+                self.assertEqual(row.status, HybridStatus.PRICE_ONLY)
+                self.assertTrue(row.selectable)
+                self.assertIsNone(row.provider_match)
+
+    def test_official_nonterminal_pause_states_remain_price_only(self) -> None:
+        """Catches legitimate provider pauses being mislabeled conflicts."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        for status, match_status in (
+            ("started", "started"),
+            ("interrupted", "interrupted"),
+            ("suspended", "suspended"),
+            ("delayed", "start_delayed"),
+        ):
+            with self.subTest(status=status, match_status=match_status):
+                discovery = self.discovery(
+                    score(
+                        "sr:pause",
+                        status=status,
+                        match_status=match_status,
+                    )
+                )
+                row = self.resolve(
+                    self.catalog(self.game("KXATP-PAUSED")),
+                    discovery,
+                    provider_state=self.fresh_state(discovery),
+                ).rows[0]
+
+                self.assertEqual(row.status, HybridStatus.PRICE_ONLY)
+                self.assertEqual(row.reason, "provider_not_live")
+                self.assertTrue(row.selectable)
+                self.assertIsNone(row.provider_match)
+                self.assertEqual(row.diagnostics, ())
+
+    def test_missing_competition_type_defaults_to_price_only(self) -> None:
+        """Catches absent routing metadata bypassing the closed coverage registry."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        discovery = self.discovery(
+            score("sr:1"),
+            competition_type=None,
+        )
+        row = self.resolve(
+            self.catalog(self.game("KXATP-NO-TYPE")),
+            discovery,
+            provider_state=self.fresh_state(discovery),
+        ).rows[0]
+
+        self.assertEqual(row.status, HybridStatus.PRICE_ONLY)
+        self.assertEqual(row.reason, "coverage_route_unclassified")
+        self.assertTrue(row.selectable)
+        self.assertIsNone(row.provider_match)
+
+    def test_kalshi_doubles_milestone_stays_price_only_with_matching_singles_provider(
+        self,
+    ) -> None:
+        """Catches dropping Kalshi doubles provenance before provider coverage."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+        from tests.tennis_v1.test_kalshi_shadow_catalog import (
+            _NOW,
+            _Session,
+            _base_pages,
+            _milestone,
+            _transport,
+        )
+
+        milestone = _milestone()
+        milestone["type"] = "tennis_tournament_doubles"
+        catalog = _transport(
+            _Session(_base_pages(milestones=[milestone]))
+        ).discover_tennis_catalog(now=_NOW)
+        game = catalog.games[0]
+        discovery = self.discovery(
+            score(
+                "sr:doubles-misreported",
+                home=game.markets[0].yes_player_name,
+                away=game.markets[1].yes_player_name,
+                start=game.scheduled_start_wall_ns,
+            ),
+            competition_type="singles",
+        )
+
+        row = self.resolve(
+            catalog,
+            discovery,
+            provider_state=self.fresh_state(discovery),
+        ).rows[0]
+
+        self.assertEqual(row.status, HybridStatus.PRICE_ONLY)
+        self.assertEqual(row.reason, "kalshi_milestone_type_price_only")
+        self.assertTrue(row.selectable)
+        self.assertIsNone(row.provider_match)
 
     def test_901_seconds_or_prestart_provider_is_price_only(self) -> None:
         """Catches accepting a distant match or treating scheduled score data as live."""
@@ -913,7 +1070,27 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         self.assertEqual(len(first.rows), 2)
         self.assertEqual(first.provider_diagnostics, ("provider_only:sr:provider-only",))
         self.assertRegex(first.resolver_snapshot_sha256, r"^[0-9a-f]{64}$")
-        self.assertEqual(first.resolver_version, "kalshi-first-hybrid-v1")
+        self.assertEqual(first.resolver_version, "kalshi-first-hybrid-v2")
+
+    def test_resolver_digest_commits_to_exact_kalshi_milestone_type(self) -> None:
+        """Catches doubles provenance disappearing from the resolver projection."""
+
+        singles = self.resolve(
+            self.catalog(self.game("KXATP-TYPE")),
+        )
+        doubles = self.resolve(
+            self.catalog(
+                self.game(
+                    "KXATP-TYPE",
+                    milestone_type="tennis_tournament_doubles",
+                )
+            ),
+        )
+
+        self.assertNotEqual(
+            singles.resolver_snapshot_sha256,
+            doubles.resolver_snapshot_sha256,
+        )
 
     def test_omitted_or_unavailable_provider_state_never_verifies(self) -> None:
         """Catches an un-attested provider snapshot gaining a verified label by default."""
