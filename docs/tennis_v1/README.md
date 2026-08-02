@@ -39,13 +39,46 @@ trading runtime, demo order runtime, exchange client, or order mutation path.
 Provider artifacts admitted to that core remain local, pinned evidence only.
 
 The repository now also contains an explicitly separate outer command,
-`inci_tennis_runtime.live_shadow_cli`, for collecting live, read-only,
-unqualified research evidence from one Sportradar tennis match and two Kalshi
-match-winner books. That command does not admit observations into the trusted
-event core and never upgrades them into qualified evidence. Its trust label is
-always `unqualified_shadow`, and it exposes no order route. See the [live
-shadow collector design and operations
-record](../superpowers/specs/2026-08-01-live-tennis-shadow-collector-design.md).
+`inci_tennis_runtime.live_shadow_cli`. Its primary interface is:
+
+```bash
+python -m inci_tennis_runtime.live_shadow_cli --choose
+```
+
+The chooser discovers live Sportradar rows, scans the complete current-day
+official Kalshi `Tennis` / `Games` inventory, lists numbered `READY TO COLLECT`
+rows and unnumbered `UNAVAILABLE` reasons, and starts the existing collector
+only after a valid number is selected. Its duration and poll defaults are 600
+and 10 seconds. The Sportradar quota reservation is the one discovery call
+plus `1 + (duration_seconds - 1) // poll_seconds` collection calls: 61 calls at
+the defaults. Invalid input reprompts without rediscovery; `Q`, EOF, Ctrl-C, or
+zero ready rows exit without opening the Kalshi WebSocket or creating a
+collection evidence session.
+
+A selectable row requires exactly two supported active binary $1 non-MVE
+match-winner contracts, distinct non-placeholder player names, an exact
+unordered player-pair match after only Unicode NFKC, whitespace collapse, and
+case folding, an inclusive 900-second start tolerance, and degree one on both
+sides of the match graph. No fuzzy matching, ticker parsing, event-title
+parsing, nickname inference, or token dropping is permitted. Only provider
+rows whose lifecycle is `live` are selectable.
+
+Automatic mode is visibly **READ ONLY / AUTO-MATCHED / UNQUALIFIED / NO
+ORDERS**. The retained explicit-ID diagnostic mode is visibly
+`OPERATOR-SUPPLIED / UNVERIFIED`; the modes are mutually exclusive. Selection
+evidence binds the chosen identities to the raw Sportradar discovery capture,
+its hash, the resolver version, the canonical chooser snapshot digest, and the
+canonical normalized Kalshi catalog digest. The Kalshi digest is not a raw
+response archive, so the original Kalshi response bytes cannot be reconstructed
+from it. Display-name/start-time correlation therefore remains an unqualified
+outer-layer observation, not a trusted cross-provider identity.
+
+Neither mode admits observations into the sealed event core, upgrades them
+into qualified evidence, grants execution authority, or exposes an order
+route. See the [live shadow collector design and operations
+record](../superpowers/specs/2026-08-01-live-tennis-shadow-collector-design.md)
+and the [interactive chooser
+design](../superpowers/specs/2026-08-01-interactive-shadow-match-chooser-design.md).
 
 ## Reviewed Canonical AST Closure
 
