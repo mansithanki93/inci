@@ -731,13 +731,23 @@ def _write_all(descriptor: int, payload: bytes, code: str) -> None:
 def _fsync_directory(path: Path) -> None:
     descriptor: int | None = None
     try:
-        descriptor = os.open(path, os.O_RDONLY)
-        os.fsync(descriptor)
-    except OSError:
-        _fail("shadow_evidence_write_failed")
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+            os.fsync(descriptor)
+        except OSError:
+            _fail("shadow_evidence_write_failed")
+        try:
+            os.close(descriptor)
+        except OSError:
+            descriptor = None
+            _fail("shadow_evidence_write_failed")
+        descriptor = None
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _validate_existing_regular_file(

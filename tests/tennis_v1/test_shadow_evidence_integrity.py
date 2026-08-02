@@ -2279,6 +2279,235 @@ class ShadowEvidenceIntegrityTests(unittest.TestCase):
                     )
                     self.assertTrue(store._poisoned)
 
+    def test_commit_directory_close_failure_poison_prevents_duplicate_append(
+        self,
+    ) -> None:
+        """Catches retrying a durably committed row after directory close fails."""
+
+        import inci_tennis_io.shadow_evidence as evidence_module
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shadow"
+            with ShadowEvidenceStore(root) as store:
+                ledger = store.ledger_path
+                commit_path = root / f"session-{store.session_id}.commit"
+                original_open = evidence_module.os.open
+                original_close = evidence_module.os.close
+                root_directory_opens = 0
+                commit_directory_descriptors: set[int] = set()
+
+                def track_open(
+                    path: object, flags: int, *args: object
+                ) -> int:
+                    nonlocal root_directory_opens
+                    descriptor = original_open(path, flags, *args)
+                    if Path(path) == root and flags == os.O_RDONLY:
+                        root_directory_opens += 1
+                        if root_directory_opens == 3:
+                            commit_directory_descriptors.add(descriptor)
+                    return descriptor
+
+                def fail_commit_directory_close(descriptor: int) -> None:
+                    original_close(descriptor)
+                    if descriptor in commit_directory_descriptors:
+                        commit_directory_descriptors.remove(descriptor)
+                        raise OSError("injected commit directory close failure")
+
+                with (
+                    patch.object(evidence_module.os, "open", track_open),
+                    patch.object(
+                        evidence_module.os,
+                        "close",
+                        fail_commit_directory_close,
+                    ),
+                ):
+                    try:
+                        _terminal(
+                            store,
+                            sportradar_captures=0,
+                            kalshi_frames=0,
+                        )
+                    except ShadowEvidenceError as error:
+                        self.assertEqual(
+                            error.code, "shadow_evidence_write_failed"
+                        )
+                    except OSError:
+                        self.fail("directory close OSError escaped unsanitized")
+                    else:
+                        self.fail("directory close failure was accepted")
+
+                rows_after_failure = _read_rows(ledger)
+                self.assertEqual(len(rows_after_failure), 1)
+                self.assertEqual(rows_after_failure[-1]["row_number"], 1)
+                self.assertEqual(
+                    commit_path.read_bytes(),
+                    _watermark_bytes(
+                        store.session_id,
+                        1,
+                        rows_after_failure[-1]["row_sha256"],
+                    ),
+                )
+                self.assertTrue(store._poisoned)
+                self.assertEqual(store._row_number, 0)
+                self.assertIsNone(store.terminal_row_sha256)
+                with self.assertRaisesRegex(
+                    ShadowEvidenceError,
+                    "shadow_evidence_(closed|terminal_invalid)",
+                ):
+                    _terminal(
+                        store,
+                        sportradar_captures=0,
+                        kalshi_frames=0,
+                    )
+                self.assertEqual(_read_rows(ledger), rows_after_failure)
+
+            with ShadowEvidenceStore(root) as recovered:
+                _terminal(recovered, sportradar_captures=0, kalshi_frames=0)
+
+    def test_precommit_directory_close_failures_poison_without_publication(
+        self,
+    ) -> None:
+        """Catches raw directory-close errors bypassing precommit poisoning."""
+
+        import inci_tennis_io.shadow_evidence as evidence_module
+        from inci_tennis_io.shadow_evidence import (
+            ShadowEvidenceError,
+            ShadowEvidenceStore,
+        )
+
+        for boundary in ("epoch", "pending", "raw"):
+            with (
+                self.subTest(boundary=boundary),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory) / "shadow"
+                with ShadowEvidenceStore(root) as store:
+                    if boundary != "epoch":
+                        store.append_price_only_session(
+                            _price_only_session()
+                        )
+                    rows_before = _read_rows(store.ledger_path)
+                    row_number_before = store._row_number
+                    previous_digest_before = store._previous_row_sha256
+                    target_directory = (
+                        store.raw_root if boundary == "raw" else root
+                    )
+                    original_open = evidence_module.os.open
+                    original_close = evidence_module.os.close
+                    directory_descriptors: set[int] = set()
+
+                    def track_open(
+                        path: object, flags: int, *args: object
+                    ) -> int:
+                        descriptor = original_open(path, flags, *args)
+                        if (
+                            Path(path) == target_directory
+                            and flags == os.O_RDONLY
+                        ):
+                            directory_descriptors.add(descriptor)
+                        return descriptor
+
+                    def fail_directory_close(descriptor: int) -> None:
+                        original_close(descriptor)
+                        if descriptor in directory_descriptors:
+                            directory_descriptors.remove(descriptor)
+                            raise OSError(
+                                "injected precommit directory close failure"
+                            )
+
+                    with (
+                        patch.object(evidence_module.os, "open", track_open),
+                        patch.object(
+                            evidence_module.os,
+                            "close",
+                            fail_directory_close,
+                        ),
+                    ):
+                        try:
+                            if boundary == "raw":
+                                store.persist_kalshi_frame(_frame())
+                            elif boundary == "pending":
+                                store.append_price_only_terminal(
+                                    **_price_only_terminal(kalshi_frames=0)
+                                )
+                            else:
+                                store.append_price_only_session(
+                                    _price_only_session()
+                                )
+                        except ShadowEvidenceError as error:
+                            self.assertEqual(
+                                error.code, "shadow_evidence_write_failed"
+                            )
+                        except OSError:
+                            self.fail(
+                                "directory close OSError escaped unsanitized"
+                            )
+                        else:
+                            self.fail("directory close failure was accepted")
+
+                    self.assertTrue(store._poisoned)
+                    self.assertEqual(store._row_number, row_number_before)
+                    self.assertEqual(
+                        store._previous_row_sha256,
+                        previous_digest_before,
+                    )
+                    self.assertEqual(_read_rows(store.ledger_path), rows_before)
+                    self.assertEqual(store._raw_number, 0)
+                    self.assertEqual(store._kalshi_receipts, {})
+                    self.assertIsNone(store.terminal_row_sha256)
+                    with self.assertRaisesRegex(
+                        ShadowEvidenceError,
+                        "shadow_evidence_(closed|row_invalid)",
+                    ):
+                        if boundary == "raw":
+                            store.persist_kalshi_frame(_frame())
+                        elif boundary == "pending":
+                            store.append_price_only_terminal(
+                                **_price_only_terminal(kalshi_frames=0)
+                            )
+                        else:
+                            store.append_price_only_session(
+                                _price_only_session()
+                            )
+
+    def test_directory_close_failure_does_not_mask_primary_fsync_error(
+        self,
+    ) -> None:
+        """Catches a cleanup close replacing the stable primary fsync error."""
+
+        import inci_tennis_io.shadow_evidence as evidence_module
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_close = evidence_module.os.close
+
+            def fail_fsync(_: int) -> None:
+                raise OSError("injected primary fsync failure")
+
+            def fail_close(descriptor: int) -> None:
+                original_close(descriptor)
+                raise OSError("injected cleanup close failure")
+
+            with (
+                patch.object(evidence_module.os, "fsync", fail_fsync),
+                patch.object(evidence_module.os, "close", fail_close),
+            ):
+                try:
+                    evidence_module._fsync_directory(root)
+                except ShadowEvidenceError as error:
+                    self.assertEqual(
+                        error.code, "shadow_evidence_write_failed"
+                    )
+                except OSError:
+                    self.fail("cleanup close masked the primary fsync error")
+                else:
+                    self.fail("primary fsync failure was accepted")
+
     def test_raw_close_failure_is_sanitized_and_poisoned(self) -> None:
         """Catches leaking a raw descriptor-close error after frame persistence."""
 
