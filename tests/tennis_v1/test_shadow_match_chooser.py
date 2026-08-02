@@ -235,6 +235,102 @@ class ShadowMatchChooserTests(unittest.TestCase):
             self.assertEqual(snapshot.ready, ())
             self.assertTrue(snapshot.unavailable)
 
+    def test_non_live_duplicate_provider_id_blocks_the_live_counterpart(self) -> None:
+        """Catches a lifecycle-invalid duplicate ID being ignored during selection."""
+        snapshot = self.resolve(
+            (
+                score("sr:sport_event:1"),
+                score("sr:sport_event:1", status="not_started"),
+            ),
+            (self.game(),),
+        )
+
+        self.assertEqual(snapshot.ready, ())
+        self.assertEqual(
+            [(row.source, row.identity, row.reason) for row in snapshot.unavailable],
+            [
+                ("kalshi", "KXTENNIS-ADA-GRACE", "kalshi_unmatched"),
+                ("provider", "sr:sport_event:1", "provider_duplicate_id"),
+                ("provider", "sr:sport_event:1", "provider_duplicate_id"),
+            ],
+        )
+
+    def test_invalid_duplicate_event_ticker_blocks_the_valid_counterpart(self) -> None:
+        """Catches an invalid duplicate event being omitted while its twin becomes ready."""
+        from inci_tennis_adapters.shadow_match_chooser import KalshiShadowGame
+
+        invalid_duplicate = KalshiShadowGame(
+            event_ticker="KXTENNIS-ADA-GRACE",
+            scheduled_start_wall_ns=START,
+            game_title="invalid duplicate",
+            markets=(),
+        )
+        snapshot = self.resolve(
+            (score("sr:sport_event:1"),),
+            (self.game(), invalid_duplicate),
+        )
+
+        self.assertEqual(snapshot.ready, ())
+        self.assertEqual(
+            [(row.source, row.identity, row.reason) for row in snapshot.unavailable],
+            [
+                ("kalshi", "KXTENNIS-ADA-GRACE", "kalshi_duplicate_ticker"),
+                ("kalshi", "KXTENNIS-ADA-GRACE", "kalshi_duplicate_ticker"),
+                ("provider", "sr:sport_event:1", "provider_unmatched"),
+            ],
+        )
+
+    def test_malformed_provider_snapshot_element_is_unavailable(self) -> None:
+        """Catches an arbitrary snapshot tuple member escaping as AttributeError."""
+        from inci_tennis_adapters.shadow_match_chooser import (
+            ShadowUnavailableMatch,
+            resolve_shadow_matches,
+        )
+
+        snapshot = resolve_shadow_matches(
+            provider(object()),
+            (),
+            kalshi_catalog_sha256=SHA_B,
+        )
+
+        self.assertEqual(snapshot.ready, ())
+        self.assertEqual(
+            snapshot.unavailable,
+            (
+                ShadowUnavailableMatch(
+                    source="provider",
+                    identity="provider_row_invalid",
+                    display_name="provider_row_invalid",
+                    reason="provider_invalid",
+                ),
+            ),
+        )
+
+    def test_unpaired_surrogate_player_name_is_rejected_as_value_error(self) -> None:
+        """Catches malformed Unicode leaking a raw encoding exception."""
+        from inci_tennis_adapters.shadow_match_chooser import normalize_player_name
+
+        with self.assertRaises(ValueError) as raised:
+            normalize_player_name("Ada\ud800")
+
+        self.assertIs(type(raised.exception), ValueError)
+        self.assertEqual(str(raised.exception), "shadow_player_name_invalid")
+
+    def test_unpaired_surrogate_game_title_is_unavailable(self) -> None:
+        """Catches malformed Unicode in a display title escaping the resolver."""
+        from inci_tennis_adapters.shadow_match_chooser import KalshiShadowGame
+
+        malformed = KalshiShadowGame(
+            event_ticker="KXTENNIS-SURROGATE",
+            scheduled_start_wall_ns=START,
+            game_title="bad\ud800title",
+            markets=self.game("KXTENNIS-SURROGATE").markets,
+        )
+        snapshot = self.resolve((score("sr:sport_event:1"),), (malformed,))
+
+        self.assertEqual(snapshot.ready, ())
+        self.assertEqual(snapshot.unavailable[0].reason, "kalshi_invalid")
+
     def test_unmatched_rows_have_stable_unavailable_reasons(self) -> None:
         """Catches silently dropping unmatched live provider or Kalshi rows."""
         snapshot = self.resolve(

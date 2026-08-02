@@ -82,14 +82,14 @@ def normalize_player_name(value: str) -> str:
     if type(value) is not str:
         raise ValueError("shadow_player_name_invalid")
     value = normalize("NFKC", value)
-    if any(category(character) == "Cc" for character in value):
+    if any(category(character).startswith("C") for character in value):
         raise ValueError("shadow_player_name_invalid")
     value = " ".join(value.split()).casefold()
-    if (
-        not value
-        or value in _PLACEHOLDERS
-        or len(value.encode("utf-8")) > _MAX_NAME_BYTES
-    ):
+    try:
+        value_length = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError("shadow_player_name_invalid") from None
+    if not value or value in _PLACEHOLDERS or value_length > _MAX_NAME_BYTES:
         raise ValueError("shadow_player_name_invalid")
     return value
 
@@ -101,9 +101,12 @@ def _safe_ticker(value: object) -> bool:
 def _safe_title(value: object) -> bool:
     if type(value) is not str or not value.strip():
         return False
-    if any(category(character) == "Cc" for character in value):
+    if any(category(character).startswith("C") for character in value):
         return False
-    return len(value.encode("utf-8")) <= _MAX_TITLE_BYTES
+    try:
+        return len(value.encode("utf-8")) <= _MAX_TITLE_BYTES
+    except UnicodeEncodeError:
+        return False
 
 
 def _positive_wall_ns(value: object) -> bool:
@@ -119,41 +122,52 @@ def _valid_digest(value: object) -> bool:
 
 def _provider_identity(value: object) -> str:
     if type(value) is str and value and not any(
-        category(character) == "Cc" for character in value
+        category(character).startswith("C") for character in value
     ):
         return value
     return "provider_identity_invalid"
 
 
-def _provider_display(row: SportradarScoreSnapshot) -> str:
+def _provider_display(row: object) -> str:
+    if type(row) is not SportradarScoreSnapshot:
+        return "provider_row_invalid"
     if type(row.home_name) is str and type(row.away_name) is str:
-        if not any(category(character) == "Cc" for character in row.home_name + row.away_name):
+        if not any(
+            category(character).startswith("C")
+            for character in row.home_name + row.away_name
+        ):
             return f"{row.home_name} v {row.away_name}"
     return "provider_players_invalid"
 
 
-def _unavailable_provider(
-    row: SportradarScoreSnapshot,
-    reason: str,
-) -> ShadowUnavailableMatch:
+def _provider_entry_identity(row: object) -> str:
+    if type(row) is not SportradarScoreSnapshot:
+        return "provider_row_invalid"
+    return _provider_identity(row.provider_match_id)
+
+
+def _unavailable_provider(row: object, reason: str) -> ShadowUnavailableMatch:
     return ShadowUnavailableMatch(
         source="provider",
-        identity=_provider_identity(row.provider_match_id),
+        identity=_provider_entry_identity(row),
         display_name=_provider_display(row),
         reason=reason,
     )
 
 
-def _unavailable_game(
-    game: object,
-    reason: str,
-) -> ShadowUnavailableMatch:
+def _game_entry_identity(game: object) -> str:
     if type(game) is KalshiShadowGame:
-        identity = game.event_ticker if _safe_ticker(game.event_ticker) else "kalshi_ticker_invalid"
-        title = game.game_title if _safe_title(game.game_title) else "kalshi_title_invalid"
-    else:
-        identity = "kalshi_game_invalid"
-        title = "kalshi_game_invalid"
+        return game.event_ticker if _safe_ticker(game.event_ticker) else "kalshi_ticker_invalid"
+    return "kalshi_game_invalid"
+
+
+def _unavailable_game(game: object, reason: str) -> ShadowUnavailableMatch:
+    identity = _game_entry_identity(game)
+    title = (
+        game.game_title
+        if type(game) is KalshiShadowGame and _safe_title(game.game_title)
+        else "kalshi_title_invalid"
+    )
     return ShadowUnavailableMatch(
         source="kalshi",
         identity=identity,
@@ -288,7 +302,7 @@ def resolve_shadow_matches(
     ):
         raise ValueError("shadow_resolver_input_invalid")
 
-    provider_entries: list[tuple[SportradarScoreSnapshot, _ProviderCandidate | None]] = [
+    provider_entries: list[tuple[object, _ProviderCandidate | None]] = [
         (row, _provider_candidate(row)) for row in provider.snapshots
     ]
     game_entries: list[tuple[object, _GameCandidate | None]] = [
@@ -303,19 +317,23 @@ def resolve_shadow_matches(
     game_pairs: dict[frozenset[str], list[int]] = {}
 
     for index, (_, candidate) in enumerate(provider_entries):
+        identity = _provider_entry_identity(provider_entries[index][0])
         if candidate is None:
             provider_reasons[index] = "provider_invalid"
-        elif candidate.row.status != "live":
-            provider_reasons[index] = "provider_not_live"
         else:
-            provider_ids.setdefault(candidate.identity, []).append(index)
+            if candidate.row.status != "live":
+                provider_reasons[index] = "provider_not_live"
             provider_pairs.setdefault(candidate.pair, []).append(index)
+        if identity != "provider_identity_invalid" and identity != "provider_row_invalid":
+            provider_ids.setdefault(identity, []).append(index)
     for index, (_, candidate) in enumerate(game_entries):
+        identity = _game_entry_identity(game_entries[index][0])
         if candidate is None:
             game_reasons[index] = "kalshi_invalid"
         else:
-            game_ids.setdefault(candidate.game.event_ticker, []).append(index)
             game_pairs.setdefault(candidate.pair, []).append(index)
+        if identity != "kalshi_ticker_invalid" and identity != "kalshi_game_invalid":
+            game_ids.setdefault(identity, []).append(index)
 
     for indexes in provider_ids.values():
         if len(indexes) > 1:
@@ -380,14 +398,14 @@ def resolve_shadow_matches(
     selected_game_ids = {row.event_ticker for row in ready_rows}
     unavailable_rows: list[ShadowUnavailableMatch] = []
     for index, (row, _) in enumerate(provider_entries):
-        if _provider_identity(row.provider_match_id) in selected_provider_ids:
+        if _provider_entry_identity(row) in selected_provider_ids:
             continue
         reason = provider_reasons.get(index)
         if reason is None:
             reason = "provider_ambiguous" if len(provider_edges.get(index, ())) > 1 else "provider_unmatched"
         unavailable_rows.append(_unavailable_provider(row, reason))
     for index, (game, _) in enumerate(game_entries):
-        identity = game.event_ticker if type(game) is KalshiShadowGame else "kalshi_game_invalid"
+        identity = _game_entry_identity(game)
         if identity in selected_game_ids:
             continue
         reason = game_reasons.get(index)
