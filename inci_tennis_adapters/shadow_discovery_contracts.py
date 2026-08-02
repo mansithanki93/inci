@@ -77,6 +77,21 @@ class ProviderDiscoveryState:
     state: str
     reason: str
     provider_payload_sha256: str | None = None
+    captured_wall_ns: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.state) is not str
+            or not self.state
+            or type(self.reason) is not str
+            or not self.reason
+        ):
+            raise ValueError("provider_discovery_state_invalid")
+        if self.state == "available" and (
+            type(self.provider_payload_sha256) is not str
+            or type(self.captured_wall_ns) is not int
+        ):
+            raise ValueError("provider_discovery_state_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +108,7 @@ class ProviderMatchRef:
 class HybridMatchRow:
     status: HybridStatus
     game: KalshiShadowGame
+    market_tickers: tuple[str, str]
     provider_match: ProviderMatchRef | None
     reason: str
     selectable: bool
@@ -107,6 +123,7 @@ class HybridChooserSnapshot:
     provider_snapshot_sha256: str | None
     coverage_registry_sha256: str
     resolver_version: str
+    provider_diagnostics: tuple[str, ...]
     resolver_snapshot_sha256: str
 
 

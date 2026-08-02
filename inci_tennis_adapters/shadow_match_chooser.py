@@ -467,6 +467,8 @@ def resolve_shadow_matches(
 
 _HYBRID_RESOLVER_VERSION = "kalshi-first-hybrid-v1"
 _START_WINDOW_NS = 900_000_000_000
+_PROVIDER_MAX_AHEAD_NS = 5_000_000_000
+_PROVIDER_MAX_AGE_NS = 60_000_000_000
 _PRESTART_PROVIDER_STATUSES = frozenset({"not_started", "scheduled"})
 
 
@@ -474,6 +476,17 @@ _PRESTART_PROVIDER_STATUSES = frozenset({"not_started", "scheduled"})
 class _HybridGameCandidate:
     game: HybridKalshiShadowGame
     pair: frozenset[str]
+    ticker_by_player: tuple[tuple[str, str], tuple[str, str]]
+
+    @property
+    def market_tickers(self) -> tuple[str, str]:
+        return (self.ticker_by_player[0][1], self.ticker_by_player[1][1])
+
+    def ticker_for(self, player: str) -> str:
+        for known_player, ticker in self.ticker_by_player:
+            if known_player == player:
+                return ticker
+        raise ValueError("shadow_bijection_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,7 +528,11 @@ def _hybrid_game_candidate(game: object) -> _HybridGameCandidate | None:
         return None
     if first_name == second_name:
         return None
-    return _HybridGameCandidate(game, frozenset((first_name, second_name)))
+    return _HybridGameCandidate(
+        game,
+        frozenset((first_name, second_name)),
+        ((first_name, first.ticker), (second_name, second.ticker)),
+    )
 
 
 def _hybrid_provider_candidate(match: object) -> _HybridProviderCandidate | None:
@@ -568,6 +585,16 @@ def _hybrid_provider_ref(candidate: _HybridProviderCandidate) -> ProviderMatchRe
         away_player_name=score.away_name,
         status=score.status,
         competition=candidate.match.competition,
+    )
+
+
+def _hybrid_verified_tickers(
+    game: _HybridGameCandidate,
+    provider: _HybridProviderCandidate,
+) -> tuple[str, str]:
+    return (
+        game.ticker_for(normalize_player_name(provider.score.home_name)),
+        game.ticker_for(normalize_player_name(provider.score.away_name)),
     )
 
 
@@ -626,10 +653,10 @@ def _hybrid_provider_diagnostics(
     provider: SportradarHybridDiscoverySnapshot | None,
     provider_entries: list[tuple[object, _HybridProviderCandidate | None]],
     linked_provider_indexes: set[int],
-) -> list[str]:
+) -> tuple[str, ...]:
     diagnostics: list[str] = []
     if provider is None:
-        return diagnostics
+        return ()
     for diagnostic in provider.diagnostics:
         if type(diagnostic) is SportradarHybridDiagnostic:
             diagnostics.append(f"provider_diagnostic:{diagnostic.index}:{diagnostic.code}")
@@ -638,7 +665,19 @@ def _hybrid_provider_diagnostics(
     for index, (match, _) in enumerate(provider_entries):
         if index not in linked_provider_indexes:
             diagnostics.append(f"provider_only:{_hybrid_provider_identity(match)}")
-    return sorted(diagnostics)
+    return tuple(sorted(diagnostics))
+
+
+def _hybrid_row_projection(row: HybridMatchRow) -> dict[str, object]:
+    return {
+        "diagnostics": list(row.diagnostics),
+        "game": _hybrid_game_projection(row.game),
+        "market_tickers": list(row.market_tickers),
+        "provider_match": _hybrid_ref_projection(row.provider_match),
+        "reason": row.reason,
+        "selectable": row.selectable,
+        "status": row.status.value,
+    }
 
 
 def _hybrid_projection(
@@ -647,7 +686,7 @@ def _hybrid_projection(
     catalog_sha256: str,
     provider_snapshot_sha256: str | None,
     coverage_registry_digest: str,
-    provider_diagnostics: list[str],
+    provider_diagnostics: tuple[str, ...],
 ) -> bytes:
     return json.dumps(
         {
@@ -657,21 +696,12 @@ def _hybrid_projection(
             "provider_snapshot_sha256": provider_snapshot_sha256,
             "provider_state": {
                 "provider_payload_sha256": provider_state.provider_payload_sha256,
+                "captured_wall_ns": provider_state.captured_wall_ns,
                 "reason": provider_state.reason,
                 "state": provider_state.state,
             },
             "resolver_version": _HYBRID_RESOLVER_VERSION,
-            "rows": [
-                {
-                    "diagnostics": list(row.diagnostics),
-                    "game": _hybrid_game_projection(row.game),
-                    "provider_match": _hybrid_ref_projection(row.provider_match),
-                    "reason": row.reason,
-                    "selectable": row.selectable,
-                    "status": row.status.value,
-                }
-                for row in rows
-            ],
+            "rows": [_hybrid_row_projection(row) for row in rows],
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -683,11 +713,7 @@ def _hybrid_projection(
 def _default_provider_state(
     provider: SportradarHybridDiscoverySnapshot | None,
 ) -> ProviderDiscoveryState:
-    if provider is None:
-        return ProviderDiscoveryState("unavailable", "provider_not_requested")
-    return ProviderDiscoveryState(
-        "available", "provider_discovery_available", provider.payload_sha256
-    )
+    return ProviderDiscoveryState("unavailable", "provider_not_attested")
 
 
 def resolve_hybrid_shadow_matches(
@@ -728,13 +754,27 @@ def resolve_hybrid_shadow_matches(
             provider_state.provider_payload_sha256 is not None
             and not _valid_digest(provider_state.provider_payload_sha256)
         )
+        or (
+            provider_state.captured_wall_ns is not None
+            and not _positive_wall_ns(provider_state.captured_wall_ns)
+        )
     ):
         raise ValueError("hybrid_shadow_resolver_input_invalid")
     if provider is not None and provider_state.provider_payload_sha256 not in {None, provider.payload_sha256}:
         raise ValueError("hybrid_shadow_resolver_input_invalid")
-    registry_digest = _coverage_registry_sha256() if coverage_registry_sha256 is None else coverage_registry_sha256
-    if not _valid_digest(registry_digest):
+    if provider_state.state == "available" and (
+        provider is None
+        or provider_state.provider_payload_sha256 != provider.payload_sha256
+        or not _positive_wall_ns(provider_state.captured_wall_ns)
+    ):
         raise ValueError("hybrid_shadow_resolver_input_invalid")
+    active_registry_digest = _coverage_registry_sha256()
+    if (
+        coverage_registry_sha256 is not None
+        and coverage_registry_sha256 != active_registry_digest
+    ):
+        raise ValueError("hybrid_shadow_resolver_input_invalid")
+    registry_digest = active_registry_digest
 
     game_entries: list[tuple[object, _HybridGameCandidate | None]] = [
         (game, _hybrid_game_candidate(game)) for game in catalog.games
@@ -782,13 +822,19 @@ def resolve_hybrid_shadow_matches(
             for index in indexes:
                 provider_conflicts.setdefault(index, set()).add("provider_duplicate_pair")
 
-    provider_is_available = provider is not None and provider_state.state == "available"
+    provider_is_fresh = (
+        provider is not None
+        and provider_state.state == "available"
+        and provider_state.captured_wall_ns is not None
+        and provider.generated_wall_ns >= provider_state.captured_wall_ns - _PROVIDER_MAX_AGE_NS
+        and provider.generated_wall_ns <= provider_state.captured_wall_ns + _PROVIDER_MAX_AHEAD_NS
+    )
     live_edges: dict[int, list[int]] = {}
     game_live_edges: dict[int, list[int]] = {}
     game_provider_conflicts: dict[int, set[str]] = {}
     game_price_reasons: dict[int, set[str]] = {}
     linked_provider_indexes: set[int] = set()
-    if provider_is_available:
+    if provider_is_fresh:
         for game_index, (_, game_candidate) in enumerate(game_entries):
             if game_candidate is None:
                 continue
@@ -835,7 +881,13 @@ def resolve_hybrid_shadow_matches(
             diagnostics = tuple(sorted(game_conflicts[index]))
             rows.append(
                 HybridMatchRow(
-                    HybridStatus.CONFLICT, raw_game, None, "kalshi_conflict", False, diagnostics
+                    status=HybridStatus.CONFLICT,
+                    game=raw_game,
+                    market_tickers=(),
+                    provider_match=None,
+                    reason="kalshi_conflict",
+                    selectable=False,
+                    diagnostics=diagnostics,
                 )
             )
             continue
@@ -849,41 +901,48 @@ def resolve_hybrid_shadow_matches(
         if diagnostics:
             rows.append(
                 HybridMatchRow(
-                    HybridStatus.CONFLICT,
-                    game_candidate.game,
-                    None,
-                    "hybrid_conflict",
-                    False,
-                    tuple(sorted(diagnostics)),
+                    status=HybridStatus.CONFLICT,
+                    game=game_candidate.game,
+                    market_tickers=game_candidate.market_tickers,
+                    provider_match=None,
+                    reason="hybrid_conflict",
+                    selectable=False,
+                    diagnostics=tuple(sorted(diagnostics)),
                 )
             )
             continue
-        if len(provider_indexes) == 1 and provider_is_available:
+        if len(provider_indexes) == 1 and provider_is_fresh:
             provider_candidate = provider_entries[provider_indexes[0]][1]
             if provider_candidate is not None:
                 rows.append(
                     HybridMatchRow(
-                        HybridStatus.VERIFIED,
-                        game_candidate.game,
-                        _hybrid_provider_ref(provider_candidate),
-                        "unique_live_provider_match",
-                        True,
+                        status=HybridStatus.VERIFIED,
+                        game=game_candidate.game,
+                        market_tickers=_hybrid_verified_tickers(
+                            game_candidate, provider_candidate
+                        ),
+                        provider_match=_hybrid_provider_ref(provider_candidate),
+                        reason="unique_live_provider_match",
+                        selectable=True,
                     )
                 )
                 continue
         price_reasons = game_price_reasons.get(index, set())
         reason = (
             provider_state.reason
-            if not provider_is_available
+            if provider is None or provider_state.state != "available"
+            else "provider_response_stale"
+            if not provider_is_fresh
             else sorted(price_reasons)[0] if price_reasons else "provider_no_exact_live_match"
         )
         rows.append(
             HybridMatchRow(
-                HybridStatus.PRICE_ONLY,
-                game_candidate.game,
-                None,
-                reason,
-                True,
+                status=HybridStatus.PRICE_ONLY,
+                game=game_candidate.game,
+                market_tickers=game_candidate.market_tickers,
+                provider_match=None,
+                reason=reason,
+                selectable=True,
             )
         )
 
@@ -894,6 +953,13 @@ def resolve_hybrid_shadow_matches(
                 row.game.scheduled_start_wall_ns,
                 row.game.event_ticker,
                 row.status.value,
+                json.dumps(
+                    _hybrid_row_projection(row),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
             ),
         )
     )
@@ -918,6 +984,7 @@ def resolve_hybrid_shadow_matches(
         provider_snapshot_sha256=provider_snapshot_sha256,
         coverage_registry_sha256=registry_digest,
         resolver_version=_HYBRID_RESOLVER_VERSION,
+        provider_diagnostics=provider_diagnostics,
         resolver_snapshot_sha256=resolver_snapshot_sha256,
     )
 

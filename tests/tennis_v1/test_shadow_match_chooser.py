@@ -530,8 +530,10 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         self,
         *rows: SportradarScoreSnapshot,
         digest: str = SHA_A,
+        generated: int = START,
         category: str = "sr:category:3",
         competition_type: str = "singles",
+        diagnostics: tuple[object, ...] = (),
     ) -> object:
         from inci_tennis_adapters.sportradar_trial_v3 import (
             SportradarHybridDiscoverySnapshot,
@@ -542,12 +544,12 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             category=category, competition_type=competition_type
         )
         return SportradarHybridDiscoverySnapshot(
-            generated_wall_ns=START,
+            generated_wall_ns=generated,
             matches=tuple(
                 SportradarHybridMatch(score=row, competition=provenance)
                 for row in rows
             ),
-            diagnostics=(),
+            diagnostics=diagnostics,
             payload_sha256=digest,
         )
 
@@ -557,21 +559,39 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
         discovery: object | None = None,
         *,
         provider_state: object | None = None,
+        coverage_registry_sha256: str | None = None,
     ) -> object:
         from inci_tennis_adapters.shadow_match_chooser import (
             resolve_hybrid_shadow_matches,
         )
 
         return resolve_hybrid_shadow_matches(
-            catalog, discovery, provider_state=provider_state
+            catalog,
+            discovery,
+            provider_state=provider_state,
+            coverage_registry_sha256=coverage_registry_sha256,
         )
 
-    def provider_state(self, state: str, reason: str, digest: str | None = None) -> object:
+    def provider_state(
+        self,
+        state: str,
+        reason: str,
+        digest: str | None = None,
+        captured: int | None = None,
+    ) -> object:
         from inci_tennis_adapters.shadow_discovery_contracts import (
             ProviderDiscoveryState,
         )
 
-        return ProviderDiscoveryState(state, reason, digest)
+        return ProviderDiscoveryState(state, reason, digest, captured)
+
+    def fresh_state(self, discovery: object, *, captured: int = START) -> object:
+        return self.provider_state(
+            "available",
+            "provider_discovery_available",
+            discovery.payload_sha256,
+            captured,
+        )
 
     def test_every_kalshi_game_has_exactly_one_state(self) -> None:
         """Catches provider-centric output that drops unmatched catalog games."""
@@ -580,7 +600,8 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             self.game("KXATP-TWO", home="Marie Curie", away="Katherine Johnson"),
             self.game("KXATP-THREE", home="Serena Williams", away="Venus Williams"),
         )
-        result = self.resolve(catalog, self.discovery(score("sr:1")))
+        discovery = self.discovery(score("sr:1"))
+        result = self.resolve(catalog, discovery, provider_state=self.fresh_state(discovery))
 
         from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
 
@@ -600,7 +621,8 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             away="Ａda   Lovelace",
             start=START,
         )
-        row = self.resolve(self.catalog(game), self.discovery(match)).rows[0]
+        discovery = self.discovery(match)
+        row = self.resolve(self.catalog(game), discovery, provider_state=self.fresh_state(discovery)).rows[0]
 
         from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
 
@@ -610,13 +632,17 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
 
     def test_901_seconds_or_prestart_provider_is_price_only(self) -> None:
         """Catches accepting a distant match or treating scheduled score data as live."""
+        distant_discovery = self.discovery(score("sr:1"))
         distant = self.resolve(
             self.catalog(self.game("KXATP-DISTANT", start=START + 900_000_000_001)),
-            self.discovery(score("sr:1")),
+            distant_discovery,
+            provider_state=self.fresh_state(distant_discovery),
         ).rows[0]
+        prestart_discovery = self.discovery(score("sr:2", status="not_started"))
         prestart = self.resolve(
             self.catalog(self.game("KXATP-PRESTART", start=START + 1)),
-            self.discovery(score("sr:2", status="not_started")),
+            prestart_discovery,
+            provider_state=self.fresh_state(prestart_discovery),
         ).rows[0]
 
         from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
@@ -627,14 +653,17 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
     def test_ambiguous_or_terminal_disagreement_is_conflict_and_not_selectable(self) -> None:
         """Catches arbitrary winner selection when provider evidence contradicts itself."""
         catalog = self.catalog(self.game("KXATP-ONE"))
+        ambiguous_discovery = self.discovery(score("sr:1"), score("sr:2"))
         ambiguous = self.resolve(
-            catalog, self.discovery(score("sr:1"), score("sr:2"))
+            catalog, ambiguous_discovery, provider_state=self.fresh_state(ambiguous_discovery)
         ).rows[0]
+        terminal_discovery = self.discovery(
+            score("sr:1", status="live", match_status="ended")
+        )
         terminal = self.resolve(
             catalog,
-            self.discovery(
-                score("sr:1"), score("sr:2", status="ended", match_status="ended")
-            ),
+            terminal_discovery,
+            provider_state=self.fresh_state(terminal_discovery),
         ).rows[0]
 
         from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
@@ -644,20 +673,27 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             self.assertFalse(row.selectable)
             self.assertIsNone(row.provider_match)
             self.assertEqual(row.diagnostics, tuple(sorted(row.diagnostics)))
+        self.assertEqual(terminal.diagnostics, ("provider_lifecycle_conflict",))
 
     def test_duplicate_ids_pairs_and_catalog_identity_are_conflicts(self) -> None:
         """Catches duplicate stable identity or graph nodes silently producing verification."""
+        duplicate_id_discovery = self.discovery(score("sr:duplicate"), score("sr:duplicate"))
         duplicate_id = self.resolve(
             self.catalog(self.game("KXATP-ONE")),
-            self.discovery(score("sr:duplicate"), score("sr:duplicate")),
+            duplicate_id_discovery,
+            provider_state=self.fresh_state(duplicate_id_discovery),
         ).rows[0]
+        duplicate_pair_discovery = self.discovery(score("sr:1"))
         duplicate_pair = self.resolve(
             self.catalog(self.game("KXATP-ONE"), self.game("KXATP-TWO")),
-            self.discovery(score("sr:1")),
+            duplicate_pair_discovery,
+            provider_state=self.fresh_state(duplicate_pair_discovery),
         )
+        duplicate_ticker_discovery = self.discovery(score("sr:1"))
         duplicate_ticker = self.resolve(
             self.catalog(self.game("KXATP-DUP"), self.game("KXATP-DUP")),
-            self.discovery(score("sr:1")),
+            duplicate_ticker_discovery,
+            provider_state=self.fresh_state(duplicate_ticker_discovery),
         )
 
         from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
@@ -675,7 +711,7 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             self.resolve(
                 catalog,
                 self.discovery(score("sr:1")),
-                provider_state=self.provider_state("stale", "provider_response_stale", SHA_A),
+                provider_state=self.provider_state("stale", "provider_response_stale", SHA_A, START),
             ),
             self.resolve(
                 catalog,
@@ -693,13 +729,17 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
     def test_coverage_denied_or_default_deny_cannot_verify(self) -> None:
         """Catches a provider route becoming trusted through a wildcard or guessed tour."""
         catalog = self.catalog(self.game("KXATP-ONE"))
+        denied_discovery = self.discovery(score("sr:1"), category="sr:category:785")
         denied = self.resolve(
             catalog,
-            self.discovery(score("sr:1"), category="sr:category:785"),
+            denied_discovery,
+            provider_state=self.fresh_state(denied_discovery),
         ).rows[0]
+        unknown_discovery = self.discovery(score("sr:1"), category="sr:category:999")
         unknown = self.resolve(
             catalog,
-            self.discovery(score("sr:1"), category="sr:category:999"),
+            unknown_discovery,
+            provider_state=self.fresh_state(unknown_discovery),
         ).rows[0]
 
         from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
@@ -718,14 +758,140 @@ class HybridShadowMatchChooserTests(unittest.TestCase):
             score("sr:early"),
             score("sr:provider-only", home="One", away="Two"),
         )
-        first = self.resolve(self.catalog(*games), self.discovery(*rows))
-        second = self.resolve(self.catalog(*reversed(games)), self.discovery(*reversed(rows)))
+        first_discovery = self.discovery(*rows)
+        second_discovery = self.discovery(*reversed(rows))
+        first = self.resolve(self.catalog(*games), first_discovery, provider_state=self.fresh_state(first_discovery))
+        second = self.resolve(self.catalog(*reversed(games)), second_discovery, provider_state=self.fresh_state(second_discovery))
 
         self.assertEqual(first, second)
         self.assertEqual([row.game.event_ticker for row in first.rows], ["KXATP-EARLY", "KXATP-LATE"])
         self.assertEqual(len(first.rows), 2)
+        self.assertEqual(first.provider_diagnostics, ("provider_only:sr:provider-only",))
         self.assertRegex(first.resolver_snapshot_sha256, r"^[0-9a-f]{64}$")
         self.assertEqual(first.resolver_version, "kalshi-first-hybrid-v1")
+
+    def test_omitted_or_unavailable_provider_state_never_verifies(self) -> None:
+        """Catches an un-attested provider snapshot gaining a verified label by default."""
+        catalog = self.catalog(self.game("KXATP-ONE"))
+        discovery = self.discovery(score("sr:1"))
+        omitted = self.resolve(catalog, discovery).rows[0]
+        unavailable = self.resolve(
+            catalog,
+            discovery,
+            provider_state=self.provider_state("unavailable", "provider_not_requested"),
+        ).rows[0]
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        self.assertEqual((omitted.status, unavailable.status), (HybridStatus.PRICE_ONLY, HybridStatus.PRICE_ONLY))
+
+    def test_provider_freshness_boundaries_control_verification(self) -> None:
+        """Catches stale or future provider envelopes being used as live evidence."""
+        catalog = self.catalog(self.game("KXATP-ONE"))
+        results = []
+        for generated in (
+            START - 60_000_000_000,
+            START + 5_000_000_000,
+            START - 60_000_000_001,
+            START + 5_000_000_001,
+        ):
+            discovery = self.discovery(score(f"sr:{generated}"), generated=generated)
+            results.append(
+                self.resolve(
+                    catalog,
+                    discovery,
+                    provider_state=self.fresh_state(discovery),
+                ).rows[0].status
+            )
+
+        from inci_tennis_adapters.shadow_discovery_contracts import HybridStatus
+
+        self.assertEqual(
+            results,
+            [HybridStatus.VERIFIED, HybridStatus.VERIFIED, HybridStatus.PRICE_ONLY, HybridStatus.PRICE_ONLY],
+        )
+
+    def test_available_state_must_bind_the_exact_provider_digest(self) -> None:
+        """Catches a freshness claim being reused for a different provider payload."""
+        catalog = self.catalog(self.game("KXATP-ONE"))
+        discovery = self.discovery(score("sr:1"))
+
+        with self.assertRaises(ValueError):
+            self.resolve(
+                catalog,
+                discovery,
+                provider_state=self.provider_state("available", "provider_discovery_available", SHA_B, START),
+            )
+
+    def test_market_ticker_mapping_is_fixed_for_all_hybrid_states(self) -> None:
+        """Catches callers having to reconstruct provider-side versus catalog-side ticker order."""
+        verified_discovery = self.discovery(
+            score("sr:1", home="Grace Hopper", away="Ada Lovelace")
+        )
+        verified = self.resolve(
+            self.catalog(self.game("KXATP-VERIFIED")),
+            verified_discovery,
+            provider_state=self.fresh_state(verified_discovery),
+        ).rows[0]
+        price_only = self.resolve(self.catalog(self.game("KXATP-PRICE"))).rows[0]
+        conflict_discovery = self.discovery(score("sr:1"), score("sr:2"))
+        conflict = self.resolve(
+            self.catalog(self.game("KXATP-CONFLICT")),
+            conflict_discovery,
+            provider_state=self.fresh_state(conflict_discovery),
+        ).rows[0]
+
+        self.assertEqual(verified.market_tickers, ("KXATP-VERIFIED-B", "KXATP-VERIFIED-A"))
+        self.assertEqual(price_only.market_tickers, ("KXATP-PRICE-A", "KXATP-PRICE-B"))
+        self.assertEqual(conflict.market_tickers, ("KXATP-CONFLICT-A", "KXATP-CONFLICT-B"))
+
+    def test_provider_diagnostics_are_exposed_canonical_and_hashed(self) -> None:
+        """Catches provider-only and parser diagnostics being hidden or order-dependent."""
+        from inci_tennis_adapters.sportradar_trial_v3 import SportradarHybridDiagnostic
+
+        catalog = self.catalog(self.game("KXATP-ONE"))
+        rows = (score("sr:only-z", home="Zed", away="Yen"), score("sr:only-a", home="Ann", away="Bea"))
+        diagnostics = (
+            SportradarHybridDiagnostic(7, "bad_row"),
+            SportradarHybridDiagnostic(2, "other_bad_row"),
+        )
+        first_discovery = self.discovery(*rows, diagnostics=diagnostics)
+        second_discovery = self.discovery(*reversed(rows), diagnostics=tuple(reversed(diagnostics)))
+        first = self.resolve(catalog, first_discovery, provider_state=self.fresh_state(first_discovery))
+        second = self.resolve(catalog, second_discovery, provider_state=self.fresh_state(second_discovery))
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first.provider_diagnostics,
+            (
+                "provider_diagnostic:2:other_bad_row",
+                "provider_diagnostic:7:bad_row",
+                "provider_only:sr:only-a",
+                "provider_only:sr:only-z",
+            ),
+        )
+
+    def test_passed_registry_digest_must_be_the_active_registry(self) -> None:
+        """Catches an audit digest being decoupled from the registry used to classify rows."""
+        discovery = self.discovery(score("sr:1"))
+
+        with self.assertRaises(ValueError):
+            self.resolve(
+                self.catalog(self.game("KXATP-ONE")),
+                discovery,
+                provider_state=self.fresh_state(discovery),
+                coverage_registry_sha256="c" * 64,
+            )
+
+    def test_duplicate_ties_have_a_full_canonical_order(self) -> None:
+        """Catches duplicate ticker/start/state conflicts retaining source insertion order."""
+        first_game = replace(self.game("KXATP-DUP"), game_title="Zulu vs Alpha")
+        second_game = replace(self.game("KXATP-DUP"), game_title="Alpha vs Zulu")
+        first = self.resolve(self.catalog(first_game, second_game))
+        second = self.resolve(self.catalog(second_game, first_game))
+
+        self.assertEqual(first, second)
+        self.assertEqual([row.game.game_title for row in first.rows], ["Alpha vs Zulu", "Zulu vs Alpha"])
 
 
 if __name__ == "__main__":
