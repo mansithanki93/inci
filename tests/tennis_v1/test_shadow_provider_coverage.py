@@ -20,7 +20,7 @@ def _game(
         provenance=KalshiCompetitionProvenance(
             sport=sport,
             scope=scope,
-            queried_competition="ATP Washington",
+            queried_competitions=("ATP Washington",),
             series_ticker=series_ticker,
             milestone_id="match-1",
             milestone_league="ATP Washington",
@@ -176,6 +176,24 @@ class ShadowProviderCoverageTests(unittest.TestCase):
             tuple(item.value for item in HybridStatus),
             ("VERIFIED", "PRICE_ONLY", "CONFLICT"),
         )
+
+    def test_competition_provenance_requires_canonical_query_keys(self) -> None:
+        """Catches a digestable but ambiguous duplicate or order-dependent query tuple."""
+
+        from inci_tennis_adapters.shadow_discovery_contracts import (
+            KalshiCompetitionProvenance,
+        )
+
+        for keys in (("WTA", "ATP"), ("ATP", "ATP"), ()):
+            with self.subTest(keys=keys), self.assertRaises(ValueError):
+                KalshiCompetitionProvenance(
+                    sport="Tennis",
+                    scope="Games",
+                    queried_competitions=keys,
+                    series_ticker="KXATP",
+                    milestone_id="match-1",
+                    milestone_league="ATP",
+                )
 
 
 if __name__ == "__main__":

@@ -14,9 +14,14 @@ from unicodedata import category
 
 import requests
 
-from inci_tennis_adapters.shadow_match_chooser import (
+from inci_tennis_adapters.shadow_discovery_contracts import (
+    KalshiCatalogExclusion,
+    KalshiCompetitionProvenance,
+    KalshiShadowCatalogSnapshot,
     KalshiShadowGame,
     KalshiShadowMarket,
+)
+from inci_tennis_adapters.shadow_match_chooser import (
     normalize_player_name,
 )
 
@@ -233,12 +238,14 @@ def _parse_market(row: object) -> tuple[dict[str, object] | None, str | None]:
     if type(can_close_early) is not bool:
         raise ValueError("kalshi_catalog_schema_invalid")
     notional = _decimal(_required(row, "notional_value_dollars"))
-    if notional != Decimal(1):
-        raise ValueError("kalshi_catalog_schema_invalid")
-    bid = _dollars_to_cents(_required(row, "yes_bid_dollars"))
-    ask = _dollars_to_cents(_required(row, "yes_ask_dollars"))
-    bid_size = _decimal(_required(row, "yes_bid_size_fp"), quantity=True)
-    ask_size = _decimal(_required(row, "yes_ask_size_fp"), quantity=True)
+    raw_bid = _required(row, "yes_bid_dollars")
+    raw_ask = _required(row, "yes_ask_dollars")
+    raw_bid_size = _required(row, "yes_bid_size_fp")
+    raw_ask_size = _required(row, "yes_ask_size_fp")
+    bid = _dollars_to_cents(raw_bid)
+    ask = _dollars_to_cents(raw_ask)
+    bid_size = _decimal(raw_bid_size, quantity=True)
+    ask_size = _decimal(raw_ask_size, quantity=True)
     executable_bid = None if bid_size == 0 else bid
     executable_ask = None if ask_size == 0 else ask
     if (
@@ -262,6 +269,10 @@ def _parse_market(row: object) -> tuple[dict[str, object] | None, str | None]:
             "yes_ask": executable_ask,
             "yes_bid_size": bid_size,
             "yes_ask_size": ask_size,
+            "yes_bid_raw": None if bid_size == 0 else raw_bid,
+            "yes_ask_raw": None if ask_size == 0 else raw_ask,
+            "yes_bid_size_raw": None if bid_size == 0 else raw_bid_size,
+            "yes_ask_size_raw": None if ask_size == 0 else raw_ask_size,
             "status": status,
         },
         None,
@@ -314,10 +325,8 @@ def _parse_milestones_page(
     return _parse_page(value, "milestones", _parse_milestone)
 
 
-def _parse_events_page(
-    value: object,
-) -> tuple[tuple[dict[str, object], ...], str]:
-    return _parse_page(value, "events", _parse_event)
+def _parse_event_response(value: object) -> dict[str, object]:
+    return _parse_event(_required(value, "event"))
 
 
 def _duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -366,22 +375,51 @@ def _safe_title(value: object) -> bool:
         return False
 
 
-def _catalog_digest(games: tuple[KalshiShadowGame, ...]) -> str:
-    projection = [
-        {
-            "event_ticker": game.event_ticker,
-            "game_title": game.game_title,
-            "markets": [
-                {
-                    "ticker": market.ticker,
-                    "yes_player_name": market.yes_player_name,
-                }
-                for market in game.markets
-            ],
-            "scheduled_start_wall_ns": game.scheduled_start_wall_ns,
+def _catalog_digest(
+    games: tuple[KalshiShadowGame, ...],
+    excluded: tuple[KalshiCatalogExclusion, ...],
+) -> str:
+    def provenance(value: KalshiCompetitionProvenance | None) -> object:
+        return None if value is None else {
+            "sport": value.sport,
+            "scope": value.scope,
+            "queried_competitions": value.queried_competitions,
+            "series_ticker": value.series_ticker,
+            "milestone_id": value.milestone_id,
+            "milestone_league": value.milestone_league,
         }
-        for game in games
-    ]
+
+    projection = {
+        "games": [
+            {
+                "provenance": provenance(game.provenance),
+                "event_ticker": game.event_ticker,
+                "scheduled_start_wall_ns": game.scheduled_start_wall_ns,
+                "game_title": game.game_title,
+                "markets": [
+                    {
+                        "ticker": market.ticker,
+                        "yes_player_name": market.yes_player_name,
+                        "initial_yes_bid": market.initial_yes_bid,
+                        "initial_yes_ask": market.initial_yes_ask,
+                        "initial_yes_bid_depth": market.initial_yes_bid_depth,
+                        "initial_yes_ask_depth": market.initial_yes_ask_depth,
+                    }
+                    for market in game.markets
+                ],
+                "initial_book_state": game.initial_book_state,
+            }
+            for game in games
+        ],
+        "excluded": [
+            {
+                "event_ticker": row.event_ticker,
+                "reason": row.reason,
+                "provenance": provenance(row.provenance),
+            }
+            for row in excluded
+        ],
+    }
     payload = json.dumps(
         projection,
         ensure_ascii=False,
@@ -441,18 +479,17 @@ def _tennis_scope(filters: dict[str, object]) -> tuple[str, tuple[str, ...]]:
     return tennis, names
 
 
-def _series_maps(
+def _tennis_series(
     rows: tuple[dict[str, object], ...],
     filters: dict[str, object],
-) -> tuple[tuple[str, ...], dict[str, str]]:
+) -> frozenset[str]:
     ordering = filters["sport_ordering"]
     if type(ordering) is not tuple:
         raise ValueError("kalshi_catalog_schema_invalid")
     canonical_sports = frozenset(
         name for name in ordering if name != "All sports"
     )
-    official: list[str] = []
-    sport_by_series: dict[str, str] = {}
+    tennis_series: set[str] = set()
     seen: set[str] = set()
     for row in rows:
         if row["category"] != "Sports":
@@ -462,29 +499,15 @@ def _series_maps(
         if type(ticker) is not str or type(tags) is not tuple or ticker in seen:
             raise ValueError("kalshi_catalog_schema_invalid")
         seen.add(ticker)
-        official.append(ticker)
         matches = tuple(tag for tag in tags if tag in canonical_sports)
-        if len(matches) == 1:
-            sport_by_series[ticker] = matches[0]
-    return tuple(official), sport_by_series
-
-
-def _resolve_series(event_ticker: str, official: tuple[str, ...]) -> str | None:
-    matches = tuple(
-        ticker
-        for ticker in official
-        if event_ticker.startswith(ticker + "-")
-    )
-    if not matches:
-        return None
-    longest = max(len(ticker) for ticker in matches)
-    winners = tuple(ticker for ticker in matches if len(ticker) == longest)
-    if len(winners) != 1:
+        if matches == ("Tennis",):
+            tennis_series.add(ticker)
+    if not tennis_series:
         raise ValueError("kalshi_catalog_schema_invalid")
-    return winners[0]
+    return frozenset(tennis_series)
 
 
-def _eligible_markets(event: dict[str, object]) -> tuple[dict[str, object], ...]:
+def _active_binary_markets(event: dict[str, object]) -> tuple[dict[str, object], ...]:
     raw_markets = event["markets"]
     if type(raw_markets) is not tuple:
         raise ValueError("kalshi_catalog_schema_invalid")
@@ -494,22 +517,6 @@ def _eligible_markets(event: dict[str, object]) -> tuple[dict[str, object], ...]
             raise ValueError("kalshi_catalog_schema_invalid")
         if market["status"] != "active":
             continue
-        bid = market["yes_bid"]
-        ask = market["yes_ask"]
-        bid_size = market["yes_bid_size"]
-        ask_size = market["yes_ask_size"]
-        if bid is None or ask is None:
-            continue
-        if (
-            type(bid) is not Decimal
-            or type(ask) is not Decimal
-            or type(bid_size) is not Decimal
-            or type(ask_size) is not Decimal
-            or bid_size <= 0
-            or ask_size <= 0
-            or ask - bid > Decimal(100)
-        ):
-            raise ValueError("kalshi_catalog_schema_invalid")
         result.append(market)
     return tuple(result)
 
@@ -518,7 +525,6 @@ class KalshiShadowCatalogTransport:
     """Public Sports metadata client with no account or mutation authority."""
 
     __slots__ = (
-        "_event_sibling_counts",
         "_last_public_metadata_at",
         "_monotonic",
         "_session",
@@ -535,7 +541,6 @@ class KalshiShadowCatalogTransport:
         self._sleep = time.sleep
         self._monotonic = time.monotonic
         self._last_public_metadata_at: float | None = None
-        self._event_sibling_counts: dict[str, int] = {}
 
     def _pace(self) -> None:
         if self._last_public_metadata_at is None:
@@ -674,35 +679,20 @@ class KalshiShadowCatalogTransport:
         )
         return rows, metadata
 
-    def get_open_events(
-        self, *, series_ticker: str
-    ) -> tuple[tuple[dict[str, object], ...], dict[str, object]]:
-        if type(series_ticker) is not str or not series_ticker:
+    def get_event(self, *, event_ticker: str) -> dict[str, object]:
+        if not _safe_ticker(event_ticker):
             _fail("kalshi_catalog_query_invalid")
-        rows, metadata = self._pages(
-            _API_PREFIX + "/events",
-            {
-                "series_ticker": series_ticker,
-                "status": "open",
-                "with_nested_markets": "true",
-                "limit": 200,
-            },
-            _parse_events_page,
-        )
-        skips = Counter()
-        for row in rows:
-            event_ticker = row["event_ticker"]
-            sibling_count = len(row["markets"]) + sum(
-                row.get("market_skips", {}).values()
+        try:
+            return _parse_event_response(
+                self._read(
+                    _API_PREFIX + "/events/" + event_ticker,
+                    {"with_nested_markets": "true"},
+                )
             )
-            previous_count = self._event_sibling_counts.get(event_ticker)
-            if previous_count is not None and previous_count != sibling_count:
-                _fail("kalshi_catalog_schema_invalid")
-            self._event_sibling_counts[event_ticker] = sibling_count
-            for product, count in row.get("market_skips", {}).items():
-                skips[product] += count
-        metadata["market_skips"] = dict(sorted(skips.items()))
-        return rows, metadata
+        except KalshiShadowCatalogError:
+            raise
+        except Exception:
+            _fail("kalshi_catalog_schema_invalid")
 
     def _pages(
         self,
@@ -734,23 +724,21 @@ class KalshiShadowCatalogTransport:
             query["cursor"] = cursor
         _fail("kalshi_catalog_pagination_invalid")
 
-    def discover_tennis_games(
+    def discover_tennis_catalog(
         self, *, now: datetime | None = None
-    ) -> tuple[tuple[KalshiShadowGame, ...], str]:
+    ) -> KalshiShadowCatalogSnapshot:
         try:
-            self._event_sibling_counts = {}
             filters = self.get_sports_filters()
             tennis, competitions = _tennis_scope(filters)
             day_start, day_end = _local_day_bounds(now)
             minimum_start_date = datetime.fromtimestamp(
                 day_start, tz=timezone.utc
             )
-            official, sport_by_series = _series_maps(
+            tennis_series = _tennis_series(
                 self.get_sports_series(), filters
             )
 
             seen_milestones: dict[str, dict[str, object]] = {}
-            game_milestone_ids: set[str] = set()
             expected_events: dict[str, dict[str, object]] = {}
             for competition in competitions:
                 rows, _ = self.get_sports_milestones(
@@ -768,9 +756,10 @@ class KalshiShadowCatalogTransport:
                     ):
                         raise ValueError("kalshi_catalog_schema_invalid")
                     seen_milestones[milestone_id] = milestone
-                    if milestone["type"] == "game":
-                        game_milestone_ids.add(milestone_id)
-                    if milestone["category"] != "Sports":
+                    if (
+                        milestone["type"] != "game"
+                        or milestone["category"] != "Sports"
+                    ):
                         continue
                     start_ts = milestone["start_ts"]
                     if (
@@ -786,62 +775,61 @@ class KalshiShadowCatalogTransport:
                         event_ticker = primary[0]
                     if type(event_ticker) is not str:
                         raise ValueError("kalshi_catalog_schema_invalid")
-                    series_ticker = _resolve_series(event_ticker, official)
-                    if (
-                        series_ticker is None
-                        or sport_by_series.get(series_ticker) != tennis
-                    ):
-                        continue
                     expected = {
-                        "series_ticker": series_ticker,
                         "milestone_id": milestone_id,
                         "scheduled_start_ts": start_ts,
+                        "milestone_league": milestone["league"],
+                        "queried_competitions": {competition},
                     }
                     previous_event = expected_events.get(event_ticker)
-                    if previous_event is not None and previous_event != expected:
-                        raise ValueError("kalshi_catalog_schema_invalid")
-                    expected_events[event_ticker] = expected
-
-            expected_by_series: dict[str, dict[str, dict[str, object]]] = {}
-            for event_ticker, expected in expected_events.items():
-                series_ticker = expected["series_ticker"]
-                if type(series_ticker) is not str:
-                    raise ValueError("kalshi_catalog_schema_invalid")
-                expected_by_series.setdefault(series_ticker, {})[
-                    event_ticker
-                ] = expected
+                    if previous_event is None:
+                        expected_events[event_ticker] = expected
+                    else:
+                        if {
+                            key: value
+                            for key, value in previous_event.items()
+                            if key != "queried_competitions"
+                        } != {
+                            key: value
+                            for key, value in expected.items()
+                            if key != "queried_competitions"
+                        }:
+                            raise ValueError("kalshi_catalog_schema_invalid")
+                        previous_event["queried_competitions"].add(competition)
 
             games: list[KalshiShadowGame] = []
+            excluded: list[KalshiCatalogExclusion] = []
             market_tickers: set[str] = set()
-            for series_ticker in sorted(expected_by_series):
-                rows, _ = self.get_open_events(series_ticker=series_ticker)
-                expected = expected_by_series[series_ticker]
-                seen_events: dict[str, dict[str, object]] = {}
-                for event in rows:
-                    event_ticker = event["event_ticker"]
-                    if type(event_ticker) is not str or event_ticker not in expected:
-                        continue
-                    previous_event = seen_events.get(event_ticker)
-                    if previous_event is not None:
-                        if previous_event != event:
-                            raise ValueError("kalshi_catalog_schema_invalid")
-                        continue
-                    seen_events[event_ticker] = event
-                    if event["series_ticker"] != series_ticker:
-                        raise ValueError("kalshi_catalog_schema_invalid")
-                    if event["category"] != "Sports":
-                        continue
-                    raw_markets = event["markets"]
-                    market_skips = event["market_skips"]
-                    if type(raw_markets) is not tuple or type(market_skips) is not dict:
-                        raise ValueError("kalshi_catalog_schema_invalid")
-                    sibling_count = len(raw_markets) + sum(market_skips.values())
-                    markets = _eligible_markets(event)
-                    if len(markets) != 2 or sibling_count != 2:
-                        continue
-                    first, second = sorted(
-                        markets, key=lambda market: market["ticker"]
-                    )
+            for event_ticker in sorted(expected_events):
+                expected = expected_events[event_ticker]
+                event = self.get_event(event_ticker=event_ticker)
+                if event["event_ticker"] != event_ticker:
+                    raise ValueError("kalshi_catalog_schema_invalid")
+                series_ticker = event["series_ticker"]
+                if type(series_ticker) is not str:
+                    raise ValueError("kalshi_catalog_schema_invalid")
+                provenance = KalshiCompetitionProvenance(
+                    sport=tennis,
+                    scope="Games",
+                    queried_competitions=tuple(sorted(expected["queried_competitions"])),
+                    series_ticker=series_ticker,
+                    milestone_id=expected["milestone_id"],
+                    milestone_league=expected["milestone_league"],
+                )
+                reason: str | None = None
+                if event["category"] != "Sports" or series_ticker not in tennis_series:
+                    reason = "event_series_not_tennis"
+                raw_markets = event["markets"]
+                if type(raw_markets) is not tuple:
+                    raise ValueError("kalshi_catalog_schema_invalid")
+                markets = _active_binary_markets(event)
+                if reason is None and (
+                    len(markets) != 2
+                    or any(market["notional_value"] != Decimal(1) for market in markets)
+                ):
+                    reason = "active_binary_sibling_count_invalid"
+                if reason is None:
+                    first, second = sorted(markets, key=lambda market: market["ticker"])
                     first_ticker = first["ticker"]
                     second_ticker = second["ticker"]
                     game_title = event["title"]
@@ -855,11 +843,6 @@ class KalshiShadowCatalogTransport:
                         raise ValueError("kalshi_catalog_schema_invalid")
                     market_tickers.update((first_ticker, second_ticker))
                     if (
-                        expected[event_ticker]["milestone_id"]
-                        not in game_milestone_ids
-                    ):
-                        continue
-                    if (
                         not _safe_ticker(event_ticker)
                         or not _safe_title(game_title)
                         or not _safe_ticker(first_ticker)
@@ -867,31 +850,56 @@ class KalshiShadowCatalogTransport:
                         or type(first_player) is not str
                         or type(second_player) is not str
                     ):
-                        continue
-                    try:
-                        first_name = normalize_player_name(first_player)
-                        second_name = normalize_player_name(second_player)
-                    except ValueError:
-                        continue
-                    if first_name == second_name:
-                        continue
-                    try:
-                        start_ns = _seconds_to_wall_ns(
-                            expected[event_ticker]["scheduled_start_ts"]
+                        reason = "event_identity_invalid"
+                    if reason is None:
+                        try:
+                            first_name = normalize_player_name(first_player)
+                            second_name = normalize_player_name(second_player)
+                        except ValueError:
+                            reason = "player_identity_invalid"
+                    if reason is None and first_name == second_name:
+                        reason = "player_identity_invalid"
+                    if reason is None:
+                        try:
+                            start_ns = _seconds_to_wall_ns(
+                                expected["scheduled_start_ts"]
+                            )
+                        except ValueError:
+                            _fail("kalshi_catalog_timestamp_invalid")
+                    if reason is None:
+                        has_bid = any(
+                            market["yes_bid"] is not None for market in markets
                         )
-                    except ValueError:
-                        _fail("kalshi_catalog_timestamp_invalid")
-                    games.append(
-                        KalshiShadowGame(
-                            event_ticker=event_ticker,
-                            scheduled_start_wall_ns=start_ns,
-                            game_title=game_title,
-                            markets=(
-                                KalshiShadowMarket(first_ticker, first_player),
-                                KalshiShadowMarket(second_ticker, second_player),
-                            ),
+                        has_ask = any(
+                            market["yes_ask"] is not None for market in markets
                         )
-                    )
+                        state = (
+                            "two_sided" if has_bid and has_ask else
+                            "one_sided" if has_bid or has_ask else "empty"
+                        )
+                        games.append(
+                            KalshiShadowGame(
+                                provenance=provenance,
+                                event_ticker=event_ticker,
+                                scheduled_start_wall_ns=start_ns,
+                                game_title=game_title,
+                                markets=(
+                                    KalshiShadowMarket(
+                                        first_ticker, first_player,
+                                        first["yes_bid_raw"], first["yes_ask_raw"],
+                                        first["yes_bid_size_raw"], first["yes_ask_size_raw"],
+                                    ),
+                                    KalshiShadowMarket(
+                                        second_ticker, second_player,
+                                        second["yes_bid_raw"], second["yes_ask_raw"],
+                                        second["yes_bid_size_raw"], second["yes_ask_size_raw"],
+                                    ),
+                                ),
+                                initial_book_state=state,
+                            )
+                        )
+                if reason is not None:
+                    excluded.append(KalshiCatalogExclusion(event_ticker, reason, provenance))
             result = tuple(
                 sorted(
                     games,
@@ -901,11 +909,24 @@ class KalshiShadowCatalogTransport:
                     ),
                 )
             )
-            return result, _catalog_digest(result)
+            exclusions = tuple(
+                sorted(excluded, key=lambda row: (row.event_ticker, row.reason))
+            )
+            return KalshiShadowCatalogSnapshot(
+                games=result,
+                excluded=exclusions,
+                catalog_sha256=_catalog_digest(result, exclusions),
+            )
         except KalshiShadowCatalogError:
             raise
         except Exception:
             _fail("kalshi_catalog_schema_invalid")
+
+    def discover_tennis_games(
+        self, *, now: datetime | None = None
+    ) -> tuple[tuple[KalshiShadowGame, ...], str]:
+        snapshot = self.discover_tennis_catalog(now=now)
+        return snapshot.games, snapshot.catalog_sha256
 
 
 __all__ = ["KalshiShadowCatalogError", "KalshiShadowCatalogTransport"]

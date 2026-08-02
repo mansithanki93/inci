@@ -22,10 +22,20 @@ class HybridStatus(str, Enum):
 class KalshiCompetitionProvenance:
     sport: str
     scope: str
-    queried_competition: str
+    queried_competitions: tuple[str, ...]
     series_ticker: str
     milestone_id: str
     milestone_league: str | None
+
+    def __post_init__(self) -> None:
+        keys = self.queried_competitions
+        if (
+            type(keys) is not tuple
+            or not keys
+            or any(type(key) is not str or not key for key in keys)
+            or keys != tuple(sorted(set(keys)))
+        ):
+            raise ValueError("kalshi_competition_provenance_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,8 +60,9 @@ class KalshiShadowGame:
 
 @dataclass(frozen=True, slots=True)
 class KalshiCatalogExclusion:
+    event_ticker: str
     reason: str
-    count: int
+    provenance: KalshiCompetitionProvenance | None
 
 
 @dataclass(frozen=True, slots=True)
