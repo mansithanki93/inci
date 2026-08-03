@@ -66,6 +66,8 @@ class AbstentionReason(str, Enum):
     MISSING_CORRECTION_SEMANTICS = "missing_correction_semantics"
     MISSING_SOURCE_EVENT_ID = "missing_source_event_id"
     MISSING_SOURCE_GENERATED_TIME = "missing_source_generated_time"
+    MATCH_NOT_FOUND = "match_not_found"
+    DUPLICATE_MATCH = "duplicate_match"
 
 
 class LiveScoreParseError(ValueError):
@@ -305,6 +307,14 @@ def _id_text(value: object) -> str:
     raise LiveScoreParseError("impossible_score")
 
 
+def _matches_bound_id(value: object, expected: str) -> bool:
+    return (
+        type(value) is str and value == expected
+    ) or (
+        type(value) is int and str(value) == expected
+    )
+
+
 def _integer(value: object, *, maximum: int = 99) -> int:
     if type(value) is int:
         result = value
@@ -451,15 +461,33 @@ def _api_point_tape(value: object) -> tuple[PointByPointGame, ...]:
     return tuple(games)
 
 
-def _api_tennis(document: object) -> _WireFacts | AbstentionReason:
+def _api_tennis(
+    document: object,
+    context: LiveScoreCaptureContext,
+) -> _WireFacts | AbstentionReason:
     if type(document) is not dict:
         return AbstentionReason.UNKNOWN_SCHEMA
     if document.get("success") in (0, False):
         return AbstentionReason.ACCESS_DENIED
     matches = document.get("result")
-    if document.get("success") not in (1, True) or type(matches) is not list or len(matches) != 1 or type(matches[0]) is not dict:
+    if document.get("success") not in (1, True) or type(matches) is not list:
         return AbstentionReason.UNKNOWN_SCHEMA
-    match = matches[0]
+    selected = [
+        match
+        for match in matches
+        if (
+            type(match) is dict
+            and _matches_bound_id(
+                match.get("event_key"),
+                context.provider_match_id,
+            )
+        )
+    ]
+    if not selected:
+        return AbstentionReason.MATCH_NOT_FOUND
+    if len(selected) != 1:
+        return AbstentionReason.DUPLICATE_MATCH
+    match = selected[0]
     kind = match.get("event_type_type")
     if type(kind) is not str:
         return AbstentionReason.UNKNOWN_SCHEMA
@@ -491,15 +519,28 @@ def _api_tennis(document: object) -> _WireFacts | AbstentionReason:
         raise
 
 
-def _goalserve(root: ElementTree.Element) -> _WireFacts | AbstentionReason:
+def _goalserve(
+    root: ElementTree.Element,
+    context: LiveScoreCaptureContext,
+) -> _WireFacts | AbstentionReason:
     if root.tag != "scores":
         return AbstentionReason.UNKNOWN_SCHEMA
     if "access" in " ".join(root.attrib.values()).lower():
         return AbstentionReason.ACCESS_DENIED
     matches = root.findall("./tournament/matches/match")
-    if len(matches) != 1:
-        return AbstentionReason.UNKNOWN_SCHEMA
-    match = matches[0]
+    selected = [
+        match
+        for match in matches
+        if _matches_bound_id(
+            match.attrib.get("id"),
+            context.provider_match_id,
+        )
+    ]
+    if not selected:
+        return AbstentionReason.MATCH_NOT_FOUND
+    if len(selected) != 1:
+        return AbstentionReason.DUPLICATE_MATCH
+    match = selected[0]
     try:
         status, termination = _status(match.attrib.get("status"), provider=ProviderSlot.GOALSERVE)
     except ValueError:
@@ -632,10 +673,14 @@ def parse_live_score(provider_slot: str, payload: bytes, context: LiveScoreCaptu
     slot = _parse_slot(provider_slot)
     raw, raw_sha256 = _raw(payload)
     if slot is ProviderSlot.GOALSERVE:
-        parsed = _goalserve(_xml_document(raw))
+        parsed = _goalserve(_xml_document(raw), context)
     else:
         document = _json_document(raw)
-        parsed = _api_tennis(document) if slot is ProviderSlot.API_TENNIS else _live_tennis_api(document)
+        parsed = (
+            _api_tennis(document, context)
+            if slot is ProviderSlot.API_TENNIS
+            else _live_tennis_api(document)
+        )
     if type(parsed) is AbstentionReason:
         return _result(slot, context, raw_sha256, None, parsed)
     facts, abstention = _facts(context, parsed)

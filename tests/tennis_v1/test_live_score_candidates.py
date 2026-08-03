@@ -121,6 +121,45 @@ class LiveScoreCandidateTests(unittest.TestCase):
         self.assertIsNone(self._parse("api_tennis", API_TENNIS_LIVE).facts.source_generated_wall_ns)
         self.assertIsNotNone(self._parse("live_tennis_api", LIVE_TENNIS_API_LIVE).facts.source_generated_wall_ns)
 
+    def test_api_tennis_selects_exact_context_match_from_multi_event_result(self) -> None:
+        from inci_tennis_adapters.live_score_candidates import AbstentionReason
+
+        before = copy.deepcopy(API_TENNIS_LIVE["result"][0])
+        before["event_key"] = "16"
+        after = copy.deepcopy(before)
+        after["event_key"] = "18"
+        fixture = {"success": 1, "result": [before, API_TENNIS_LIVE["result"][0], after]}
+        self.assertEqual(self._parse("api_tennis", fixture).facts.home_player_id, "101")
+
+        wrong_orientation = copy.deepcopy(API_TENNIS_LIVE["result"][0])
+        wrong_orientation["first_player_key"] = "999"
+        for result, expected in (
+            ([before, after], AbstentionReason.MATCH_NOT_FOUND),
+            ([before, API_TENNIS_LIVE["result"][0], copy.deepcopy(API_TENNIS_LIVE["result"][0]), after], AbstentionReason.DUPLICATE_MATCH),
+            ([before, wrong_orientation, after], AbstentionReason.IDENTITY_MISMATCH),
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(self._parse("api_tennis", {"success": 1, "result": result}).abstention, expected)
+
+    def test_goalserve_selects_exact_context_match_from_multi_match_feed(self) -> None:
+        from inci_tennis_adapters.live_score_candidates import AbstentionReason
+
+        target = GOALSERVE_LIVE.replace(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<scores><tournament name=\"ATP Sample\"><matches>", b"").replace(b"</matches></tournament></scores>", b"")
+        before = target.replace(b'id="17"', b'id="16"')
+        after = target.replace(b'id="17"', b'id="18"')
+        def feed(matches: bytes) -> bytes:
+            return b'<scores><tournament name="first"><matches>' + matches + b'</matches></tournament></scores>'
+
+        self.assertEqual(self._parse("goalserve", feed(before + target + after)).facts.away_player_id, "102")
+        wrong_orientation = target.replace(b'id="102"', b'id="999"')
+        for matches, expected in (
+            (before + after, AbstentionReason.MATCH_NOT_FOUND),
+            (before + target + target + after, AbstentionReason.DUPLICATE_MATCH),
+            (before + wrong_orientation + after, AbstentionReason.IDENTITY_MISMATCH),
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(self._parse("goalserve", feed(matches)).abstention, expected)
+
     def test_standard_bo3_live_positions_are_supported(self) -> None:
         from inci_tennis_expert.contracts import MatchStatus
 
@@ -217,7 +256,7 @@ class LiveScoreCandidateTests(unittest.TestCase):
             ("api_tennis", api_suspended, None),
             ("goalserve", goal_suspended, None),
             ("live_tennis_api", lta_unknown_status, AbstentionReason.UNKNOWN_STATUS),
-            ("api_tennis", {"success": 1, "result": []}, AbstentionReason.UNKNOWN_SCHEMA),
+            ("api_tennis", {"success": 1, "result": []}, AbstentionReason.MATCH_NOT_FOUND),
             ("goalserve", b"<not_scores/>", AbstentionReason.UNKNOWN_SCHEMA),
             ("live_tennis_api", [], AbstentionReason.UNKNOWN_SCHEMA),
             ("api_tennis", {"success": 0, "error": "access denied"}, AbstentionReason.ACCESS_DENIED),
