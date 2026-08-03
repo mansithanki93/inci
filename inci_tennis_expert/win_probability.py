@@ -11,7 +11,9 @@ from .contracts import (
     ScoreValue,
     SetScore,
     TennisState,
+    TennisStateInvariantError,
 )
+from .tennis_score import validate_tennis_state
 
 
 _CONTEXT = Context(prec=50)
@@ -90,6 +92,16 @@ def _tiebreak_server(first_server: PlayerSide, completed_points: int) -> PlayerS
     if completed_points % 4 in (0, 3):
         return first_server
     return _opposite(first_server)
+
+
+def _tiebreak_score_is_reachable(points_home: int, points_away: int) -> bool:
+    high = max(points_home, points_away)
+    low = min(points_home, points_away)
+    if high <= 6:
+        return True
+    if high == 7 and low <= 5:
+        return True
+    return low >= 6 and high - low <= 2
 
 
 def _solve_linear_system(
@@ -196,6 +208,8 @@ def tiebreak_home_win_probability(
         raise WinProbabilityError("points_away")
     if type(first_server) is not PlayerSide:
         raise WinProbabilityError("first_server")
+    if not _tiebreak_score_is_reachable(points_home, points_away):
+        raise WinProbabilityError("tiebreak_score")
     if points_home >= 7 and points_home - points_away >= 2:
         return Decimal("1")
     if points_away >= 7 and points_away - points_home >= 2:
@@ -539,6 +553,10 @@ def standard_bo3_live_probabilities(
         or not state.snapshot_complete
     ):
         raise WinProbabilityError("state_untrusted")
+    try:
+        validate_tennis_state(state)
+    except TennisStateInvariantError:
+        raise WinProbabilityError("state_invalid") from None
     home_serve = _probability(
         home_serve_point_probability,
         "home_serve_point_probability",

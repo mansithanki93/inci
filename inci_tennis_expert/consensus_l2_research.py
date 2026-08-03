@@ -337,6 +337,7 @@ class AcceptedScoreConsensusTransitionV1(_ResearchValue):
     consensus_epoch: int
     correction_epoch: int
     supporters: tuple[DurableRawScoreSupportRefV1, ...]
+    prior_accepted_score_sha256: str | None
     consensus_record_sequence: int
     consensus_record_sha256: str
     consensus_accepted_wall_ns: int
@@ -415,6 +416,20 @@ class AcceptedScoreConsensusTransitionV1(_ResearchValue):
             for supporter in canonical_supporters
             if supporter.independence_lineage_id is not None
         }
+        independence_by_source_lineage: dict[str, str | None] = {}
+        for supporter in canonical_supporters:
+            prior_identity = independence_by_source_lineage.get(
+                supporter.source_lineage_sha256
+            )
+            if (
+                supporter.source_lineage_sha256
+                in independence_by_source_lineage
+                and prior_identity != supporter.independence_lineage_id
+            ):
+                _fail("independence_lineage_alias")
+            independence_by_source_lineage[
+                supporter.source_lineage_sha256
+            ] = supporter.independence_lineage_id
         if len(proven_lineages) < 2:
             _fail("independence_unproven")
         expected_source_ids = tuple(
@@ -438,6 +453,8 @@ class AcceptedScoreConsensusTransitionV1(_ResearchValue):
         ):
             _fail("normalized_support_mismatch")
         _integer(self.consensus_record_sequence, positive=True)
+        if self.prior_accepted_score_sha256 is not None:
+            _sha256(self.prior_accepted_score_sha256)
         _sha256(self.consensus_record_sha256)
         _integer(self.consensus_accepted_wall_ns)
         _integer(self.consensus_accepted_monotonic_ns)
@@ -483,6 +500,9 @@ class AcceptedScoreConsensusTransitionV1(_ResearchValue):
                 "consensus_epoch": self.consensus_epoch,
                 "correction_epoch": self.correction_epoch,
                 "supporters": self.supporters,
+                "prior_accepted_score_sha256": (
+                    self.prior_accepted_score_sha256
+                ),
                 "consensus_record_sequence": self.consensus_record_sequence,
                 "consensus_record_sha256": self.consensus_record_sha256,
                 "consensus_accepted_wall_ns": (
@@ -694,7 +714,7 @@ class ConsensusL2ResearchFrameV1(_ResearchValue):
             or observation.subscription_id
             != transition.last_book_subscription_id
             or observation.global_sequence
-            <= transition.last_book_global_sequence
+            != transition.last_book_global_sequence + 1
             or observation.captured_monotonic_ns
             < transition.consensus_accepted_monotonic_ns
             or observation.raw_parent.durable_record_sequence
@@ -797,6 +817,9 @@ class ConsensusL2BarrierStateV1(_ResearchValue):
     market_ids: tuple[str, str]
     pending_transition: AcceptedScoreConsensusTransitionV1 | None
     last_transition: AcceptedScoreConsensusTransitionV1 | None
+    last_transition_resolution: (
+        ConsensusL2ResearchFrameV1 | ConsensusL2CoverageV1 | None
+    )
     supporter_watermarks: tuple[DurableRawScoreSupportRefV1, ...]
     last_durable_record_sequence: int
     last_consumed_event_kind: ConsensusL2DurableEventKindV1 | None
@@ -817,6 +840,12 @@ class ConsensusL2BarrierStateV1(_ResearchValue):
                 and type(transition) is not AcceptedScoreConsensusTransitionV1
             ):
                 _fail("barrier_state_invalid")
+            if transition is not None and (
+                transition.canonical_match_id != self.canonical_match_id
+                or transition.market_tickers != self.market_tickers
+                or transition.market_ids != self.market_ids
+            ):
+                _fail("barrier_state_universe_mismatch")
         if (
             self.pending_transition is not None
             and (
@@ -827,6 +856,24 @@ class ConsensusL2BarrierStateV1(_ResearchValue):
             )
         ):
             _fail("barrier_state_invalid")
+        resolution = self.last_transition_resolution
+        if resolution is not None and type(resolution) not in (
+            ConsensusL2ResearchFrameV1,
+            ConsensusL2CoverageV1,
+        ):
+            _fail("barrier_state_resolution_invalid")
+        if self.last_transition is None:
+            if resolution is not None:
+                _fail("barrier_state_resolution_invalid")
+        elif self.pending_transition is not None:
+            if resolution is not None:
+                _fail("barrier_state_resolution_invalid")
+        elif resolution is None:
+            _fail("barrier_state_resolution_missing")
+        elif (
+            resolution.consensus_transition != self.last_transition
+        ):
+            _fail("barrier_state_resolution_mismatch")
         if (
             type(self.supporter_watermarks) is not tuple
             or any(
@@ -850,6 +897,54 @@ class ConsensusL2BarrierStateV1(_ResearchValue):
             or type(self.session_ended) is not bool
         ):
             _fail("barrier_state_invalid")
+        independence_by_source_lineage: dict[str, str | None] = {}
+        for watermark in self.supporter_watermarks:
+            prior_identity = independence_by_source_lineage.get(
+                watermark.source_lineage_sha256
+            )
+            if (
+                watermark.source_lineage_sha256
+                in independence_by_source_lineage
+                and prior_identity != watermark.independence_lineage_id
+            ):
+                _fail("supporter_watermark_lineage_alias")
+            independence_by_source_lineage[
+                watermark.source_lineage_sha256
+            ] = watermark.independence_lineage_id
+        if self.last_transition is None:
+            if self.supporter_watermarks:
+                _fail("supporter_watermark_without_transition")
+        else:
+            watermarks_by_source = {
+                watermark.source_id: watermark
+                for watermark in self.supporter_watermarks
+            }
+            if any(
+                watermark.durable_record_sequence
+                >= self.last_transition.consensus_record_sequence
+                or watermark.received_wall_ns
+                > self.last_transition.consensus_accepted_wall_ns
+                or watermark.received_monotonic_ns
+                > self.last_transition.consensus_accepted_monotonic_ns
+                for watermark in self.supporter_watermarks
+            ):
+                _fail("supporter_watermark_from_future")
+            for supporter in self.last_transition.supporters:
+                watermark = watermarks_by_source.get(supporter.source_id)
+                if (
+                    watermark is None
+                    or watermark.source_lineage_sha256
+                    != supporter.source_lineage_sha256
+                    or watermark.independence_lineage_id
+                    != supporter.independence_lineage_id
+                    or watermark.durable_record_sequence
+                    < supporter.durable_record_sequence
+                    or watermark.received_wall_ns
+                    < supporter.received_wall_ns
+                    or watermark.received_monotonic_ns
+                    < supporter.received_monotonic_ns
+                ):
+                    _fail("supporter_watermark_missing")
         if (
             self.last_transition is not None
             and self.last_durable_record_sequence
@@ -870,11 +965,70 @@ class ConsensusL2BarrierStateV1(_ResearchValue):
             _fail("barrier_state_invalid")
         else:
             _sha256(self.last_consumed_event_sha256)
+        if resolution is not None:
+            if type(resolution) is ConsensusL2ResearchFrameV1:
+                resolution_sequence = (
+                    resolution.l2_observation.raw_parent.durable_record_sequence
+                )
+                resolution_kind = ConsensusL2DurableEventKindV1.L2_BOOK
+                resolution_sha256 = (
+                    resolution.l2_observation.observation_sha256
+                )
+            else:
+                resolution_sequence = (
+                    resolution.event_durable_record_sequence
+                )
+                if (
+                    self.last_durable_record_sequence
+                    == resolution_sequence
+                    and self.last_consumed_event_kind
+                    is ConsensusL2DurableEventKindV1.CENSOR
+                ):
+                    resolution_kind = ConsensusL2DurableEventKindV1.CENSOR
+                    resolution_sha256 = _censor_event_sha256(
+                        resolution.reason,
+                        event_sha256=resolution.event_sha256,
+                        durable_record_sequence=resolution_sequence,
+                        observed_wall_ns=resolution.observed_wall_ns,
+                        observed_monotonic_ns=(
+                            resolution.observed_monotonic_ns
+                        ),
+                    )
+                else:
+                    resolution_kind = ConsensusL2DurableEventKindV1.L2_BOOK
+                    resolution_sha256 = resolution.event_sha256
+            if (
+                resolution_sequence > self.last_durable_record_sequence
+                or (
+                    resolution_sequence
+                    == self.last_durable_record_sequence
+                    and (
+                        self.last_consumed_event_kind is not resolution_kind
+                        or self.last_consumed_event_sha256
+                        != resolution_sha256
+                    )
+                )
+            ):
+                _fail("barrier_state_resolution_invalid")
+        if (
+            self.last_transition is not None
+            and self.last_durable_record_sequence
+            == self.last_transition.consensus_record_sequence
+            and (
+                self.pending_transition != self.last_transition
+                or self.last_consumed_event_kind
+                is not ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS
+                or self.last_consumed_event_sha256
+                != self.last_transition.accepted_score_sha256
+            )
+        ):
+            _fail("barrier_state_invalid")
         if (
             self.last_consumed_event_kind
             is ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS
             and (
                 self.last_transition is None
+                or self.pending_transition is None
                 or self.last_durable_record_sequence
                 != self.last_transition.consensus_record_sequence
                 or self.last_consumed_event_sha256
@@ -882,15 +1036,25 @@ class ConsensusL2BarrierStateV1(_ResearchValue):
             )
         ):
             _fail("barrier_state_invalid")
-        if self.pending_transition is not None and (
-            self.last_durable_record_sequence
-            != self.pending_transition.consensus_record_sequence
-            or self.last_consumed_event_kind
-            is not ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS
-            or self.last_consumed_event_sha256
-            != self.pending_transition.accepted_score_sha256
-        ):
-            _fail("barrier_state_invalid")
+        if self.pending_transition is not None:
+            pending_sequence = (
+                self.pending_transition.consensus_record_sequence
+            )
+            if self.last_durable_record_sequence < pending_sequence:
+                _fail("barrier_state_invalid")
+            if self.last_durable_record_sequence == pending_sequence:
+                if (
+                    self.last_consumed_event_kind
+                    is not ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS
+                    or self.last_consumed_event_sha256
+                    != self.pending_transition.accepted_score_sha256
+                ):
+                    _fail("barrier_state_invalid")
+            elif (
+                self.last_consumed_event_kind
+                is not ConsensusL2DurableEventKindV1.L2_BOOK
+            ):
+                _fail("barrier_state_invalid")
         if self.session_ended and self.pending_transition is not None:
             _fail("barrier_state_invalid")
 
@@ -930,6 +1094,21 @@ class ConsensusL2BarrierUpdateV1(_ResearchValue):
         }
         if shape != allowed_shapes[self.disposition]:
             _fail("barrier_update_invalid")
+        if self.disposition in (
+            ConsensusL2DispositionV1.ARMED,
+            ConsensusL2DispositionV1.ADVANCED,
+        ):
+            pending = self.state.pending_transition
+            if (
+                pending is None
+                or self.state.last_durable_record_sequence
+                != pending.consensus_record_sequence
+                or self.state.last_consumed_event_kind
+                is not ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS
+                or self.state.last_consumed_event_sha256
+                != pending.accepted_score_sha256
+            ):
+                _fail("barrier_update_invalid")
         if self.disposition is ConsensusL2DispositionV1.ADVANCED:
             pending = self.state.pending_transition
             coverage = self.coverage
@@ -945,6 +1124,9 @@ class ConsensusL2BarrierUpdateV1(_ResearchValue):
                 != pending.consensus_accepted_wall_ns
                 or coverage.observed_monotonic_ns
                 != pending.consensus_accepted_monotonic_ns
+                or pending.prior_accepted_score_sha256 is None
+                or coverage.consensus_transition.accepted_score_sha256
+                != pending.prior_accepted_score_sha256
                 or coverage.consensus_transition.canonical_match_id
                 != pending.canonical_match_id
                 or coverage.consensus_transition.market_tickers
@@ -967,6 +1149,8 @@ class ConsensusL2BarrierUpdateV1(_ResearchValue):
             frame = self.frame
             if (
                 frame is None
+                or self.state.session_ended
+                or self.state.last_transition_resolution != frame
                 or self.state.last_transition != frame.consensus_transition
                 or self.state.last_durable_record_sequence
                 != frame.l2_observation.raw_parent.durable_record_sequence
@@ -1001,7 +1185,8 @@ class ConsensusL2BarrierUpdateV1(_ResearchValue):
             else:
                 _fail("barrier_update_invalid")
             if (
-                self.state.last_transition
+                self.state.last_transition_resolution != coverage
+                or self.state.last_transition
                 != coverage.consensus_transition
                 or self.state.last_durable_record_sequence
                 != coverage.event_durable_record_sequence
@@ -1027,6 +1212,7 @@ def initial_consensus_l2_barrier_v1(
         market_ids=market_ids,
         pending_transition=None,
         last_transition=None,
+        last_transition_resolution=None,
         supporter_watermarks=(),
         last_durable_record_sequence=0,
         last_consumed_event_kind=None,
@@ -1080,6 +1266,7 @@ def _state_with_consumed_event(
         market_ids=state.market_ids,
         pending_transition=state.pending_transition,
         last_transition=state.last_transition,
+        last_transition_resolution=state.last_transition_resolution,
         supporter_watermarks=state.supporter_watermarks,
         last_durable_record_sequence=sequence,
         last_consumed_event_kind=kind,
@@ -1143,7 +1330,11 @@ def _merge_supporter_watermarks(
     for supporter in current:
         previous = merged.get(supporter.source_id)
         if previous is not None and (
-            supporter.durable_record_sequence
+            supporter.source_lineage_sha256
+            != previous.source_lineage_sha256
+            or supporter.independence_lineage_id
+            != previous.independence_lineage_id
+            or supporter.durable_record_sequence
             <= previous.durable_record_sequence
             or supporter.received_wall_ns < previous.received_wall_ns
             or supporter.received_monotonic_ns
@@ -1167,7 +1358,22 @@ def open_consensus_l2_barrier_v1(
     ):
         _fail("barrier_open_invalid")
     _validate_transition_universe(state, transition)
+    if not _durable_event_is_new(
+        state,
+        ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS,
+        transition.consensus_record_sequence,
+        transition.accepted_score_sha256,
+    ):
+        return _ignored(state)
     previous = state.last_transition
+    if previous is None:
+        if transition.prior_accepted_score_sha256 is not None:
+            _fail("transition_parent_invalid")
+    elif (
+        transition.prior_accepted_score_sha256
+        != previous.accepted_score_sha256
+    ):
+        _fail("transition_parent_invalid")
     if previous is not None:
         incoming_key = _transition_key(transition)
         previous_key = _transition_key(previous)
@@ -1199,13 +1405,6 @@ def open_consensus_l2_barrier_v1(
             for supporter in transition.supporters
         ):
             _fail("supporter_global_watermark_regression")
-    if not _durable_event_is_new(
-        state,
-        ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS,
-        transition.consensus_record_sequence,
-        transition.accepted_score_sha256,
-    ):
-        _fail("transition_conflict")
     watermarks = _merge_supporter_watermarks(
         state.supporter_watermarks,
         transition.supporters,
@@ -1230,6 +1429,7 @@ def open_consensus_l2_barrier_v1(
         market_ids=state.market_ids,
         pending_transition=transition,
         last_transition=transition,
+        last_transition_resolution=None,
         supporter_watermarks=watermarks,
         last_durable_record_sequence=(
             transition.consensus_record_sequence
@@ -1278,14 +1478,6 @@ def observe_consensus_l2_book_v1(
     ):
         _fail("book_observation_invalid")
     _validate_observation_universe(state, observation)
-    pending = state.pending_transition
-    barrier = pending or state.last_transition
-    if barrier is not None and (
-        observation.captured_monotonic_ns
-        < barrier.consensus_accepted_monotonic_ns
-        or observation.global_sequence <= barrier.last_book_global_sequence
-    ):
-        return _ignored(state)
     sequence = observation.raw_parent.durable_record_sequence
     event_sha256 = observation.observation_sha256
     is_new = _durable_event_is_new(
@@ -1296,6 +1488,21 @@ def observe_consensus_l2_book_v1(
     )
     if not is_new:
         return _ignored(state)
+    pending = state.pending_transition
+    barrier = pending or state.last_transition
+    if barrier is not None and (
+        observation.captured_monotonic_ns
+        < barrier.consensus_accepted_monotonic_ns
+        or observation.global_sequence <= barrier.last_book_global_sequence
+    ):
+        return _ignored(
+            _state_with_consumed_event(
+                state,
+                kind=ConsensusL2DurableEventKindV1.L2_BOOK,
+                sequence=sequence,
+                event_sha256=event_sha256,
+            )
+        )
     if pending is None:
         return _ignored(
             _state_with_consumed_event(
@@ -1330,6 +1537,20 @@ def observe_consensus_l2_book_v1(
             consumed_event_kind=ConsensusL2DurableEventKindV1.L2_BOOK,
             consumed_event_sha256=event_sha256,
         )
+    if (
+        observation.global_sequence
+        != pending.last_book_global_sequence + 1
+    ):
+        return _censor_consensus_l2_barrier_with_event_v1(
+            state,
+            ConsensusL2CensorReasonV1.BOOK_SEQUENCE_GAP,
+            event_sha256=observation.observation_sha256,
+            durable_record_sequence=sequence,
+            observed_wall_ns=observation.captured_wall_ns,
+            observed_monotonic_ns=observation.captured_monotonic_ns,
+            consumed_event_kind=ConsensusL2DurableEventKindV1.L2_BOOK,
+            consumed_event_sha256=event_sha256,
+        )
     frame = ConsensusL2ResearchFrameV1(pending, observation)
     next_state = ConsensusL2BarrierStateV1(
         canonical_match_id=state.canonical_match_id,
@@ -1337,6 +1558,7 @@ def observe_consensus_l2_book_v1(
         market_ids=state.market_ids,
         pending_transition=None,
         last_transition=state.last_transition,
+        last_transition_resolution=frame,
         supporter_watermarks=state.supporter_watermarks,
         last_durable_record_sequence=(
             observation.raw_parent.durable_record_sequence
@@ -1409,6 +1631,7 @@ def _censor_consensus_l2_barrier_with_event_v1(
         market_ids=state.market_ids,
         pending_transition=None,
         last_transition=state.last_transition,
+        last_transition_resolution=coverage,
         supporter_watermarks=state.supporter_watermarks,
         last_durable_record_sequence=durable_record_sequence,
         last_consumed_event_kind=consumed_event_kind,

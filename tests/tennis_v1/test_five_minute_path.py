@@ -448,7 +448,7 @@ class EntryGateTests(unittest.TestCase):
         capacity = size_ioc_entry(
             (PriceLevel(Decimal("0.40"), Decimal("10")),),
             requested_quantity=Decimal("10"),
-            fee=lambda _quantity, _gross: Decimal("1.00"),
+            fee=lambda _quantity, _gross: Decimal("0.50"),
         )
         unbound_forecast = FiveMinuteForecast(
             artifact_version="markout-v1",
@@ -457,12 +457,12 @@ class EntryGateTests(unittest.TestCase):
             frozen=True,
             calibrated=True,
             quantity=Decimal("10"),
-            expected_net_pnl=Decimal("6.00"),
+            expected_net_pnl=Decimal("5.25"),
             lower_expected_net_pnl=Decimal("5.00"),
-            upper_expected_net_pnl=Decimal("7.00"),
-            fill_probability=Decimal("0.80"),
+            upper_expected_net_pnl=Decimal("5.50"),
+            fill_probability=Decimal("1"),
             loss_probability=Decimal("0.20"),
-            tail_loss_estimate=Decimal("-8.00"),
+            tail_loss_estimate=Decimal("-4.50"),
             supporting_sample_count=500,
             abstention_reason=None,
             snapshot_binding=None,
@@ -668,7 +668,30 @@ class EntryGateTests(unittest.TestCase):
         self.assertIs(above.action, EntryAction.RESEARCH_ELIGIBLE)
         self.assertIs(above.reason, EntryReason.RESEARCH_ELIGIBLE)
         self.assertEqual(above.quantity, Decimal("10"))
-        self.assertEqual(above.all_in_debit, Decimal("5.00"))
+        self.assertEqual(above.all_in_debit, Decimal("4.50"))
+
+    def test_forecast_cannot_exceed_long_contract_payoff_bounds(self) -> None:
+        candidate = self._valid_input()
+
+        above_maximum = evaluate_entry(
+            self._with_forecast(
+                candidate,
+                upper_expected_net_pnl=Decimal("5.51"),
+            )
+        )
+        below_maximum_loss = evaluate_entry(
+            self._with_forecast(
+                candidate,
+                tail_loss_estimate=Decimal("-4.51"),
+            )
+        )
+
+        for result in (above_maximum, below_maximum_loss):
+            self.assertIs(result.action, EntryAction.ABSTAIN)
+            self.assertIs(
+                result.reason,
+                EntryReason.FORECAST_PNL_INCONSISTENT,
+            )
 
     def test_set_one_mechanically_abstains_even_above_threshold(self) -> None:
         candidate = self._valid_input()
@@ -1035,6 +1058,14 @@ class InputValidationTests(unittest.TestCase):
                 lambda: replace(
                     valid,
                     loss_probability=Decimal("0.81"),
+                ),
+                "probability_consistency",
+            ),
+            (
+                lambda: replace(
+                    valid,
+                    fill_probability=Decimal("0"),
+                    loss_probability=Decimal("0"),
                 ),
                 "probability_consistency",
             ),

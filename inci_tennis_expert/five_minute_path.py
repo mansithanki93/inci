@@ -223,6 +223,7 @@ class EntryReason(str, Enum):
     FORECAST_UNCALIBRATED = "forecast_uncalibrated"
     FORECAST_SIZE_MISMATCH = "forecast_size_mismatch"
     FORECAST_BINDING_MISMATCH = "forecast_binding_mismatch"
+    FORECAST_PNL_INCONSISTENT = "forecast_pnl_inconsistent"
     LOWER_PNL_NOT_ABOVE_FIVE = "lower_pnl_not_above_five"
     SNAPSHOT_BINDING_MISSING = "snapshot_binding_missing"
     SNAPSHOT_BINDING_MISMATCH = "snapshot_binding_mismatch"
@@ -624,12 +625,15 @@ class FiveMinuteForecast:
             if (
                 self.supporting_sample_count == 0
                 or self.abstention_reason is not None
+                or self.fill_probability <= Decimal("0")
             ):
-                raise FiveMinutePathError(
-                    "supporting_sample_count"
-                    if self.supporting_sample_count == 0
-                    else "abstention_reason"
-                )
+                if self.supporting_sample_count == 0:
+                    reason = "supporting_sample_count"
+                elif self.abstention_reason is not None:
+                    reason = "abstention_reason"
+                else:
+                    reason = "probability_consistency"
+                raise FiveMinutePathError(reason)
         elif self.abstention_reason is None:
             raise FiveMinutePathError("abstention_reason")
 
@@ -1114,6 +1118,31 @@ def evaluate_entry(candidate: EntryGateInput) -> EntryDecision:
         return _entry_abstain(EntryReason.FORECAST_UNCALIBRATED)
     if candidate.forecast.quantity != candidate.capacity.filled_quantity:
         return _entry_abstain(EntryReason.FORECAST_SIZE_MISMATCH)
+    try:
+        with localcontext(_DECIMAL_CONTEXT):
+            maximum_filled_profit = (
+                candidate.capacity.filled_quantity
+                - candidate.capacity.all_in_debit
+            )
+            maximum_expected_profit = (
+                candidate.forecast.fill_probability
+                * maximum_filled_profit
+            )
+            minimum_expected_profit = -(
+                candidate.forecast.fill_probability
+                * candidate.capacity.all_in_debit
+            )
+            minimum_tail_pnl = -candidate.capacity.all_in_debit
+    except DecimalException:
+        raise FiveMinutePathError("decimal_arithmetic") from None
+    if (
+        candidate.forecast.upper_expected_net_pnl
+        > maximum_expected_profit
+        or candidate.forecast.lower_expected_net_pnl
+        < minimum_expected_profit
+        or candidate.forecast.tail_loss_estimate < minimum_tail_pnl
+    ):
+        return _entry_abstain(EntryReason.FORECAST_PNL_INCONSISTENT)
     if candidate.forecast.lower_expected_net_pnl <= Decimal("5.00"):
         return _entry_abstain(EntryReason.LOWER_PNL_NOT_ABOVE_FIVE)
     return EntryDecision(

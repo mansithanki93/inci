@@ -326,6 +326,11 @@ class LiveScoreCandidateTests(unittest.TestCase):
             ("api_tennis", b'{"success":1,"success":1,"result":[]}', "duplicate_json_key"),
             ("api_tennis", b'{"success":NaN,"result":[]}', "non_finite_number"),
             ("api_tennis", b'{"success":1e309,"result":[]}', "non_finite_number"),
+            (
+                "api_tennis",
+                b'{"success":' + (b"1" * 5_000) + b',"result":[]}',
+                "malformed_payload",
+            ),
             ("api_tennis", deep_json, "malformed_payload"),
             ("goalserve", deep_xml, "malformed_payload"),
             ("goalserve", b"<scores><token>secret-value</token></scores>", "secret_material"),
@@ -345,10 +350,24 @@ class LiveScoreCandidateTests(unittest.TestCase):
             {"local_capture_wall_ns": 0},
             {"local_capture_monotonic_ns": -1},
             {"local_clock_uncertainty_ns": -1},
+            {"lineage_independence_proven": 0},
+            {"lineage_independence_proven": 1},
         ):
             with self.subTest(changes=changes):
                 with self.assertRaisesRegex(ValueError, r"\Ainvalid_capture_context\Z"):
                     replace(_context(), **changes)
+
+    def test_point_tape_payload_text_is_not_exposed_by_repr(self) -> None:
+        fixture = copy.deepcopy(API_TENNIS_LIVE)
+        fixture["result"][0]["pointbypoint"][0]["points"][0][
+            "score"
+        ] = "Bearer supersecret"
+
+        result = self._parse("api_tennis", fixture)
+
+        self.assertNotIn("supersecret", repr(result))
+        self.assertNotIn("supersecret", repr(result.facts))
+        self.assertNotIn("supersecret", repr(result.facts.point_by_point))
 
 
 if __name__ == "__main__":

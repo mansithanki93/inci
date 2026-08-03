@@ -367,6 +367,35 @@ class ScoreConsensusTests(unittest.TestCase):
         self.assertEqual(result.supporting_source_ids, ())
         self.assertEqual(result.supporting_lineages, ())
 
+    def test_one_source_lineage_cannot_claim_two_independence_lineages(
+        self,
+    ) -> None:
+        api = consensus_api()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_lineage_independence",
+        ):
+            api.ScoreConsensusPolicy(
+                primary_source_id="primary",
+                sources=(
+                    score_source_config(
+                        api,
+                        "primary",
+                        SHA_A,
+                        20,
+                        independence_lineage_id="claimed-a",
+                    ),
+                    score_source_config(
+                        api,
+                        "witness",
+                        SHA_A,
+                        20,
+                        independence_lineage_id="claimed-b",
+                    ),
+                ),
+            )
+
     def test_distinct_provider_provenance_can_share_one_mirror_lineage(
         self,
     ) -> None:
@@ -1973,6 +2002,203 @@ class StatefulScoreConsensusTests(unittest.TestCase):
         self.assertIs(accepted.reason, api.ConsensusReason.ACCEPTED)
         self.assertFalse(restored.quarantined)
         self.assertEqual(restored.consensus_epoch, 1)
+
+    def test_pre_barrier_consensus_replay_cannot_clear_quarantine(self) -> None:
+        api = consensus_api()
+        primary = tennis_state(last_received_monotonic_ns=100)
+        witness = witness_state(primary, last_received_monotonic_ns=101)
+        state, _ = self.apply_pair(
+            api,
+            api.initial_score_consensus_state(),
+            primary,
+            witness,
+            now=105,
+        )
+        dissent = replace(
+            witness,
+            games_home=3,
+            last_received_monotonic_ns=110,
+        )
+        quarantined, rejected = self.apply_pair(
+            api,
+            state,
+            primary,
+            dissent,
+            now=115,
+        )
+
+        replayed, replay_result = self.apply_pair(
+            api,
+            quarantined,
+            primary,
+            witness,
+            now=115,
+        )
+        partially_new_primary = replace(
+            primary,
+            last_received_monotonic_ns=105,
+        )
+        fully_new_witness = replace(
+            witness,
+            last_received_monotonic_ns=111,
+        )
+        partially_replayed, partial_result = self.apply_pair(
+            api,
+            quarantined,
+            partially_new_primary,
+            fully_new_witness,
+            now=115,
+        )
+
+        self.assertIs(rejected.reason, api.ConsensusReason.STATE_MISMATCH)
+        self.assertTrue(quarantined.quarantined)
+        self.assertEqual(
+            quarantined.quarantine_barrier_monotonic_ns,
+            110,
+        )
+        self.assertIs(
+            replay_result.reason,
+            api.ConsensusReason.PRIMARY_QUARANTINED,
+        )
+        self.assertEqual(replayed, quarantined)
+        self.assertIs(
+            partial_result.reason,
+            api.ConsensusReason.PRIMARY_QUARANTINED,
+        )
+        self.assertTrue(partially_replayed.quarantined)
+        self.assertEqual(
+            partially_replayed.accepted_state,
+            quarantined.accepted_state,
+        )
+        self.assertEqual(
+            partially_replayed.quarantine_barrier_monotonic_ns,
+            111,
+        )
+
+    def test_blocked_event_clock_sets_the_quarantine_barrier(self) -> None:
+        api = consensus_api()
+        primary = tennis_state(last_received_monotonic_ns=100)
+        witness = witness_state(primary, last_received_monotonic_ns=101)
+        state, _ = self.apply_pair(
+            api,
+            api.initial_score_consensus_state(),
+            primary,
+            witness,
+            now=105,
+        )
+        blocked_primary = replace(
+            primary,
+            block_reason=TennisTransitionReason.PROVIDER_EVENT_CONFLICT,
+            blocked_event_semantic_sha256=SHA_D,
+            blocked_received_monotonic_ns=120,
+        )
+        quarantined, blocked = self.apply_pair(
+            api,
+            state,
+            blocked_primary,
+            witness,
+            now=125,
+        )
+        pre_block_primary = replace(
+            primary,
+            last_received_monotonic_ns=110,
+        )
+        pre_block_witness = replace(
+            witness,
+            last_received_monotonic_ns=111,
+        )
+
+        unchanged, rejected = self.apply_pair(
+            api,
+            quarantined,
+            pre_block_primary,
+            pre_block_witness,
+            now=125,
+        )
+
+        self.assertIs(blocked.reason, api.ConsensusReason.PRIMARY_BLOCKED)
+        self.assertEqual(
+            quarantined.quarantine_barrier_monotonic_ns,
+            120,
+        )
+        self.assertIs(
+            rejected.reason,
+            api.ConsensusReason.PRIMARY_QUARANTINED,
+        )
+        self.assertEqual(unchanged, quarantined)
+
+    def test_incomplete_observation_advances_quarantine_release_barrier(
+        self,
+    ) -> None:
+        api = consensus_api()
+        primary = tennis_state(last_received_monotonic_ns=100)
+        witness = witness_state(primary, last_received_monotonic_ns=101)
+        state, _ = self.apply_pair(
+            api,
+            api.initial_score_consensus_state(),
+            primary,
+            witness,
+            now=105,
+        )
+        dissent = replace(
+            witness,
+            games_home=3,
+            last_received_monotonic_ns=110,
+        )
+        quarantined, _ = self.apply_pair(
+            api,
+            state,
+            primary,
+            dissent,
+            now=115,
+        )
+        newer_primary = replace(
+            primary,
+            games_home=3,
+            server_for_next_point=PlayerSide.AWAY,
+            revision=9,
+            last_received_monotonic_ns=120,
+        )
+
+        advanced, incomplete = api.apply_score_consensus(
+            quarantined,
+            self.policy(api),
+            {"primary": newer_primary, "witness": None},
+            now_monotonic_ns=125,
+        )
+
+        older_primary = replace(
+            primary,
+            games_home=3,
+            server_for_next_point=PlayerSide.AWAY,
+            revision=8,
+            last_received_monotonic_ns=115,
+        )
+        older_witness = witness_state(
+            older_primary,
+            revision=80,
+            last_received_monotonic_ns=121,
+        )
+        unchanged, rejected = self.apply_pair(
+            api,
+            advanced,
+            older_primary,
+            older_witness,
+            now=125,
+        )
+
+        self.assertIs(
+            incomplete.reason,
+            api.ConsensusReason.WITNESS_INCOMPLETE,
+        )
+        self.assertEqual(advanced.quarantine_barrier_monotonic_ns, 120)
+        self.assertIs(
+            rejected.reason,
+            api.ConsensusReason.PRIMARY_QUARANTINED,
+        )
+        self.assertTrue(unchanged.quarantined)
+        self.assertEqual(unchanged.accepted_state, state.accepted_state)
+        self.assertEqual(unchanged.quarantine_barrier_monotonic_ns, 121)
 
     def test_source_config_rejects_invalid_identity_values(self) -> None:
         api = consensus_api()

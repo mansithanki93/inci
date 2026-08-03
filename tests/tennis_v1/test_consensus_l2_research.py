@@ -287,6 +287,7 @@ def _transition(api: object, **changes: object):
         "consensus_epoch": 3,
         "correction_epoch": state.correction_epoch,
         "supporters": supporters,
+        "prior_accepted_score_sha256": None,
         "consensus_record_sequence": 30,
         "consensus_record_sha256": SHA_A,
         "consensus_accepted_wall_ns": 1_100,
@@ -346,6 +347,7 @@ def _next_transition(api: object, prior: object):
         api,
         accepted_state=next_state,
         supporters=supporters,
+        prior_accepted_score_sha256=prior.accepted_score_sha256,
         consensus_record_sequence=60,
         consensus_record_sha256=SHA_B,
         consensus_accepted_wall_ns=1_300,
@@ -629,6 +631,7 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
         self.assertRegex(frame.frame_id, r"^[0-9a-f]{64}$")
         self.assertTrue(frame.research_only)
         self.assertFalse(frame.execution_authorized)
+        self.assertEqual(paired.state.last_transition_resolution, frame)
         self.assertEqual(frame.qualification, "unqualified_shadow")
         self.assertEqual(
             tuple(market.ticker for market in frame.l2_observation.markets),
@@ -665,14 +668,14 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
             generation=2,
             captured_wall_ns=1_099,
             captured_monotonic_ns=119,
-            durable_record_sequence=29,
+            durable_record_sequence=31,
         )
         pre_barrier = _book_observation(
             api,
             sequence=2,
             captured_wall_ns=1_099,
             captured_monotonic_ns=119,
-            durable_record_sequence=29,
+            durable_record_sequence=32,
         )
 
         delayed = api.observe_consensus_l2_book_v1(
@@ -691,9 +694,68 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
         self.assertIs(ignored.state.pending_transition, armed.pending_transition)
         paired = api.observe_consensus_l2_book_v1(
             ignored.state,
-            _book_observation(api),
+            _book_observation(api, durable_record_sequence=33),
         )
         self.assertIs(paired.disposition, api.ConsensusL2DispositionV1.PAIRED)
+
+    def test_pre_barrier_book_consumes_the_global_durable_cursor(self) -> None:
+        api = _research_api()
+        armed, _ = _armed(api)
+        pre_barrier = _book_observation(
+            api,
+            sequence=2,
+            captured_wall_ns=1_099,
+            captured_monotonic_ns=119,
+            durable_record_sequence=31,
+        )
+
+        ignored = api.observe_consensus_l2_book_v1(armed, pre_barrier)
+
+        self.assertIs(ignored.disposition, api.ConsensusL2DispositionV1.IGNORED)
+        self.assertEqual(ignored.state.last_durable_record_sequence, 31)
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            replace(ignored.state, pending_transition=None)
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            api.censor_consensus_l2_barrier_v1(
+                ignored.state,
+                api.ConsensusL2CensorReasonV1.BOOK_SEQUENCE_GAP,
+                event_sha256=SHA_F,
+                durable_record_sequence=31,
+                observed_wall_ns=1_101,
+                observed_monotonic_ns=121,
+            )
+
+    def test_first_eligible_book_must_be_the_direct_sequence_successor(
+        self,
+    ) -> None:
+        api = _research_api()
+        armed, _ = _armed(api)
+        skipped = _book_observation(
+            api,
+            sequence=4,
+            captured_monotonic_ns=121,
+            durable_record_sequence=31,
+        )
+
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            api.ConsensusL2ResearchFrameV1(
+                armed.pending_transition,
+                skipped,
+            )
+
+        censored = api.observe_consensus_l2_book_v1(
+            armed,
+            skipped,
+        )
+
+        self.assertIs(
+            censored.disposition,
+            api.ConsensusL2DispositionV1.CENSORED,
+        )
+        self.assertIs(
+            censored.coverage.reason,
+            api.ConsensusL2CensorReasonV1.BOOK_SEQUENCE_GAP,
+        )
 
     def test_otherwise_eligible_book_cannot_regress_durable_barrier(self) -> None:
         """Catches treating an out-of-order cross-stream callback as permissible."""
@@ -759,6 +821,18 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
         for label, supporters in (
             ("mirror", (primary, mirror)),
             ("unknown", (primary, unknown)),
+            (
+                "lineage_alias",
+                (
+                    primary,
+                    replace(
+                        witness,
+                        source_lineage_sha256=(
+                            primary.source_lineage_sha256
+                        ),
+                    ),
+                ),
+            ),
         ):
             with self.subTest(label=label):
                 with self.assertRaisesRegex(
@@ -840,6 +914,9 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
             accepted_state=corrected_state,
             supporters=correction_next.supporters,
             consensus_epoch=4,
+            prior_accepted_score_sha256=(
+                correction_first.accepted_score_sha256
+            ),
             consensus_record_sequence=(
                 correction_next.consensus_record_sequence
             ),
@@ -1126,6 +1203,8 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
             api.ConsensusL2DurableEventKindV1.L2_BOOK,
         )
         with self.assertRaises(api.ConsensusL2ResearchError):
+            api.open_consensus_l2_barrier_v1(paired.state, first)
+        with self.assertRaises(api.ConsensusL2ResearchError):
             api.open_consensus_l2_barrier_v1(
                 paired.state,
                 _next_transition(api, first),
@@ -1242,6 +1321,7 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
             market_ids=MARKET_IDS,
             pending_transition=pending,
             last_transition=independently_decoded_last,
+            last_transition_resolution=None,
             supporter_watermarks=pending.supporters,
             last_durable_record_sequence=(
                 pending.consensus_record_sequence
@@ -1261,6 +1341,69 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
             api.ConsensusL2DispositionV1.PAIRED,
         )
 
+    def test_state_binds_transition_universe_and_supporter_watermarks(
+        self,
+    ) -> None:
+        api = _research_api()
+        armed, _ = _armed(api)
+
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            replace(armed, supporter_watermarks=())
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            replace(armed, pending_transition=None)
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            replace(
+                armed,
+                pending_transition=None,
+                last_consumed_event_kind=(
+                    api.ConsensusL2DurableEventKindV1.L2_BOOK
+                ),
+                last_consumed_event_sha256=SHA_F,
+            )
+        future_watermark = replace(
+            armed.supporter_watermarks[0],
+            durable_record_sequence=100,
+        )
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            replace(
+                armed,
+                supporter_watermarks=tuple(
+                    sorted(
+                        (
+                            future_watermark,
+                            *armed.supporter_watermarks[1:],
+                        ),
+                        key=lambda item: item.source_id,
+                    )
+                ),
+            )
+
+        wrong_universe = _transition(
+            api,
+            market_tickers=(TICKERS[1], TICKERS[0]),
+            market_ids=(MARKET_IDS[1], MARKET_IDS[0]),
+        )
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            api.ConsensusL2BarrierStateV1(
+                canonical_match_id="canonical-match-1",
+                market_tickers=TICKERS,
+                market_ids=MARKET_IDS,
+                pending_transition=wrong_universe,
+                last_transition=wrong_universe,
+                last_transition_resolution=None,
+                supporter_watermarks=wrong_universe.supporters,
+                last_durable_record_sequence=(
+                    wrong_universe.consensus_record_sequence
+                ),
+                last_consumed_event_kind=(
+                    api.ConsensusL2DurableEventKindV1.ACCEPTED_CONSENSUS
+                ),
+                last_consumed_event_sha256=(
+                    wrong_universe.accepted_score_sha256
+                ),
+                session_ended=False,
+            )
+
     def test_update_contract_rejects_impossible_disposition_payloads(self) -> None:
         """Catches forging paired/censored updates without their required record."""
 
@@ -1277,6 +1420,12 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
             durable_record_sequence=31,
             observed_wall_ns=1_101,
             observed_monotonic_ns=121,
+        )
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            replace(paired.state, last_transition_resolution=None)
+        self.assertEqual(
+            censored.state.last_transition_resolution,
+            censored.coverage,
         )
         advanced = api.open_consensus_l2_barrier_v1(
             armed,
@@ -1319,6 +1468,12 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
                 None,
             ),
             (
+                replace(paired.state, session_ended=True),
+                api.ConsensusL2DispositionV1.PAIRED,
+                paired.frame,
+                None,
+            ),
+            (
                 initial,
                 api.ConsensusL2DispositionV1.CENSORED,
                 None,
@@ -1340,6 +1495,46 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
                         frame=frame,
                         coverage=coverage,
                     )
+        pending = advanced.state.pending_transition
+        self.assertIsNotNone(pending)
+        assert pending is not None
+        fake_prior = _transition(api, consensus_epoch=2)
+        fake_coverage = api.ConsensusL2CoverageV1(
+            consensus_transition=fake_prior,
+            reason=api.ConsensusL2CensorReasonV1.SCORE_ADVANCED,
+            event_sha256=pending.accepted_score_sha256,
+            event_durable_record_sequence=(
+                pending.consensus_record_sequence
+            ),
+            observed_wall_ns=pending.consensus_accepted_wall_ns,
+            observed_monotonic_ns=(
+                pending.consensus_accepted_monotonic_ns
+            ),
+        )
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            api.ConsensusL2BarrierUpdateV1(
+                state=advanced.state,
+                disposition=api.ConsensusL2DispositionV1.ADVANCED,
+                frame=None,
+                coverage=fake_coverage,
+            )
+        ignored_pre_barrier = api.observe_consensus_l2_book_v1(
+            armed,
+            _book_observation(
+                api,
+                sequence=2,
+                captured_wall_ns=1_099,
+                captured_monotonic_ns=119,
+                durable_record_sequence=31,
+            ),
+        )
+        with self.assertRaises(api.ConsensusL2ResearchError):
+            api.ConsensusL2BarrierUpdateV1(
+                state=ignored_pre_barrier.state,
+                disposition=api.ConsensusL2DispositionV1.ARMED,
+                frame=None,
+                coverage=None,
+            )
         with self.assertRaises(api.ConsensusL2ResearchError):
             api.ConsensusL2BarrierUpdateV1(
                 state=replace(armed, last_durable_record_sequence=31),
@@ -1348,8 +1543,8 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
                 coverage=None,
             )
 
-    def test_permissible_callback_schedules_produce_identical_frame_bytes(self) -> None:
-        """Catches callback arrival order leaking into deterministic corpus bytes."""
+    def test_equal_durable_streams_produce_identical_frame_bytes(self) -> None:
+        """Catches reconstruction leaking object identity into corpus bytes."""
 
         api = _research_api()
         transition = _transition(api)
@@ -1358,19 +1553,27 @@ class ConsensusL2ResearchBarrierTests(unittest.TestCase):
             sequence=2,
             captured_wall_ns=1_099,
             captured_monotonic_ns=119,
-            durable_record_sequence=29,
+            durable_record_sequence=31,
         )
-        eligible = _book_observation(api)
+        eligible = _book_observation(
+            api,
+            captured_monotonic_ns=121,
+            durable_record_sequence=32,
+        )
 
         initial_a, _ = _armed(api, transition)
         a1 = api.observe_consensus_l2_book_v1(initial_a, pre)
-        a2 = api.open_consensus_l2_barrier_v1(a1.state, transition)
-        frame_a = api.observe_consensus_l2_book_v1(a2.state, eligible).frame
+        frame_a = api.observe_consensus_l2_book_v1(
+            a1.state,
+            eligible,
+        ).frame
 
         initial_b, _ = _armed(api, transition)
-        b1 = api.open_consensus_l2_barrier_v1(initial_b, transition)
-        b2 = api.observe_consensus_l2_book_v1(b1.state, pre)
-        frame_b = api.observe_consensus_l2_book_v1(b2.state, eligible).frame
+        b1 = api.observe_consensus_l2_book_v1(initial_b, pre)
+        frame_b = api.observe_consensus_l2_book_v1(
+            b1.state,
+            eligible,
+        ).frame
 
         self.assertIsNotNone(frame_a)
         self.assertIsNotNone(frame_b)

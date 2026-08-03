@@ -5833,7 +5833,7 @@ class ExpertReplayAuthorityStoreTests(unittest.TestCase):
 
         self.assertEqual(observed, expected)
         pread.assert_not_called()
-        self.assertEqual(gate_count, 104)
+        self.assertEqual(gate_count, 115)
 
     def test_cold_environment_inventory_gates_each_pread_immediately(
         self,
@@ -5887,9 +5887,9 @@ class ExpertReplayAuthorityStoreTests(unittest.TestCase):
             )
         self.assertEqual(
             events.count("gate"),
-            104 + 2 * len(pread_indexes),
+            115 + 2 * len(pread_indexes),
         )
-        self.assertEqual(events.count("gate"), 280)
+        self.assertEqual(events.count("gate"), 313)
 
     def test_cached_source_file_uses_one_logical_gate_and_no_pread(
         self,

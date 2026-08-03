@@ -133,6 +133,16 @@ class ScoreConsensusPolicy:
         source_ids = tuple(source.source_id for source in self.sources)
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("source_id")
+        independence_by_source_lineage: dict[str, str | None] = {}
+        for source in self.sources:
+            lineage = source.source_lineage_sha256
+            independence = source.independence_lineage_id
+            if (
+                lineage in independence_by_source_lineage
+                and independence_by_source_lineage[lineage] != independence
+            ):
+                raise ValueError("source_lineage_independence")
+            independence_by_source_lineage[lineage] = independence
         canonical_orientations = {
             (
                 source.canonical_home_player_id,
@@ -157,6 +167,7 @@ class ScoreConsensusState:
     accepted_state: TennisState | None
     quarantined: bool
     consensus_epoch: int
+    quarantine_barrier_monotonic_ns: int | None
 
     def __post_init__(self) -> None:
         if self.accepted_state is not None and type(
@@ -166,6 +177,15 @@ class ScoreConsensusState:
         if type(self.quarantined) is not bool:
             raise TypeError("quarantined")
         _nonnegative_integer(self.consensus_epoch, "consensus_epoch")
+        if self.quarantine_barrier_monotonic_ns is not None:
+            _nonnegative_integer(
+                self.quarantine_barrier_monotonic_ns,
+                "quarantine_barrier_monotonic_ns",
+            )
+        if self.quarantined != (
+            self.quarantine_barrier_monotonic_ns is not None
+        ):
+            raise ValueError("quarantine_barrier_monotonic_ns")
 
 
 def initial_score_consensus_state() -> ScoreConsensusState:
@@ -173,6 +193,7 @@ def initial_score_consensus_state() -> ScoreConsensusState:
         accepted_state=None,
         quarantined=False,
         consensus_epoch=0,
+        quarantine_barrier_monotonic_ns=None,
     )
 
 
@@ -880,6 +901,64 @@ _QUARANTINE_REASONS = frozenset(
 )
 
 
+def _observation_barrier_monotonic_ns(
+    observations: Mapping[str, TennisState | None],
+) -> int:
+    clocks = tuple(
+        max(
+            observation.last_received_monotonic_ns,
+            (
+                observation.blocked_received_monotonic_ns
+                if observation.blocked_received_monotonic_ns is not None
+                else observation.last_received_monotonic_ns
+            ),
+        )
+        for observation in observations.values()
+        if observation is not None
+    )
+    if not clocks:
+        raise ValueError("quarantine_barrier_monotonic_ns")
+    return max(clocks)
+
+
+def _quarantine_barrier_for_abstention(
+    state: ScoreConsensusState,
+    reason: ConsensusReason,
+    observations: Mapping[str, TennisState | None],
+) -> int | None:
+    if not state.quarantined and reason not in _QUARANTINE_REASONS:
+        return state.quarantine_barrier_monotonic_ns
+    if not any(
+        observation is not None for observation in observations.values()
+    ):
+        if state.quarantine_barrier_monotonic_ns is None:
+            raise ValueError("quarantine_barrier_monotonic_ns")
+        return state.quarantine_barrier_monotonic_ns
+    observed_barrier = _observation_barrier_monotonic_ns(observations)
+    prior_barrier = state.quarantine_barrier_monotonic_ns
+    if prior_barrier is None:
+        return observed_barrier
+    return max(prior_barrier, observed_barrier)
+
+
+def _accepted_support_is_after_barrier(
+    result: ScoreConsensusResult,
+    observations: Mapping[str, TennisState | None],
+    barrier_monotonic_ns: int,
+) -> bool:
+    if not result.supporting_source_ids:
+        return False
+    for source_id in result.supporting_source_ids:
+        observation = observations.get(source_id)
+        if (
+            observation is None
+            or observation.last_received_monotonic_ns
+            <= barrier_monotonic_ns
+        ):
+            return False
+    return True
+
+
 def apply_score_consensus(
     state: ScoreConsensusState,
     policy: ScoreConsensusPolicy,
@@ -897,23 +976,63 @@ def apply_score_consensus(
     )
     candidate = result.accepted_state
     if candidate is None:
+        quarantined = (
+            state.quarantined or result.reason in _QUARANTINE_REASONS
+        )
         return (
             ScoreConsensusState(
                 accepted_state=state.accepted_state,
-                quarantined=(
-                    state.quarantined or result.reason in _QUARANTINE_REASONS
-                ),
+                quarantined=quarantined,
                 consensus_epoch=state.consensus_epoch,
+                quarantine_barrier_monotonic_ns=(
+                    _quarantine_barrier_for_abstention(
+                        state,
+                        result.reason,
+                        observations,
+                    )
+                    if quarantined
+                    else None
+                ),
             ),
             result,
         )
     prior = state.accepted_state
+    if (
+        state.quarantine_barrier_monotonic_ns is not None
+        and not _accepted_support_is_after_barrier(
+            result,
+            observations,
+            state.quarantine_barrier_monotonic_ns,
+        )
+    ):
+        return (
+            ScoreConsensusState(
+                accepted_state=state.accepted_state,
+                quarantined=True,
+                consensus_epoch=state.consensus_epoch,
+                quarantine_barrier_monotonic_ns=(
+                    _quarantine_barrier_for_abstention(
+                        state,
+                        ConsensusReason.PRIMARY_QUARANTINED,
+                        observations,
+                    )
+                ),
+            ),
+            _abstain(ConsensusReason.PRIMARY_QUARANTINED),
+        )
     if not _transition_is_legal(prior, candidate):
+        observed_barrier = _observation_barrier_monotonic_ns(observations)
+        prior_barrier = state.quarantine_barrier_monotonic_ns
         return (
             ScoreConsensusState(
                 accepted_state=prior,
                 quarantined=True,
                 consensus_epoch=state.consensus_epoch,
+                quarantine_barrier_monotonic_ns=(
+                    observed_barrier
+                    if prior_barrier is None
+                    else max(prior_barrier, observed_barrier)
+                ),
             ),
             _abstain(ConsensusReason.TRANSITION_REGRESSION),
         )
@@ -928,6 +1047,7 @@ def apply_score_consensus(
             consensus_epoch=(
                 state.consensus_epoch + (1 if starts_new_epoch else 0)
             ),
+            quarantine_barrier_monotonic_ns=None,
         ),
         result,
     )

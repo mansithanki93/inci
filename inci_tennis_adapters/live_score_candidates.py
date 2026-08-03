@@ -24,7 +24,7 @@ from inci_tennis_expert.contracts import (
 )
 
 
-PARSER_VERSION: Final[str] = "live-score-candidates-v2"
+PARSER_VERSION: Final[str] = "live-score-candidates-v3"
 MAX_PAYLOAD_BYTES: Final[int] = 1_048_576
 _MAX_TREE_DEPTH: Final[int] = 64
 _MAX_TREE_NODES: Final[int] = 20_000
@@ -126,17 +126,20 @@ class LiveScoreCaptureContext:
             or self.local_clock_uncertainty_ns < 0
         ):
             raise ValueError("invalid_capture_context")
-        if self.lineage_independence_proven not in (None, True, False):
+        if (
+            self.lineage_independence_proven is not None
+            and type(self.lineage_independence_proven) is not bool
+        ):
             raise ValueError("invalid_capture_context")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class PointByPointPoint:
     number: str
     score: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class PointByPointGame:
     set_number: str
     game_number: str
@@ -145,7 +148,7 @@ class PointByPointGame:
     points: tuple[PointByPointPoint, ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class LiveScoreFacts:
     provider_match_id: str
     home_player_id: str
@@ -164,7 +167,7 @@ class LiveScoreFacts:
     point_by_point: tuple[PointByPointGame, ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class NormalizedLiveScore:
     provider_slot: ProviderSlot
     provider_source_id: str
@@ -238,7 +241,7 @@ def _json_document(payload: bytes) -> object:
         )
     except LiveScoreParseError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    except (UnicodeDecodeError, RecursionError, ValueError):
         raise LiveScoreParseError("malformed_payload") from None
     _validate_json_tree(document)
     return document

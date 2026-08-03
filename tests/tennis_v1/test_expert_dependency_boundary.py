@@ -36,11 +36,14 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "facade.py": (
             "cf6fc820a31443e85254fa9d3bc3534c7e935b025af48a21948478e5fb277e4d"
         ),
+        "consensus_l2_research.py": (
+            "9971f3407fdb56a6fcb6f833293b589ee4ecf9f5192a07024eb753ab936ae5d3"
+        ),
         "first_set_model.py": (
             "997d7d9e9e108e8dcda861f2b5dea332a982a85c52735d074e01c4982323e768"
         ),
         "five_minute_path.py": (
-            "bbbc214c679602a4dea692020af98e06e105bd8a308581d2186596e77d63a794"
+            "d137e7cbb02ff649e18cd83829c1f5fa5e1a9e831e1310989290495d2cbad250"
         ),
         "journal_codec.py": (
             "516fe36207012faf4a3853fe69d42c68ea6d775fd7e06624b273e181199c7102"
@@ -70,7 +73,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "e96fa93873227400ebd175c75d4707012507678c207026446e94245b59bd5cee"
         ),
         "score_consensus.py": (
-            "bddfcb693b7536df224730cf6d35d84496dbd07f3a0a308638441a714e921594"
+            "3494588d794dfa37798b4149aea198860cd799a76dd1eb9405f701e5d651a686"
         ),
         "state.py": (
             "004651dcd24eb2c116715393aeba5844e23f80997cf20ce96f2cdde5a6e38dea"
@@ -88,7 +91,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "2629e1752c789478201da6b3dd291dfdb6dc46614998e2ab8115d47f676b3b41"
         ),
         "win_probability.py": (
-            "e70723c3a72b6e9704f3cc0af1a6378f16b6180978228dd44d00b3146a0cd1aa"
+            "3c665bc5b025a375e28ffa72116d940547e34f34e9d5531445a73b5951c2985f"
         ),
     },
     "inci_tennis_io": {
@@ -97,7 +100,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6752e3b873f0e18b6226c0c664aaa49263c30b4c925019ebcebb87ce893d6e5c"
         ),
         "expert_journal_store.py": (
-            "b20cea1ac9cd5ad1bc308c7ae914aeab090adbb69e3922ee2e3b62c63b9d35d8"
+            "37b31d9a4fe593b6f8cbb8e092f52593ba34504c911a22f83eb71baad4479faa"
         ),
         "facade.py": (
             "696c8410e7ac164b86d819edb4277bdf4468d4b93a1703e494e4130faf80dcc0"
@@ -142,7 +145,10 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "17747eaa104dc1cfb18e8f57848372624d8b16ba04e6070bf684a7443b410b54"
         ),
         "kalshi_v2.py": (
-            "6da2e00e6326e1530a9d13a4c6b1d78b5b1cd992c78bbef099bca7890348618d"
+            "7aed340884f6e3b64df20051fc2c52de8a3fb2ed290749889b2d9979a16bccf4"
+        ),
+        "live_score_candidates.py": (
+            "ebe36f50a07189a918769c48057415b5cefcbc5df2cf8d77d59462c290bfb76d"
         ),
         "registry.py": (
             "14e534fd3762d5d6198b1de8762568497bcf1c807fd56177942dab8f4de59229"
@@ -3267,6 +3273,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_adapters/__init__.py",
             "inci_tennis_adapters/candidate_contracts.py",
             "inci_tennis_adapters/kalshi_v2.py",
+            "inci_tennis_adapters/live_score_candidates.py",
             "inci_tennis_adapters/registry.py",
             "inci_tennis_adapters/shadow_discovery_contracts.py",
             "inci_tennis_adapters/shadow_match_chooser.py",
@@ -3400,6 +3407,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "candidate_contracts.py",
                 "kalshi_candidate.py",
                 "kalshi_v2.py",
+                "live_score_candidates.py",
                 "registry.py",
                 "shadow_discovery_contracts.py",
                 "shadow_match_chooser.py",
