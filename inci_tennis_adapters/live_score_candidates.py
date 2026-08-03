@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import calendar
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from hashlib import sha256
 import json
 import math
-import re
+from re import ASCII, compile as pattern_compile, split as pattern_split
 from typing import Final
 from xml.etree import ElementTree
 
@@ -29,13 +29,13 @@ MAX_PAYLOAD_BYTES: Final[int] = 1_048_576
 _MAX_TREE_DEPTH: Final[int] = 64
 _MAX_TREE_NODES: Final[int] = 20_000
 _MAX_TEXT_BYTES: Final[int] = 4_096
-_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z", re.ASCII)
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
-_DECIMAL_SET = re.compile(r"[0-9]+\.[0-9]+\Z", re.ASCII)
-_RFC3339_UTC = re.compile(
+_SAFE_ID = pattern_compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z", ASCII)
+_SHA256 = pattern_compile(r"[0-9a-f]{64}\Z", ASCII)
+_DECIMAL_SET = pattern_compile(r"[0-9]+\.[0-9]+\Z", ASCII)
+_RFC3339_UTC = pattern_compile(
     r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})"
     r"(?:\.([0-9]{1,9}))?Z\Z",
-    re.ASCII,
+    ASCII,
 )
 _SECRET_SUFFIXES: Final[tuple[str, ...]] = (
     "authorization", "cookie", "apikey", "apitoken", "accesstoken",
@@ -245,7 +245,11 @@ def _json_document(payload: bytes) -> object:
 
 
 def _secret_name(value: str) -> bool:
-    normalized = value.lower().replace("_", "").replace("-", "")
+    normalized = "".join(
+        character
+        for character in value.lower()
+        if character not in "_-"
+    )
     return any(normalized.endswith(suffix) for suffix in _SECRET_SUFFIXES)
 
 
@@ -336,7 +340,7 @@ def _pair(value: object) -> tuple[int, int]:
 def _pair_text(value: object) -> tuple[int, int]:
     if type(value) is not str:
         raise LiveScoreParseError("impossible_score")
-    parts = re.split(r"\s*-\s*", value.strip())
+    parts = pattern_split(r"\s*-\s*", value.strip())
     if len(parts) != 2:
         raise LiveScoreParseError("impossible_score")
     return _integer(parts[0]), _integer(parts[1])
@@ -430,7 +434,7 @@ def _utc_ns(value: object) -> int | None:
         raise LiveScoreParseError("impossible_score") from None
     fraction = matched.group(2) or ""
     return (
-        calendar.timegm(parsed.replace(tzinfo=timezone.utc).utctimetuple())
+        calendar.timegm(parsed.utctimetuple())
         * 1_000_000_000
         + int(fraction.ljust(9, "0") or "0")
     )
