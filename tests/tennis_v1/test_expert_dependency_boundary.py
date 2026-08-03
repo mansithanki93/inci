@@ -30,8 +30,17 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "contracts.py": (
             "574860701427c3bce00af9f17d3bb58bcc94086678cf45d58643fc98f55426ce"
         ),
+        "fee_schedule.py": (
+            "4b338cd9f276ef25a3fc7991acae4f4e6e3bde7ae36c9b398ae864381cd73192"
+        ),
         "facade.py": (
             "cf6fc820a31443e85254fa9d3bc3534c7e935b025af48a21948478e5fb277e4d"
+        ),
+        "first_set_model.py": (
+            "997d7d9e9e108e8dcda861f2b5dea332a982a85c52735d074e01c4982323e768"
+        ),
+        "five_minute_path.py": (
+            "bbbc214c679602a4dea692020af98e06e105bd8a308581d2186596e77d63a794"
         ),
         "journal_codec.py": (
             "516fe36207012faf4a3853fe69d42c68ea6d775fd7e06624b273e181199c7102"
@@ -45,14 +54,29 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "observation.py": (
             "e1b821d8b385220b5516831a221fd1b5df311035bc8fcde395bcc8db8ddee2b3"
         ),
+        "paper_policy.py": (
+            "c4aca5fefb3f41d0b8994525d56b37c3775c917e552ae8b5ea280d2e78c227b7"
+        ),
+        "prematch_model.py": (
+            "e9ab14e6f99650ede2e0832d4a3252244fd77e9a3a01ac026392d77b55759b5f"
+        ),
         "reducer.py": (
             "a604a502f315c189736f7e77ba7ee1560de38b5b6a42f5f1ae75664db644f0c7"
         ),
         "replay.py": (
             "689c39076f95e80d3992b8fa01594416898c524ce41c85e73eb65874e14c8bef"
         ),
+        "risk.py": (
+            "e96fa93873227400ebd175c75d4707012507678c207026446e94245b59bd5cee"
+        ),
+        "score_consensus.py": (
+            "bddfcb693b7536df224730cf6d35d84496dbd07f3a0a308638441a714e921594"
+        ),
         "state.py": (
             "004651dcd24eb2c116715393aeba5844e23f80997cf20ce96f2cdde5a6e38dea"
+        ),
+        "strategy_artifacts.py": (
+            "4146c098cdde369a844d1883b9c356c1f42947aa1a7568286e8c07fef42ab9ab"
         ),
         "tennis_score.py": (
             "40d24bee509fae0560a5b3e815f2ace84de7a06facfa23469eb885a13a7e9f70"
@@ -63,6 +87,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "task6_fallback_normalizer.py": (
             "2629e1752c789478201da6b3dd291dfdb6dc46614998e2ab8115d47f676b3b41"
         ),
+        "win_probability.py": (
+            "e70723c3a72b6e9704f3cc0af1a6378f16b6180978228dd44d00b3146a0cd1aa"
+        ),
     },
     "inci_tennis_io": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
@@ -70,7 +97,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6752e3b873f0e18b6226c0c664aaa49263c30b4c925019ebcebb87ce893d6e5c"
         ),
         "expert_journal_store.py": (
-            "8b0f81774187da7e55f4d2022ff7a6e5b19672c3f5900e17b9a6903159bc69b1"
+            "b20cea1ac9cd5ad1bc308c7ae914aeab090adbb69e3922ee2e3b62c63b9d35d8"
         ),
         "facade.py": (
             "696c8410e7ac164b86d819edb4277bdf4468d4b93a1703e494e4130faf80dcc0"

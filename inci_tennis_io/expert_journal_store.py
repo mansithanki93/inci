@@ -241,6 +241,15 @@ _EXPERT_INVENTORY = (
     "inci_tennis_expert/journal_codec.py",
     "inci_tennis_expert/replay.py",
     "inci_tennis_expert/facade.py",
+    "inci_tennis_expert/fee_schedule.py",
+    "inci_tennis_expert/first_set_model.py",
+    "inci_tennis_expert/five_minute_path.py",
+    "inci_tennis_expert/paper_policy.py",
+    "inci_tennis_expert/prematch_model.py",
+    "inci_tennis_expert/risk.py",
+    "inci_tennis_expert/score_consensus.py",
+    "inci_tennis_expert/strategy_artifacts.py",
+    "inci_tennis_expert/win_probability.py",
 )
 _IO_INVENTORY = (
     "inci_tennis_io/__init__.py",
