@@ -17,6 +17,10 @@ from re import compile as pattern_compile
 
 KALSHI_UNQUALIFIED_SHADOW = "unqualified_shadow"
 
+_FULL_L2_STATE_DOMAIN = (
+    b"inci-tennis-kalshi-unqualified-two-ticker-full-l2-v1\x00"
+)
+
 _MAX_FRAME_BYTES = 1_048_576
 _MAX_LADDER_LEVELS = 1_024
 _MAX_JSON_DEPTH = 16
@@ -58,6 +62,14 @@ class _ParsedValue:
     @property
     def qualification(self) -> str:
         return KALSHI_UNQUALIFIED_SHADOW
+
+    @property
+    def research_only(self) -> bool:
+        return True
+
+    @property
+    def execution_authorized(self) -> bool:
+        return False
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} unqualified_shadow>"
@@ -575,6 +587,84 @@ class UnqualifiedTwoTickerCandidateState(_ParsedValue):
         raise KeyError("kalshi_candidate_ticker_unknown")
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class UnqualifiedCandidateL2Market(_ParsedValue):
+    """Immutable exact-depth research copy for one candidate market."""
+
+    ticker: str
+    market_id: str
+    yes_levels: tuple[tuple[Decimal, Decimal], ...]
+    no_levels: tuple[tuple[Decimal, Decimal], ...]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class UnqualifiedTwoTickerL2State(_ParsedValue):
+    """Immutable unqualified full depth from one ready reducer state."""
+
+    markets: tuple[UnqualifiedCandidateL2Market, UnqualifiedCandidateL2Market]
+    physical_connection_generation: int
+    subscription_id: int
+    global_sequence: int
+    state_sha256: str
+
+    def market(self, ticker: str) -> UnqualifiedCandidateL2Market:
+        for candidate in self.markets:
+            if candidate.ticker == ticker:
+                return candidate
+        raise KeyError("kalshi_candidate_ticker_unknown")
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return "0" if value.is_zero() else rendered
+
+
+def _full_l2_state_sha256(
+    markets: tuple[UnqualifiedCandidateL2Market, UnqualifiedCandidateL2Market],
+    *,
+    physical_connection_generation: int,
+    subscription_id: int,
+    global_sequence: int,
+) -> str:
+    projection = {
+        "schema_version": 1,
+        "physical_connection_generation": physical_connection_generation,
+        "subscription_id": subscription_id,
+        "global_sequence": global_sequence,
+        "markets": [
+            {
+                "ticker": market.ticker,
+                "market_id": market.market_id,
+                "yes_levels": [
+                    [
+                        _canonical_decimal_text(price),
+                        _canonical_decimal_text(quantity),
+                    ]
+                    for price, quantity in market.yes_levels
+                ],
+                "no_levels": [
+                    [
+                        _canonical_decimal_text(price),
+                        _canonical_decimal_text(quantity),
+                    ]
+                    for price, quantity in market.no_levels
+                ],
+            }
+            for market in markets
+        ],
+    }
+    encoded = json.dumps(
+        projection,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    return sha256(_FULL_L2_STATE_DOMAIN + encoded).hexdigest()
+
+
 class UnqualifiedTwoTickerBookReducer:
     """Fail-closed reducer for one two-market, one-SID candidate book stream.
 
@@ -630,6 +720,42 @@ class UnqualifiedTwoTickerBookReducer:
     @property
     def state(self) -> UnqualifiedTwoTickerCandidateState:
         return self._state()
+
+    @property
+    def full_l2(self) -> UnqualifiedTwoTickerL2State | None:
+        if self._status != "ready":
+            return None
+        generation = self._generation
+        sid = self._sid
+        sequence = self._last_sequence
+        if generation is None or sid is None or sequence is None:
+            _fail()
+        copied: list[UnqualifiedCandidateL2Market] = []
+        for ticker in self._tickers:
+            market_id = self._market_ids[ticker]
+            if market_id is None:
+                _fail()
+            copied.append(
+                UnqualifiedCandidateL2Market(
+                    ticker=ticker,
+                    market_id=market_id,
+                    yes_levels=tuple(sorted(self._books[ticker]["yes"].items())),
+                    no_levels=tuple(sorted(self._books[ticker]["no"].items())),
+                )
+            )
+        markets = (copied[0], copied[1])
+        return UnqualifiedTwoTickerL2State(
+            markets=markets,
+            physical_connection_generation=generation,
+            subscription_id=sid,
+            global_sequence=sequence,
+            state_sha256=_full_l2_state_sha256(
+                markets,
+                physical_connection_generation=generation,
+                subscription_id=sid,
+                global_sequence=sequence,
+            ),
+        )
 
     def begin_subscription(
         self,
