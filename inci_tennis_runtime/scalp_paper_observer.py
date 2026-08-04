@@ -8,6 +8,7 @@ from inci_tennis_expert.facade import (
     encode_clip_journal_records,
     make_default_clip_bundle,
     observe_clip_on_transition,
+    serialize_clip_journal_document,
     verify_clip_record_matches_observation,
 )
 
@@ -66,6 +67,9 @@ class PaperClipSession:
 
     def journal_bundle_bytes(self) -> bytes:
         return encode_clip_journal_records(self.journal_records())
+
+    def journal_document_bytes(self) -> bytes:
+        return serialize_clip_journal_document(self.journal_records())
 
     def observe(
         self,

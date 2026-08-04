@@ -254,6 +254,7 @@ _IO_INVENTORY = (
     "inci_tennis_io/pinned_artifacts.py",
     "inci_tennis_io/ports.py",
     "inci_tennis_io/historical_store.py",
+    "inci_tennis_io/clip_journal_store.py",
     "inci_tennis_io/expert_journal_store.py",
     "inci_tennis_io/facade.py",
     "inci_tennis_io/provider_readonly.py",

@@ -309,9 +309,17 @@ class ClipJournalTests(unittest.TestCase):
         self.assertTrue(bundle_bytes.endswith(b"\n"))
         self.assertEqual(len(bundle_bytes.strip()), 64)
 
+        document = session.journal_document_bytes()
+        self.assertTrue(document.endswith(b"\n"))
         from inci_tennis_expert.clip_journal import (
+            deserialize_clip_journal_document,
+            scorecard_from_clip_records,
             verify_clip_record_matches_observation,
         )
+
+        reloaded = deserialize_clip_journal_document(document)
+        self.assertEqual(len(reloaded), len(records))
+        self.assertEqual(reloaded[0].record_sha256, records[0].record_sha256)
 
         for record, observation in zip(records, observations, strict=True):
             verify_clip_record_matches_observation(
@@ -320,6 +328,26 @@ class ClipJournalTests(unittest.TestCase):
                 prior=prior,
                 bundle=session.bundle,
             )
+
+        scorecard = scorecard_from_clip_records(
+            records,
+            session_id=session.session_id,
+            target_net_pnl_usd=session.bundle.clip_artifact.target_net_pnl_usd,
+        )
+        self.assertEqual(scorecard.session_id, "clip-journal-test")
+        self.assertEqual(scorecard.record_count, len(records))
+        self.assertEqual(
+            scorecard.paper_buy_count
+            + scorecard.paper_sell_count
+            + scorecard.abstain_count,
+            scorecard.record_count,
+        )
+        self.assertGreaterEqual(scorecard.paper_buy_count, 1)
+        self.assertGreaterEqual(
+            scorecard.projected_entry_net_pnl,
+            scorecard.target_net_pnl_usd,
+        )
+        self.assertGreaterEqual(scorecard.entry_target_clear_count, 1)
 
     def test_journal_detects_mismatched_observation(self) -> None:
         transition, _binding, prior = trusted_home_transition()

@@ -36,13 +36,13 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "9086eb5e572f72723b116e69997def3b7ca784828f595436e2375e9c16e3986b"
         ),
         "clip_journal.py": (
-            "57aa296a55178e1b3dcc79501857798fcd2fa21fe0c91801b657bf00c34cbd67"
+            "e876ce51df761f754c967837a6568be4a69f7ff3f591525fa680b547f9da07f3"
         ),
         "engine.py": (
             "df441e8141b04cdc04d947a0899333b6003dcbefc49ee60ae0e4c45a320259a6"
         ),
         "facade.py": (
-            "2d344dd3a29bee987fc53493edaa9546f061b6993bca8a5d4075236fe32c32dd"
+            "8a8432ba377674be30ab09523c88e1975daf73aadab5c5a066d5143de320d713"
         ),
         "fee_schedule.py": (
             "9dd446dfb5c5ab1205e4e7faca6af32ccbc250c05d1b54b9eb9835d6ab01c6ea"
@@ -93,13 +93,16 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "0971016a9f31ba114eb813b80e4e155d0f8bbdfed9786ce8d5319bf9a5a781e1"
         ),
         "expert_journal_store.py": (
-            "d7ee3949293fb3dcc5203c7f51579fc160d39cd6be9a40acb73ef3dfeff5fb0e"
+            "a6926017f3cdee98cdea540fd0a5862156d57d42d73b7194a7173e2616c77cff"
         ),
         "facade.py": (
-            "ac149a184722076c4489db9db7eccd361fc409c8a2c3f679d4c86e1bb999f8b4"
+            "e96663b80e747b40b71d6e95fce71cec1c1f4f1dfbb6b2a5b0fc701eaced2e22"
         ),
         "historical_store.py": (
             "a049a92e9a3d2326f2f42d41672d7406a8eeb522a52e13d9a0ff97522e42b139"
+        ),
+        "clip_journal_store.py": (
+            "76b43916fd7a8615082b8a52e153c98d64adbd2cdcddf1271f1ade273cb8659b"
         ),
         "pinned_artifacts.py": (
             "c670521a595a42098d1d783868abbc36506d4579a9fa852d10ac1af93b762734"
@@ -150,7 +153,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "b525710aebc9fa7a18ccd87c3cd3cc79d8d10626aeba0950a91bdcaf338e9dd1"
         ),
         "scalp_paper_observer.py": (
-            "4a5ff1885a97b0270974098899c96fa8f44d91a7528970875127aefc84e2be61"
+            "4e6ec57fd71281e072915d6d8fadb653a5dc00c8bc6831715cd855e4f83c603f"
         ),
         "sportradar_trial_cli.py": (
             "16da84731e4ed36eba30a49e38ccc0e1dba303a2d92bc4f3295c7e0a3f6195f6"
@@ -531,6 +534,23 @@ TASK7_IO_ADAPTER_IMPORTS = {
 TASK7_IO_EXPERT_IMPLEMENTATION_IMPORTS = {
     "historical_store.py": frozenset(
         {"inci_tennis_expert.prematch_model.HistoricalRow"}
+    ),
+    "clip_journal_store.py": frozenset(
+        {
+            "inci_tennis_expert.clip_journal.ClipJournalRecordV1",
+            (
+                "inci_tennis_expert.clip_journal."
+                "deserialize_clip_journal_document"
+            ),
+            (
+                "inci_tennis_expert.clip_journal."
+                "encode_clip_journal_records"
+            ),
+            (
+                "inci_tennis_expert.clip_journal."
+                "serialize_clip_journal_document"
+            ),
+        }
     ),
     "provider_readonly.py": frozenset(
         {"inci_tennis_expert.match_binding.decode_binding_universe"}
@@ -2822,6 +2842,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io/pinned_artifacts.py",
             "inci_tennis_io/ports.py",
             "inci_tennis_io/historical_store.py",
+            "inci_tennis_io/clip_journal_store.py",
             "inci_tennis_io/expert_journal_store.py",
             "inci_tennis_io/facade.py",
             "inci_tennis_io/provider_readonly.py",
@@ -2940,6 +2961,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io": {
                 "__init__.py",
                 "account_lock.py",
+                "clip_journal_store.py",
                 "expert_journal_store.py",
                 "facade.py",
                 "historical_store.py",
