@@ -1,8 +1,3 @@
-from .replay import (
-    begin_expert_replay,
-    finish_expert_replay,
-    replay_expert_parent_group,
-)
 from .engine import (
     ClipBundle,
     ClipObservation,
@@ -11,16 +6,31 @@ from .engine import (
     observe_clip_on_opportunity,
     observe_clip_on_transition,
 )
+from .clip_journal import (
+    ClipJournalRecordV1,
+    clip_record_from_observation,
+    encode_clip_journal_records,
+    verify_clip_record_matches_observation,
+)
+from .replay import (
+    begin_expert_replay,
+    finish_expert_replay,
+    replay_expert_parent_group,
+)
 
 
 __all__ = (
     "ClipBundle",
+    "ClipJournalRecordV1",
     "ClipObservation",
     "begin_expert_replay",
+    "clip_record_from_observation",
+    "encode_clip_journal_records",
     "fair_value_for_opportunity",
     "finish_expert_replay",
     "make_default_clip_bundle",
     "observe_clip_on_opportunity",
     "observe_clip_on_transition",
     "replay_expert_parent_group",
+    "verify_clip_record_matches_observation",
 )

@@ -35,11 +35,14 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "calibration.py": (
             "9086eb5e572f72723b116e69997def3b7ca784828f595436e2375e9c16e3986b"
         ),
+        "clip_journal.py": (
+            "57aa296a55178e1b3dcc79501857798fcd2fa21fe0c91801b657bf00c34cbd67"
+        ),
         "engine.py": (
             "df441e8141b04cdc04d947a0899333b6003dcbefc49ee60ae0e4c45a320259a6"
         ),
         "facade.py": (
-            "501082a49a8e14d30ec29a0f20af64f1ac5e100fe9f0c09fa3aeb95be90c756f"
+            "2d344dd3a29bee987fc53493edaa9546f061b6993bca8a5d4075236fe32c32dd"
         ),
         "fee_schedule.py": (
             "9dd446dfb5c5ab1205e4e7faca6af32ccbc250c05d1b54b9eb9835d6ab01c6ea"
@@ -90,7 +93,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "0971016a9f31ba114eb813b80e4e155d0f8bbdfed9786ce8d5319bf9a5a781e1"
         ),
         "expert_journal_store.py": (
-            "26b1ee204c5f7d2242c97b869b7b1875fa78353064991474a83c0a34abd0bd75"
+            "d7ee3949293fb3dcc5203c7f51579fc160d39cd6be9a40acb73ef3dfeff5fb0e"
         ),
         "facade.py": (
             "ac149a184722076c4489db9db7eccd361fc409c8a2c3f679d4c86e1bb999f8b4"
@@ -147,7 +150,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "b525710aebc9fa7a18ccd87c3cd3cc79d8d10626aeba0950a91bdcaf338e9dd1"
         ),
         "scalp_paper_observer.py": (
-            "7d6935c3a99b62ea2c1323c8cad43a64eb585399283d6fa38284fd29c4282910"
+            "4a5ff1885a97b0270974098899c96fa8f44d91a7528970875127aefc84e2be61"
         ),
         "sportradar_trial_cli.py": (
             "16da84731e4ed36eba30a49e38ccc0e1dba303a2d92bc4f3295c7e0a3f6195f6"

@@ -241,6 +241,7 @@ _EXPERT_INVENTORY = (
     "inci_tennis_expert/fee_schedule.py",
     "inci_tennis_expert/scalp_policy.py",
     "inci_tennis_expert/engine.py",
+    "inci_tennis_expert/clip_journal.py",
     "inci_tennis_expert/state.py",
     "inci_tennis_expert/observation.py",
     "inci_tennis_expert/reducer.py",

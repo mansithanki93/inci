@@ -291,5 +291,62 @@ class PaperClipSessionTests(unittest.TestCase):
         self.assertEqual(session.open_tickers(), ())
 
 
+class ClipJournalTests(unittest.TestCase):
+    def test_session_journals_and_verifies_records(self) -> None:
+        transition, binding, prior = trusted_home_transition()
+        session = PaperClipSession.with_default_bundle(
+            require_calibration=False,
+            session_id="clip-journal-test",
+        )
+        observations = session.observe(transition, prior)
+        records = session.journal_records()
+        self.assertEqual(len(records), len(observations))
+        self.assertGreaterEqual(len(records), 1)
+        self.assertEqual(records[0].session_id, "clip-journal-test")
+        self.assertEqual(records[0].record_sequence, 1)
+        self.assertEqual(records[0].ticker, binding.home_market_ticker)
+        bundle_bytes = session.journal_bundle_bytes()
+        self.assertTrue(bundle_bytes.endswith(b"\n"))
+        self.assertEqual(len(bundle_bytes.strip()), 64)
+
+        from inci_tennis_expert.clip_journal import (
+            verify_clip_record_matches_observation,
+        )
+
+        for record, observation in zip(records, observations, strict=True):
+            verify_clip_record_matches_observation(
+                record,
+                observation,
+                prior=prior,
+                bundle=session.bundle,
+            )
+
+    def test_journal_detects_mismatched_observation(self) -> None:
+        transition, _binding, prior = trusted_home_transition()
+        buying = PaperClipSession.with_default_bundle(
+            require_calibration=False,
+        )
+        abstaining = PaperClipSession.with_default_bundle(
+            require_calibration=True,
+        )
+        buy_obs = buying.observe(transition, prior)[0]
+        abstain_obs = abstaining.observe(transition, prior)[0]
+        record = buying.journal_records()[0]
+        from inci_tennis_expert.clip_journal import (
+            verify_clip_record_matches_observation,
+        )
+        from inci_tennis_expert.contracts import ExpertContractError
+
+        self.assertIs(buy_obs.action, DecisionAction.PAPER_BUY)
+        self.assertIs(abstain_obs.action, DecisionAction.ABSTAIN)
+        with self.assertRaises(ExpertContractError):
+            verify_clip_record_matches_observation(
+                record,
+                abstain_obs,
+                prior=prior,
+                bundle=buying.bundle,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
