@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inci-tennis-io/historical-dataset-manifest-v1.schema.json",
+  "title": "Inci Tennis Historical Dataset Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dataset_id",
+    "provider_id",
+    "product_id",
+    "source_lineage_sha256",
+    "declared_dataset_sha256",
+    "observed_dataset_sha256",
+    "row_count",
+    "min_match_start_wall_ns",
+    "max_match_start_wall_ns",
+    "frozen_at_wall_ns",
+    "manifest_sha256",
+    "schema_sha256"
+  ],
+  "properties": {
+    "dataset_id": { "type": "string", "minLength": 1 },
+    "provider_id": { "type": "string", "minLength": 1 },
+    "product_id": { "type": "string", "minLength": 1 },
+    "source_lineage_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "declared_dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "observed_dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "row_count": { "type": "integer", "minimum": 0 },
+    "min_match_start_wall_ns": { "type": "integer", "minimum": 0 },
+    "max_match_start_wall_ns": { "type": "integer", "minimum": 0 },
+    "frozen_at_wall_ns": { "type": "integer", "minimum": 0 },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schema_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

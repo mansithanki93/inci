@@ -233,8 +233,11 @@ _EXPERT_INVENTORY = (
     "inci_tennis_expert/tennis_score.py",
     "inci_tennis_expert/market_book.py",
     "inci_tennis_expert/match_binding.py",
+    "inci_tennis_expert/prematch_model.py",
     "inci_tennis_expert/synchronizer.py",
     "inci_tennis_expert/task6_fallback_normalizer.py",
+    "inci_tennis_expert/win_probability.py",
+    "inci_tennis_expert/calibration.py",
     "inci_tennis_expert/state.py",
     "inci_tennis_expert/observation.py",
     "inci_tennis_expert/reducer.py",
@@ -246,6 +249,7 @@ _IO_INVENTORY = (
     "inci_tennis_io/__init__.py",
     "inci_tennis_io/pinned_artifacts.py",
     "inci_tennis_io/ports.py",
+    "inci_tennis_io/historical_store.py",
     "inci_tennis_io/expert_journal_store.py",
     "inci_tennis_io/facade.py",
     "inci_tennis_io/provider_readonly.py",
@@ -331,6 +335,10 @@ _EXPERT_RESOURCE_INVENTORY = (
     "inci_tennis_expert/schemas/expert-synchronization-applied-v1.schema.json",
     "inci_tennis_expert/schemas/match-binding-v1.schema.json",
     "inci_tennis_expert/schemas/task6-fallback-no-payload-v1.schema.json",
+)
+_IO_RESOURCE_INVENTORY = (
+    "inci_tennis_io/schemas/historical-dataset-manifest-v1.schema.json",
+    "inci_tennis_io/schemas/historical-entitlement-v1.schema.json",
 )
 _SOURCE_PACKAGE_NAMES = (
     "tennis_v1",
@@ -451,7 +459,7 @@ _SOURCE_PACKAGE_INVENTORIES = {
     "inci_tennis_expert": tuple(
         sorted((*_EXPERT_INVENTORY, *_EXPERT_RESOURCE_INVENTORY))
     ),
-    "inci_tennis_io": _IO_INVENTORY,
+    "inci_tennis_io": tuple(sorted((*_IO_INVENTORY, *_IO_RESOURCE_INVENTORY))),
     "inci_tennis_adapters": tuple(
         sorted((*_ADAPTER_INVENTORY, *_CANDIDATE_SCHEMA_INVENTORY))
     ),

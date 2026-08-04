@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inci-tennis-io/historical-entitlement-v1.schema.json",
+  "title": "Inci Tennis Historical Entitlement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "entitlement_id",
+    "provider_id",
+    "product_id",
+    "source_lineage_sha256",
+    "authorized_dataset_sha256",
+    "issued_wall_ns",
+    "not_before_wall_ns",
+    "not_after_wall_ns",
+    "retention_delete_after_wall_ns",
+    "publication_not_before_wall_ns",
+    "active",
+    "analysis_use_granted",
+    "derivative_use_granted",
+    "artifact_sha256",
+    "schema_sha256"
+  ],
+  "properties": {
+    "entitlement_id": { "type": "string", "minLength": 1 },
+    "provider_id": { "type": "string", "minLength": 1 },
+    "product_id": { "type": "string", "minLength": 1 },
+    "source_lineage_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "authorized_dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "issued_wall_ns": { "type": "integer", "minimum": 0 },
+    "not_before_wall_ns": { "type": "integer", "minimum": 0 },
+    "not_after_wall_ns": { "type": "integer", "minimum": 0 },
+    "retention_delete_after_wall_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "publication_not_before_wall_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "active": { "type": "boolean" },
+    "analysis_use_granted": { "type": "boolean" },
+    "derivative_use_granted": { "type": "boolean" },
+    "artifact_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schema_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

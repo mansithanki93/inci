@@ -30,6 +30,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "contracts.py": (
             "8390c0137f8f93b5150cfcc2a85d8c07af6b8c0fffbb6fc66d235aae78a46e12"
         ),
+        "calibration.py": (
+            "5b58a853841c615bdffeea920e045db2d113105c9026745f88b350e3b8ee99c1"
+        ),
         "facade.py": (
             "cf6fc820a31443e85254fa9d3bc3534c7e935b025af48a21948478e5fb277e4d"
         ),
@@ -44,6 +47,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         ),
         "observation.py": (
             "e1b821d8b385220b5516831a221fd1b5df311035bc8fcde395bcc8db8ddee2b3"
+        ),
+        "prematch_model.py": (
+            "47ca8c23738692e5543359a3813e11a0752b743bcbfa0b817c176142c1eb3c12"
         ),
         "reducer.py": (
             "a604a502f315c189736f7e77ba7ee1560de38b5b6a42f5f1ae75664db644f0c7"
@@ -63,6 +69,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "task6_fallback_normalizer.py": (
             "2629e1752c789478201da6b3dd291dfdb6dc46614998e2ab8115d47f676b3b41"
         ),
+        "win_probability.py": (
+            "f9715503de4fb9b96dcd23f3f6240fc870a2ea6c983668bd9b9ef5c4a68fb4dc"
+        ),
     },
     "inci_tennis_io": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
@@ -70,10 +79,13 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6752e3b873f0e18b6226c0c664aaa49263c30b4c925019ebcebb87ce893d6e5c"
         ),
         "expert_journal_store.py": (
-            "dc14c037d4303ca2fa5ae2ed8c1b7de91b24f097bf08384884726904cc612fb0"
+            "1a26034985b21980a783f8f50463b324f572f480940cbd9134095ce7d1a1bf3e"
         ),
         "facade.py": (
             "9cf621feba65e4e7bc0c463cad257378e3453d59dbfdc48ace76697048355808"
+        ),
+        "historical_store.py": (
+            "6594c669ae145b0548ad314ac1835a843aa731c5f2b242625d7e2aaaff8a70ae"
         ),
         "pinned_artifacts.py": (
             "43feef97b2d9a37f00143f00f6272562a64881da5cf143c060eb77c8c058ca0f"
@@ -162,7 +174,14 @@ EXPECTED_PACKAGE_RESOURCE_SHA256 = {
             "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
         ),
     },
-    "inci_tennis_io": {},
+    "inci_tennis_io": {
+        "schemas/historical-dataset-manifest-v1.schema.json": (
+            "74a061a51fdbe3a82a5a306738dfdde56d3557270a86049fb2be014907240153"
+        ),
+        "schemas/historical-entitlement-v1.schema.json": (
+            "011c76189d230c8ccfa2b872a1c74d406c1ce3bb00299cdca89a7ce5114288fb"
+        ),
+    },
     "inci_tennis_adapters": {
         (
             "schemas/"
@@ -485,6 +504,9 @@ TASK7_IO_ADAPTER_IMPORTS = {
     )
 }
 TASK7_IO_EXPERT_IMPLEMENTATION_IMPORTS = {
+    "historical_store.py": frozenset(
+        {"inci_tennis_expert.prematch_model.HistoricalRow"}
+    ),
     "provider_readonly.py": frozenset(
         {"inci_tennis_expert.match_binding.decode_binding_universe"}
     )
