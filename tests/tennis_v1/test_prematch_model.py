@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import sys
 import unittest
+
+sys.dont_write_bytecode = True
 
 from inci_tennis_expert.contracts import ExpertContractError, PlayerSide
 from inci_tennis_expert.prematch_model import (
@@ -61,8 +64,8 @@ def artifact(**changes: object) -> FrozenPrematchArtifact:
         "access_decision_sha256": SHA_E,
         "tour_serve_alpha": Decimal("32"),
         "tour_serve_beta": Decimal("28"),
-        "surface_serve_alpha": Decimal("32"),
-        "surface_serve_beta": Decimal("28"),
+        "surface_serve_alpha": Decimal("40"),
+        "surface_serve_beta": Decimal("20"),
         "return_alpha": Decimal("42"),
         "return_beta": Decimal("58"),
         "recency_half_life_ns": 86_400_000_000_000,

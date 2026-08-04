@@ -443,7 +443,6 @@ def _feature_payload(
     source_rows_sha256: str,
 ) -> dict[str, object]:
     return {
-        "schema": "prematch_features_v1",
         "player_home_id": player_home_id,
         "player_away_id": player_away_id,
         "surface": surface,
@@ -463,6 +462,34 @@ def _feature_payload(
         "away_ranking": away_ranking,
         "source_rows_sha256": source_rows_sha256,
         "feature_definition_sha256": PREMATCH_FEATURE_DEFINITION_SHA256,
+    }
+
+
+def _prematch_artifact_payload(
+    artifact: FrozenPrematchArtifact,
+) -> dict[str, object]:
+    return {
+        "schema": "frozen_prematch_artifact_v1",
+        "artifact_id": artifact.artifact_id,
+        "model_sha256": artifact.model_sha256,
+        "feature_definition_sha256": artifact.feature_definition_sha256,
+        "training_cutoff_wall_ns": artifact.training_cutoff_wall_ns,
+        "source_dataset_sha256": artifact.source_dataset_sha256,
+        "entitlement_sha256": artifact.entitlement_sha256,
+        "manifest_sha256": artifact.manifest_sha256,
+        "access_decision_sha256": artifact.access_decision_sha256,
+        "tour_serve_alpha": artifact.tour_serve_alpha,
+        "tour_serve_beta": artifact.tour_serve_beta,
+        "surface_serve_alpha": artifact.surface_serve_alpha,
+        "surface_serve_beta": artifact.surface_serve_beta,
+        "return_alpha": artifact.return_alpha,
+        "return_beta": artifact.return_beta,
+        "recency_half_life_ns": artifact.recency_half_life_ns,
+        "opponent_adjustment_weight": artifact.opponent_adjustment_weight,
+        "minimum_effective_sample_size": (
+            artifact.minimum_effective_sample_size
+        ),
+        "model_build_sha256": artifact.model_build_sha256,
     }
 
 
@@ -609,7 +636,9 @@ def build_features(
     )
     return PrematchFeatures(
         **payload,
-        feature_vector_sha256=expert_contract_sha256(payload),
+        feature_vector_sha256=expert_contract_sha256(
+            {"schema": "prematch_features_v1", **payload}
+        ),
     )
 
 
@@ -737,7 +766,9 @@ def estimate_prematch(
         support_status=support_status,
         training_cutoff_wall_ns=artifact.training_cutoff_wall_ns,
         model_sha256=artifact.model_sha256,
-        prematch_artifact_sha256=expert_contract_sha256(artifact),
+        prematch_artifact_sha256=expert_contract_sha256(
+            _prematch_artifact_payload(artifact)
+        ),
         feature_definition_sha256=features.feature_definition_sha256,
         feature_vector_sha256=features.feature_vector_sha256,
         abstention_reason=(

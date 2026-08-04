@@ -151,13 +151,11 @@ def _access_payload(
     *,
     authorized: bool,
     reason: str,
-    entitlement: HistoricalEntitlementArtifact,
     manifest: HistoricalDatasetManifest,
     official_window_start_wall_ns: int,
     official_window_end_wall_ns: int,
 ) -> dict[str, object]:
     return {
-        "schema": "historical_access_decision_v1",
         "authorized": authorized,
         "reason": reason,
         "provider_id": manifest.provider_id,
@@ -166,8 +164,51 @@ def _access_payload(
         "dataset_sha256": manifest.observed_dataset_sha256,
         "official_window_start_wall_ns": official_window_start_wall_ns,
         "official_window_end_wall_ns": official_window_end_wall_ns,
-        "entitlement_sha256": expert_contract_sha256(entitlement),
-        "manifest_sha256": expert_contract_sha256(manifest),
+    }
+
+
+def _entitlement_payload(
+    entitlement: HistoricalEntitlementArtifact,
+) -> dict[str, object]:
+    return {
+        "schema": "historical_entitlement_v1",
+        "entitlement_id": entitlement.entitlement_id,
+        "provider_id": entitlement.provider_id,
+        "product_id": entitlement.product_id,
+        "source_lineage_sha256": entitlement.source_lineage_sha256,
+        "authorized_dataset_sha256": entitlement.authorized_dataset_sha256,
+        "issued_wall_ns": entitlement.issued_wall_ns,
+        "not_before_wall_ns": entitlement.not_before_wall_ns,
+        "not_after_wall_ns": entitlement.not_after_wall_ns,
+        "retention_delete_after_wall_ns": (
+            entitlement.retention_delete_after_wall_ns
+        ),
+        "publication_not_before_wall_ns": (
+            entitlement.publication_not_before_wall_ns
+        ),
+        "active": entitlement.active,
+        "analysis_use_granted": entitlement.analysis_use_granted,
+        "derivative_use_granted": entitlement.derivative_use_granted,
+        "artifact_sha256": entitlement.artifact_sha256,
+        "schema_sha256": entitlement.schema_sha256,
+    }
+
+
+def _manifest_payload(manifest: HistoricalDatasetManifest) -> dict[str, object]:
+    return {
+        "schema": "historical_dataset_manifest_v1",
+        "dataset_id": manifest.dataset_id,
+        "provider_id": manifest.provider_id,
+        "product_id": manifest.product_id,
+        "source_lineage_sha256": manifest.source_lineage_sha256,
+        "declared_dataset_sha256": manifest.declared_dataset_sha256,
+        "observed_dataset_sha256": manifest.observed_dataset_sha256,
+        "row_count": manifest.row_count,
+        "min_match_start_wall_ns": manifest.min_match_start_wall_ns,
+        "max_match_start_wall_ns": manifest.max_match_start_wall_ns,
+        "frozen_at_wall_ns": manifest.frozen_at_wall_ns,
+        "manifest_sha256": manifest.manifest_sha256,
+        "schema_sha256": manifest.schema_sha256,
     }
 
 
@@ -180,17 +221,24 @@ def _decision(
     official_window_end_wall_ns: int,
 ) -> HistoricalAccessDecision:
     authorized = reason == "authorized"
+    entitlement_sha256 = expert_contract_sha256(
+        _entitlement_payload(entitlement)
+    )
+    manifest_sha256 = expert_contract_sha256(_manifest_payload(manifest))
     payload = _access_payload(
         authorized=authorized,
         reason=reason,
-        entitlement=entitlement,
         manifest=manifest,
         official_window_start_wall_ns=official_window_start_wall_ns,
         official_window_end_wall_ns=official_window_end_wall_ns,
     )
+    payload["entitlement_sha256"] = entitlement_sha256
+    payload["manifest_sha256"] = manifest_sha256
     return HistoricalAccessDecision(
         **payload,
-        decision_sha256=expert_contract_sha256(payload),
+        decision_sha256=expert_contract_sha256(
+            {"schema": "historical_access_decision_v1", **payload}
+        ),
     )
 
 

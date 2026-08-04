@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import sys
 import unittest
+
+sys.dont_write_bytecode = True
 
 from inci_tennis_expert.calibration import (
     CalibrationPolicy,

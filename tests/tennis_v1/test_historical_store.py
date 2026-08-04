@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
 import unittest
+
+sys.dont_write_bytecode = True
 
 from inci_tennis_expert.contracts import ExpertContractError
 from inci_tennis_expert.prematch_model import HistoricalRow

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from decimal import Decimal
+import sys
 import unittest
+
+sys.dont_write_bytecode = True
 
 from inci_tennis_expert.contracts import (
     DecisionReason,
@@ -69,6 +72,18 @@ def state(**changes: object) -> TennisState:
     }
     values.update(changes)
     return TennisState(**values)  # type: ignore[arg-type]
+
+
+def unchecked_state(**changes: object) -> TennisState:
+    checked = state()
+    value = object.__new__(TennisState)
+    for field in fields(TennisState):
+        object.__setattr__(
+            value,
+            field.name,
+            changes.get(field.name, getattr(checked, field.name)),
+        )
+    return value
 
 
 def prior(**changes: object) -> PrematchPrior:
@@ -241,7 +256,7 @@ class WinProbabilityTests(unittest.TestCase):
 
     def test_unsupported_format_and_low_ess_abstain(self) -> None:
         unsupported = live_fair_value(
-            state(match_format=MatchFormat.UNSUPPORTED),
+            unchecked_state(match_format=MatchFormat.UNSUPPORTED),
             prior(),
         )
         self.assertFalse(unsupported.supported)

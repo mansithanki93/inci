@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from decimal import Decimal, localcontext
 
 from .contracts import (
@@ -157,7 +157,6 @@ def _artifact_payload(
     reason: str,
 ) -> dict[str, object]:
     return {
-        "schema": "calibration_artifact_v1",
         "policy_id": policy.policy_id,
         "stratum": policy.stratum,
         "training_cutoff_wall_ns": policy.training_cutoff_wall_ns,
@@ -248,7 +247,9 @@ def calibrate_chronologically(
     )
     return CalibrationArtifact(
         **payload,
-        calibration_artifact_sha256=expert_contract_sha256(payload),
+        calibration_artifact_sha256=expert_contract_sha256(
+            {"schema": "calibration_artifact_v1", **payload}
+        ),
     )
 
 
@@ -256,9 +257,17 @@ def _unsupported_calibrated(
     raw_estimate: FairValueEstimate,
     reason: DecisionReason,
 ) -> FairValueEstimate:
-    return replace(
-        raw_estimate,
+    return FairValueEstimate(
+        player_side=raw_estimate.player_side,
+        fair_probability=raw_estimate.fair_probability,
+        lower_probability=raw_estimate.lower_probability,
+        upper_probability=raw_estimate.upper_probability,
         supported=False,
+        stratum=raw_estimate.stratum,
+        model_sha256=raw_estimate.model_sha256,
+        prematch_artifact_sha256=raw_estimate.prematch_artifact_sha256,
+        feature_definition_sha256=raw_estimate.feature_definition_sha256,
+        feature_vector_sha256=raw_estimate.feature_vector_sha256,
         calibration_artifact_sha256=None,
         abstention_reason=reason,
     )
@@ -322,11 +331,17 @@ def apply_calibration(
         lower = center
     if upper < center:
         upper = center
-    return replace(
-        raw_estimate,
+    return FairValueEstimate(
+        player_side=raw_estimate.player_side,
         fair_probability=center,
         lower_probability=lower,
         upper_probability=upper,
+        supported=True,
+        stratum=raw_estimate.stratum,
+        model_sha256=raw_estimate.model_sha256,
+        prematch_artifact_sha256=raw_estimate.prematch_artifact_sha256,
+        feature_definition_sha256=raw_estimate.feature_definition_sha256,
+        feature_vector_sha256=raw_estimate.feature_vector_sha256,
         calibration_artifact_sha256=artifact.calibration_artifact_sha256,
         abstention_reason=None,
     )
