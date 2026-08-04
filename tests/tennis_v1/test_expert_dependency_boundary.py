@@ -38,6 +38,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "facade.py": (
             "6ae5e93311c519794ab327451a277b404c94370dadf9bd6d142658dd4ca15a41"
         ),
+        "fee_schedule.py": (
+            "9dd446dfb5c5ab1205e4e7faca6af32ccbc250c05d1b54b9eb9835d6ab01c6ea"
+        ),
         "journal_codec.py": (
             "693edba1197b34e3688bd8ed7d9a6d2b3f319f0ccfd32308cad5d0f3be78236e"
         ),
@@ -58,6 +61,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         ),
         "replay.py": (
             "0af5dc81dd7a4e77829cdfc880962bb7564456a3d09fe3b29e0d30267b3f7934"
+        ),
+        "scalp_policy.py": (
+            "4834ed986abcaa2a7db3ecf46431839753ac7aa69d78f8a5137463539c3a36f9"
         ),
         "state.py": (
             "caee42e5e32fd337e1f92cc88400f8ba8bedfe847f3cbf38a35a721f617f1fa9"
@@ -81,7 +87,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "0971016a9f31ba114eb813b80e4e155d0f8bbdfed9786ce8d5319bf9a5a781e1"
         ),
         "expert_journal_store.py": (
-            "1a26034985b21980a783f8f50463b324f572f480940cbd9134095ce7d1a1bf3e"
+            "aff9e633b5fa2a0ca020cbed15448aa8591c22cbbf45b69c1859a9a68aff371b"
         ),
         "facade.py": (
             "ac149a184722076c4489db9db7eccd361fc409c8a2c3f679d4c86e1bb999f8b4"
