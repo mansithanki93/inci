@@ -35,8 +35,11 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         "calibration.py": (
             "9086eb5e572f72723b116e69997def3b7ca784828f595436e2375e9c16e3986b"
         ),
+        "engine.py": (
+            "df441e8141b04cdc04d947a0899333b6003dcbefc49ee60ae0e4c45a320259a6"
+        ),
         "facade.py": (
-            "6ae5e93311c519794ab327451a277b404c94370dadf9bd6d142658dd4ca15a41"
+            "501082a49a8e14d30ec29a0f20af64f1ac5e100fe9f0c09fa3aeb95be90c756f"
         ),
         "fee_schedule.py": (
             "9dd446dfb5c5ab1205e4e7faca6af32ccbc250c05d1b54b9eb9835d6ab01c6ea"
@@ -87,7 +90,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "0971016a9f31ba114eb813b80e4e155d0f8bbdfed9786ce8d5319bf9a5a781e1"
         ),
         "expert_journal_store.py": (
-            "aff9e633b5fa2a0ca020cbed15448aa8591c22cbbf45b69c1859a9a68aff371b"
+            "26b1ee204c5f7d2242c97b869b7b1875fa78353064991474a83c0a34abd0bd75"
         ),
         "facade.py": (
             "ac149a184722076c4489db9db7eccd361fc409c8a2c3f679d4c86e1bb999f8b4"
@@ -142,6 +145,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         ),
         "shadow_runtime.py": (
             "b525710aebc9fa7a18ccd87c3cd3cc79d8d10626aeba0950a91bdcaf338e9dd1"
+        ),
+        "scalp_paper_observer.py": (
+            "7d6935c3a99b62ea2c1323c8cad43a64eb585399283d6fa38284fd29c4282910"
         ),
         "sportradar_trial_cli.py": (
             "16da84731e4ed36eba30a49e38ccc0e1dba303a2d92bc4f3295c7e0a3f6195f6"
@@ -2885,6 +2891,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             ),
             "inci_tennis_runtime/shadow_runtime.py",
             "inci_tennis_runtime/shadow_cli.py",
+            "inci_tennis_runtime/scalp_paper_observer.py",
             "inci_tennis_runtime/sportradar_trial_cli.py",
         )
         self.assertEqual(expert_journal_store._IO_INVENTORY, expected_io)
@@ -2951,6 +2958,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "expert_controller.py",
                 "provider_qualification_controller.py",
                 "replay_service.py",
+                "scalp_paper_observer.py",
                 "shadow_cli.py",
                 "shadow_runtime.py",
                 "sportradar_trial_cli.py",

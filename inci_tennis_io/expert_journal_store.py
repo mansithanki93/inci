@@ -240,6 +240,7 @@ _EXPERT_INVENTORY = (
     "inci_tennis_expert/calibration.py",
     "inci_tennis_expert/fee_schedule.py",
     "inci_tennis_expert/scalp_policy.py",
+    "inci_tennis_expert/engine.py",
     "inci_tennis_expert/state.py",
     "inci_tennis_expert/observation.py",
     "inci_tennis_expert/reducer.py",
@@ -295,6 +296,7 @@ _RUNTIME_INVENTORY = (
     "inci_tennis_runtime/provider_qualification_controller.py",
     "inci_tennis_runtime/shadow_runtime.py",
     "inci_tennis_runtime/shadow_cli.py",
+    "inci_tennis_runtime/scalp_paper_observer.py",
     "inci_tennis_runtime/sportradar_trial_cli.py",
 )
 _DEPENDENCY_INVENTORY = ("pyproject.toml", "requirements.txt")
