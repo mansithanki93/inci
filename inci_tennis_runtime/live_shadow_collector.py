@@ -50,6 +50,7 @@ _CANDIDATE_STATUSES = frozenset(
 _TERMINAL_STATUSES = frozenset({"closed", "cancelled", "abandoned"})
 _TERMINAL_KALSHI_CODES = frozenset({"kalshi_stream_terminal"})
 _MAX_RECOVERY_ATTEMPTS = 3
+_HEARTBEAT_SECONDS = 60
 _PROVIDER_FAILOVER_TRANSPORT_CODES = frozenset(
     {
         "sportradar_async_dependency_unavailable",
@@ -373,6 +374,7 @@ class ShadowDashboardView:
     sportradar_captures: int
     kalshi_frames: int
     mapping_mode: str = "operator_supplied"
+    elapsed_seconds: float = 0.0
 
 
 def _terminal_text(value: object, maximum: int = 128) -> str:
@@ -398,7 +400,7 @@ def render_shadow_dashboard(view: ShadowDashboardView) -> str:
         )
         mapping = "VERIFIED SOURCE LINK / UNQUALIFIED"
     elif view.mapping_mode == "operator_supplied":
-        mode = "READ ONLY / UNQUALIFIED / NO ORDERS"
+        mode = "READ ONLY / UNQUALIFIED / NO SIGNALS / NO ORDERS"
         mapping = "OPERATOR-SUPPLIED / UNVERIFIED"
     else:
         _fail("shadow_mapping_mode_invalid")
@@ -408,6 +410,7 @@ def render_shadow_dashboard(view: ShadowDashboardView) -> str:
     sequence = "--" if view.kalshi_sequence is None else str(view.kalshi_sequence)
     rows = (
         ("MODE", mode),
+        ("ELAPSED", f"{view.elapsed_seconds:.1f}s"),
         ("TICKER MAPPING", mapping),
         ("MATCH", view.provider_match_id),
         ("PLAYERS", view.players),
@@ -645,6 +648,8 @@ class LiveShadowCollector:
         self._provider_clock_uncertainty_ns = 0
         self._provider_clock_bracket: tuple[int, int, int, int] | None = None
         self._recovery_attempts = 0
+        self._run_started_monotonic_ns: int | None = None
+        self._next_heartbeat_monotonic_ns: int | None = None
 
     @property
     def evidence_counts(self) -> tuple[int, int]:
@@ -932,6 +937,49 @@ class LiveShadowCollector:
                 sportradar_captures=self._sportradar_captures,
                 kalshi_frames=self._kalshi_frames,
                 mapping_mode=self._mapping_mode,
+                elapsed_seconds=(
+                    0.0
+                    if self._run_started_monotonic_ns is None
+                    else (monotonic - self._run_started_monotonic_ns)
+                    / 1_000_000_000
+                ),
+            )
+        )
+
+    def _waiting_dashboard(self, reason: str, monotonic: int) -> str:
+        reference = self._kalshi_reference
+        kalshi_age = (
+            None
+            if reference is None
+            else _age(monotonic, reference.captured_monotonic_ns)
+        )
+        return render_shadow_dashboard(
+            ShadowDashboardView(
+                provider_match_id=self._provider_match_id,
+                players="--",
+                score="--",
+                server="--",
+                sportradar_age_seconds=None,
+                market_tickers=self._tickers,
+                home_book=self._book_text(self._books[self._tickers[0]]),
+                away_book=self._book_text(self._books[self._tickers[1]]),
+                kalshi_status=self._kalshi_status,
+                kalshi_generation=self._kalshi_generation,
+                kalshi_sequence=self._kalshi_sequence,
+                kalshi_age_seconds=(
+                    None if kalshi_age is None else kalshi_age / 1_000_000_000
+                ),
+                last_event="--",
+                reason=reason,
+                sportradar_captures=self._sportradar_captures,
+                kalshi_frames=self._kalshi_frames,
+                mapping_mode=self._mapping_mode,
+                elapsed_seconds=(
+                    0.0
+                    if self._run_started_monotonic_ns is None
+                    else (monotonic - self._run_started_monotonic_ns)
+                    / 1_000_000_000
+                ),
             )
         )
 
@@ -952,6 +1000,7 @@ class LiveShadowCollector:
         except Exception as error:
             code = _error_code(error)
             if code == "kalshi_ws_receive_timeout":
+                await self._emit_timeout_heartbeat_if_due()
                 return
             if code in _TERMINAL_KALSHI_CODES:
                 raise ShadowCollectorError(code) from error
@@ -1029,6 +1078,25 @@ class LiveShadowCollector:
             self._projector.snapshot_requested(receipt)
         if self._score is not None:
             await self._append_observation(projection.reason)
+
+    async def _emit_timeout_heartbeat_if_due(self) -> None:
+        next_heartbeat = self._next_heartbeat_monotonic_ns
+        if next_heartbeat is None:
+            return
+        _, now = self._clock()
+        if now < next_heartbeat:
+            return
+        heartbeat_ns = _HEARTBEAT_SECONDS * 1_000_000_000
+        while next_heartbeat <= now:
+            next_heartbeat += heartbeat_ns
+        self._next_heartbeat_monotonic_ns = next_heartbeat
+        if self._score is None:
+            await asyncio.to_thread(
+                self._render,
+                self._waiting_dashboard("kalshi_receive_timeout_heartbeat", now),
+            )
+            return
+        await self._append_observation("kalshi_receive_timeout_heartbeat")
 
     async def _reconnect(self) -> None:
         last_error: Exception | None = None
@@ -1181,6 +1249,10 @@ class LiveShadowCollector:
         ):
             _fail("shadow_duration_invalid")
         _, start = self._clock()
+        self._run_started_monotonic_ns = start
+        self._next_heartbeat_monotonic_ns = (
+            start + _HEARTBEAT_SECONDS * 1_000_000_000
+        )
         reason: str | None = None
         failure: str | None = None
         provider_failure_source: str | None = None

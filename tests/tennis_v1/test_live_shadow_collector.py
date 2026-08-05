@@ -449,6 +449,144 @@ class ShadowEvidenceStoreTests(unittest.TestCase):
 
 
 class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_wait_with_receive_timeouts_still_publishes_heartbeat(
+        self,
+    ) -> None:
+        """Catches an unresponsive provider hiding a live shadow session."""
+
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+        from inci_tennis_runtime.live_shadow_collector import LiveShadowCollector
+
+        class BlockedProvider(_SportradarTransport):
+            async def fetch_summary(self, match_id: str) -> TrialCapture:
+                del match_id
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            clock = _Clock()
+            rendered: list[str] = []
+            with ShadowEvidenceStore(base / "shadow") as evidence:
+                collector = LiveShadowCollector(
+                    provider_match_id=MATCH_ID,
+                    market_tickers=TICKERS,
+                    sportradar_transport=BlockedProvider(_capture(base)),
+                    sportradar_ledger=_SportradarLedger(),
+                    kalshi_transport=_KalshiTransport(clock, []),
+                    market_projector=_Projector(lambda _: None),
+                    evidence_store=evidence,
+                    wall_ns=clock.wall_ns,
+                    monotonic_ns=clock.monotonic_ns,
+                    pause=clock.pause,
+                    stop_requested=lambda: clock.monotonic_ns()
+                    >= 61_000_000_000,
+                    render=rendered.append,
+                )
+
+                self.assertEqual(
+                    await collector.run(duration_seconds=61, poll_seconds=61),
+                    "operator_interrupt",
+                )
+
+            ledger = next((base / "shadow").glob("session-*.jsonl"))
+            rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+
+        heartbeats = [
+            value
+            for value in rendered
+            if "kalshi_receive_timeout_heartbeat" in value
+        ]
+        self.assertEqual(len(heartbeats), 1)
+        heartbeat = heartbeats[0]
+        self.assertIn("ELAPSED", heartbeat)
+        self.assertIn("KALSHI STATUS", heartbeat)
+        self.assertIn("waiting", heartbeat)
+        self.assertIn("CAPTURES", heartbeat)
+        self.assertIn("Sportradar 0 | Kalshi 0", heartbeat)
+        self.assertIn("NO SIGNALS", heartbeat)
+        self.assertIn("NO ORDERS", heartbeat)
+        for label in ("PLAYERS", "SCORE", "SERVER"):
+            self.assertRegex(heartbeat, rf"\| {label}\s+\| --\s+\|")
+        self.assertFalse(
+            any(row.get("kind") == "observation" for row in rows)
+        )
+        self.assertEqual(rows[-1]["kind"], "terminal")
+
+    async def test_receive_timeouts_publish_read_only_heartbeat(self) -> None:
+        """Catches a no-frame shadow run becoming visually silent."""
+
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+        from inci_tennis_runtime.live_shadow_collector import LiveShadowCollector
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            clock = _Clock()
+            rendered: list[str] = []
+            with ShadowEvidenceStore(base / "shadow") as evidence:
+                collector = LiveShadowCollector(
+                    provider_match_id=MATCH_ID,
+                    market_tickers=TICKERS,
+                    sportradar_transport=_SportradarTransport(_capture(base)),
+                    sportradar_ledger=_SportradarLedger(),
+                    kalshi_transport=_KalshiTransport(clock, []),
+                    market_projector=_Projector(lambda _: None),
+                    evidence_store=evidence,
+                    wall_ns=clock.wall_ns,
+                    monotonic_ns=clock.monotonic_ns,
+                    pause=clock.pause,
+                    stop_requested=lambda: False,
+                    render=rendered.append,
+                )
+
+                self.assertEqual(
+                    await collector.run(duration_seconds=61, poll_seconds=61),
+                    "duration_elapsed",
+                )
+
+            rendered_heartbeats = [
+                value
+                for value in rendered
+                if "kalshi_receive_timeout_heartbeat" in value
+            ]
+            self.assertEqual(len(rendered_heartbeats), 1)
+            heartbeat = rendered_heartbeats[0]
+            self.assertIn("ELAPSED", heartbeat)
+            self.assertIn("KALSHI STATUS", heartbeat)
+            self.assertIn("waiting", heartbeat)
+            self.assertIn("CAPTURES", heartbeat)
+            self.assertIn("Kalshi 0", heartbeat)
+            self.assertIn("NO SIGNALS", heartbeat)
+            self.assertIn("NO ORDERS", heartbeat)
+
+            ledger = next((base / "shadow").glob("session-*.jsonl"))
+            rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+            durable_heartbeats = [
+                row
+                for row in rows
+                if row.get("reason") == "kalshi_receive_timeout_heartbeat"
+            ]
+            self.assertEqual(len(durable_heartbeats), 1)
+            durable_heartbeat = durable_heartbeats[0]
+            provider_summary = next(
+                row
+                for row in rows
+                if row.get("reason") == "provider_summary_captured"
+            )
+            cadence_ns = (
+                durable_heartbeat["observed_monotonic_ns"]
+                - provider_summary["observed_monotonic_ns"]
+            )
+            self.assertGreaterEqual(cadence_ns, 59_000_000_000)
+            self.assertLessEqual(cadence_ns, 61_000_000_000)
+            terminal = rows[-1]
+            self.assertEqual(terminal["kind"], "terminal")
+            self.assertLess(rows.index(durable_heartbeat), rows.index(terminal))
+            self.assertLess(
+                durable_heartbeat["observed_monotonic_ns"],
+                terminal["ended_monotonic_ns"],
+            )
+
     async def test_shielded_cleanup_failure_has_no_orphaned_future(self) -> None:
         """Catches cancellation leaving a later cleanup exception unobserved."""
 
@@ -1741,7 +1879,10 @@ class DashboardTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("READ ONLY / UNQUALIFIED / NO ORDERS", rendered)
+        self.assertIn(
+            "READ ONLY / UNQUALIFIED / NO SIGNALS / NO ORDERS",
+            rendered,
+        )
         self.assertIn(TICKERS[0], rendered)
         self.assertIn(TICKERS[1], rendered)
         self.assertIn("Player Home vs Player Away", rendered)

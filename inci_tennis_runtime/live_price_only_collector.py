@@ -31,6 +31,7 @@ _TICKER_PATTERN = pattern_compile(
 )
 _TERMINAL_KALSHI_CODES = frozenset({"kalshi_stream_terminal"})
 _MAX_RECOVERY_ATTEMPTS = 3
+_HEARTBEAT_SECONDS = 60
 _MODE_LITERAL = (
     "READ ONLY / PRICE ONLY / NO SCORE FEED / NO SIGNALS / NO P&L / NO ORDERS"
 )
@@ -90,6 +91,7 @@ class PriceOnlyDashboardView:
     kalshi_age_seconds: float | None
     reason: str
     kalshi_frames: int
+    elapsed_seconds: float = 0.0
 
 
 def render_price_only_dashboard(view: PriceOnlyDashboardView) -> str:
@@ -112,6 +114,7 @@ def render_price_only_dashboard(view: PriceOnlyDashboardView) -> str:
     sequence = "--" if view.kalshi_sequence is None else str(view.kalshi_sequence)
     rows = (
         ("MODE", _MODE_LITERAL),
+        ("ELAPSED", f"{view.elapsed_seconds:.1f}s"),
         ("EVENT", view.event_ticker),
         ("PLAYER A", view.player_a_name),
         ("PLAYER B", view.player_b_name),
@@ -159,6 +162,8 @@ class PriceOnlyShadowCollector:
         "_kalshi_frames",
         "_recovery_attempts",
         "_terminal_reason",
+        "_run_started_monotonic_ns",
+        "_next_heartbeat_monotonic_ns",
     )
 
     def __init__(
@@ -253,6 +258,8 @@ class PriceOnlyShadowCollector:
         self._kalshi_frames = 0
         self._recovery_attempts = 0
         self._terminal_reason: str | None = None
+        self._run_started_monotonic_ns: int | None = None
+        self._next_heartbeat_monotonic_ns: int | None = None
 
     def _empty_books(self) -> dict[str, ShadowMarketCandidate]:
         return {
@@ -302,6 +309,12 @@ class PriceOnlyShadowCollector:
                 kalshi_age_seconds=None if age is None else age / 1_000_000_000,
                 reason=reason,
                 kalshi_frames=self._kalshi_frames,
+                elapsed_seconds=(
+                    0.0
+                    if self._run_started_monotonic_ns is None
+                    else (monotonic - self._run_started_monotonic_ns)
+                    / 1_000_000_000
+                ),
             )
         )
 
@@ -408,6 +421,7 @@ class PriceOnlyShadowCollector:
         except Exception as error:
             code = _error_code(error)
             if code == "kalshi_ws_receive_timeout":
+                await self._emit_timeout_heartbeat_if_due()
                 return
             if code in _TERMINAL_KALSHI_CODES:
                 raise ShadowCollectorError(code) from error
@@ -485,6 +499,19 @@ class PriceOnlyShadowCollector:
                 return
             self._projector.snapshot_requested(receipt)
 
+    async def _emit_timeout_heartbeat_if_due(self) -> None:
+        next_heartbeat = self._next_heartbeat_monotonic_ns
+        if next_heartbeat is None:
+            return
+        _, now = self._clock()
+        if now < next_heartbeat:
+            return
+        heartbeat_ns = _HEARTBEAT_SECONDS * 1_000_000_000
+        while next_heartbeat <= now:
+            next_heartbeat += heartbeat_ns
+        self._next_heartbeat_monotonic_ns = next_heartbeat
+        await self._append_observation("kalshi_receive_timeout_heartbeat")
+
     async def _finalize(
         self,
         *,
@@ -527,6 +554,10 @@ class PriceOnlyShadowCollector:
         ):
             _fail("shadow_duration_invalid")
         _, start = self._clock()
+        self._run_started_monotonic_ns = start
+        self._next_heartbeat_monotonic_ns = (
+            start + _HEARTBEAT_SECONDS * 1_000_000_000
+        )
         reason: str | None = None
         failure: str | None = None
         processing_error: Exception | None = None

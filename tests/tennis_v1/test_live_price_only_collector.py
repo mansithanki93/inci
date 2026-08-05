@@ -8,6 +8,7 @@ import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import tempfile
 import threading
 import unittest
 
@@ -436,6 +437,69 @@ class PriceOnlyCollectorPublicApiTests(unittest.TestCase):
 
 
 class PriceOnlyShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_receive_timeouts_publish_read_only_heartbeat(self) -> None:
+        """Catches a no-frame price-only run becoming visually silent."""
+
+        from inci_tennis_io.shadow_evidence import ShadowEvidenceStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            clock = _Clock()
+            rendered: list[str] = []
+            with ShadowEvidenceStore(base / "shadow") as evidence:
+                collector = _collector(
+                    clock=clock,
+                    transport=_Transport(clock, []),
+                    projector=_Projector(lambda _: _projection()),
+                    evidence=evidence,
+                    render=rendered.append,
+                )
+
+                self.assertEqual(
+                    await collector.run(duration_seconds=61),
+                    "duration_elapsed",
+                )
+
+            ledger = next((base / "shadow").glob("session-*.jsonl"))
+            rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+
+        rendered_heartbeats = [
+            value
+            for value in rendered
+            if "kalshi_receive_timeout_heartbeat" in value
+        ]
+        self.assertEqual(len(rendered_heartbeats), 1)
+        heartbeat = rendered_heartbeats[0]
+        self.assertIn("ELAPSED", heartbeat)
+        self.assertIn("KALSHI STATUS", heartbeat)
+        self.assertIn("waiting", heartbeat)
+        self.assertIn("FRAMES", heartbeat)
+        self.assertIn("0", heartbeat)
+        self.assertIn("NO SIGNALS / NO P&L / NO ORDERS", heartbeat)
+
+        durable_heartbeats = [
+            row
+            for row in rows
+            if row.get("reason") == "kalshi_receive_timeout_heartbeat"
+        ]
+        self.assertEqual(len(durable_heartbeats), 1)
+        durable_heartbeat = durable_heartbeats[0]
+        session = rows[0]
+        self.assertEqual(session["kind"], "price_only_session")
+        cadence_ns = (
+            durable_heartbeat["observed_monotonic_ns"]
+            - session["selected_monotonic_ns"]
+        )
+        self.assertGreaterEqual(cadence_ns, 60_000_000_000)
+        self.assertLessEqual(cadence_ns, 61_000_000_000)
+        terminal = rows[-1]
+        self.assertEqual(terminal["kind"], "price_only_terminal")
+        self.assertLess(rows.index(durable_heartbeat), rows.index(terminal))
+        self.assertLess(
+            durable_heartbeat["observed_monotonic_ns"],
+            terminal["ended_monotonic_ns"],
+        )
+
     async def test_session_and_raw_are_durable_before_downstream(self) -> None:
         """Catches socket or projection publication preceding durable evidence."""
 

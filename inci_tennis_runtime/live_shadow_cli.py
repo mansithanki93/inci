@@ -461,7 +461,7 @@ def _startup_banner(
         )
         mapping = "VERIFIED SOURCE LINK / UNQUALIFIED"
     elif mapping_mode == "operator_supplied":
-        mode = "READ ONLY / UNQUALIFIED / NO ORDERS"
+        mode = "READ ONLY / UNQUALIFIED / NO SIGNALS / NO ORDERS"
         mapping = "OPERATOR-SUPPLIED / UNVERIFIED"
     else:
         raise ShadowCollectorError("shadow_mapping_mode_invalid")

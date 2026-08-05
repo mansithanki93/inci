@@ -62,6 +62,7 @@ _OBSERVATION_REASONS = frozenset(
         "kalshi_parser_error",
         "kalshi_resnapshot_requested",
         "kalshi_reconnected",
+        "kalshi_receive_timeout_heartbeat",
     }
 )
 _KALSHI_STATUSES = frozenset(
@@ -114,6 +115,7 @@ _PRICE_ONLY_OBSERVATION_REASONS = frozenset(
         "kalshi_parser_error",
         "kalshi_resnapshot_requested",
         "kalshi_reconnected",
+        "kalshi_receive_timeout_heartbeat",
     }
 )
 _INITIAL_BOOK_STATES = frozenset({"empty", "one_sided", "two_sided"})
