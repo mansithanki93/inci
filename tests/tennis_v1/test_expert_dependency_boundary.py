@@ -93,7 +93,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "0971016a9f31ba114eb813b80e4e155d0f8bbdfed9786ce8d5319bf9a5a781e1"
         ),
         "expert_journal_store.py": (
-            "a6926017f3cdee98cdea540fd0a5862156d57d42d73b7194a7173e2616c77cff"
+            "b77c699406639f8aced4a4f96abe0d770cf4b2865b72a2e39bcbdcd7b462eaaf"
         ),
         "facade.py": (
             "e96663b80e747b40b71d6e95fce71cec1c1f4f1dfbb6b2a5b0fc701eaced2e22"
@@ -103,6 +103,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
         ),
         "clip_journal_store.py": (
             "76b43916fd7a8615082b8a52e153c98d64adbd2cdcddf1271f1ade273cb8659b"
+        ),
+        "espn_readonly.py": (
+            "281b3f01dc62a52eb6c040dd3654b5cef1c38ce3ae0077383f2da4d3d4ab8aad"
         ),
         "pinned_artifacts.py": (
             "c670521a595a42098d1d783868abbc36506d4579a9fa852d10ac1af93b762734"
@@ -119,6 +122,9 @@ EXPECTED_PACKAGE_AST_SHA256 = {
     },
     "inci_tennis_adapters": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
+        "espn_tennis.py": (
+            "8efeef3357a05eb6b06f26eded2f63ce0120ea9bd9cf5a7606e10eba686ff2b6"
+        ),
         "candidate_contracts.py": (
             "fbe6043a419dfcfeb55ef02d6b96b88fdadc07e4a42cf930c93853dded1f779d"
         ),
@@ -2843,6 +2849,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io/ports.py",
             "inci_tennis_io/historical_store.py",
             "inci_tennis_io/clip_journal_store.py",
+            "inci_tennis_io/espn_readonly.py",
             "inci_tennis_io/expert_journal_store.py",
             "inci_tennis_io/facade.py",
             "inci_tennis_io/provider_readonly.py",
@@ -2852,6 +2859,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
         expected_task7_adapters = (
             "inci_tennis_adapters/__init__.py",
             "inci_tennis_adapters/candidate_contracts.py",
+            "inci_tennis_adapters/espn_tennis.py",
             "inci_tennis_adapters/registry.py",
             "inci_tennis_adapters/sportradar_tennis_v3.py",
             "inci_tennis_adapters/sportradar_trial_v3.py",
@@ -2962,6 +2970,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "__init__.py",
                 "account_lock.py",
                 "clip_journal_store.py",
+                "espn_readonly.py",
                 "expert_journal_store.py",
                 "facade.py",
                 "historical_store.py",
@@ -2973,6 +2982,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_adapters": {
                 "__init__.py",
                 "candidate_contracts.py",
+                "espn_tennis.py",
                 "kalshi_candidate.py",
                 "registry.py",
                 "sportradar_tennis_v3.py",

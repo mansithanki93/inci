@@ -255,6 +255,7 @@ _IO_INVENTORY = (
     "inci_tennis_io/ports.py",
     "inci_tennis_io/historical_store.py",
     "inci_tennis_io/clip_journal_store.py",
+    "inci_tennis_io/espn_readonly.py",
     "inci_tennis_io/expert_journal_store.py",
     "inci_tennis_io/facade.py",
     "inci_tennis_io/provider_readonly.py",
@@ -286,6 +287,7 @@ _KALSHI_CANDIDATE_SCHEMA_INVENTORY = (
 _ADAPTER_INVENTORY = (
     "inci_tennis_adapters/__init__.py",
     "inci_tennis_adapters/candidate_contracts.py",
+    "inci_tennis_adapters/espn_tennis.py",
     "inci_tennis_adapters/registry.py",
     "inci_tennis_adapters/sportradar_tennis_v3.py",
     "inci_tennis_adapters/sportradar_trial_v3.py",

@@ -1,0 +1,520 @@
+{
+ "events": [
+  {
+   "date": "2026-08-01T04:00Z",
+   "endDate": "2026-08-14T03:59Z",
+   "groupings": [
+    {
+     "competitions": [
+      {
+       "competitors": [
+        {
+         "athlete": {
+          "displayName": "Vit Kopriva",
+          "fullName": "Vit Kopriva",
+          "shortName": "V. Kopriva"
+         },
+         "homeAway": "away",
+         "id": "3809",
+         "linescores": [
+          {
+           "value": 4.0,
+           "winner": false
+          },
+          {
+           "value": 1.0
+          }
+         ],
+         "order": 2,
+         "possession": false
+        },
+        {
+         "athlete": {
+          "displayName": "Jiri Lehecka",
+          "fullName": "Jiri Lehecka",
+          "shortName": "J. Lehecka"
+         },
+         "homeAway": "home",
+         "id": "3754",
+         "linescores": [
+          {
+           "value": 6.0,
+           "winner": true
+          },
+          {
+           "value": 0.0
+          }
+         ],
+         "order": 1,
+         "possession": true
+        }
+       ],
+       "date": "2026-08-04T22:10Z",
+       "id": "181776",
+       "round": {
+        "displayName": "Round 2",
+        "id": "2"
+       },
+       "startDate": "2026-08-04T22:10Z",
+       "status": {
+        "period": 2,
+        "type": {
+         "completed": false,
+         "description": "In Progress",
+         "detail": "2nd Set",
+         "id": "2",
+         "name": "STATUS_IN_PROGRESS",
+         "shortDetail": "2nd",
+         "state": "in"
+        }
+       },
+       "tournamentId": 421,
+       "type": {
+        "id": "1",
+        "slug": "mens-singles",
+        "text": "Men's Singles"
+       },
+       "venue": {
+        "court": "Court 5",
+        "fullName": "Toronto, Canada"
+       },
+       "wasSuspended": false
+      },
+      {
+       "competitors": [
+        {
+         "athlete": {
+          "displayName": "Nicolas Mejia",
+          "fullName": "Nicolas Mejia",
+          "shortName": "N. Mejia"
+         },
+         "homeAway": "away",
+         "id": "3371",
+         "linescores": [
+          {
+           "tiebreak": 7,
+           "value": 7.0,
+           "winner": true
+          },
+          {
+           "value": 3.0,
+           "winner": false
+          },
+          {
+           "value": 6.0,
+           "winner": true
+          }
+         ],
+         "order": 2,
+         "winner": true
+        },
+        {
+         "athlete": {
+          "displayName": "Marco Trungelliti",
+          "fullName": "Marco Trungelliti",
+          "shortName": "M. Trungelliti"
+         },
+         "homeAway": "home",
+         "id": "2278",
+         "linescores": [
+          {
+           "tiebreak": 5,
+           "value": 6.0,
+           "winner": false
+          },
+          {
+           "value": 6.0,
+           "winner": true
+          },
+          {
+           "value": 1.0,
+           "winner": false
+          }
+         ],
+         "order": 1,
+         "winner": false
+        }
+       ],
+       "date": "2026-08-01T14:40Z",
+       "id": "183332",
+       "round": {
+        "displayName": "Qualifying Final",
+        "id": "14"
+       },
+       "startDate": "2026-08-01T14:40Z",
+       "status": {
+        "period": 3,
+        "type": {
+         "completed": true,
+         "description": "Final",
+         "detail": "Final",
+         "id": "3",
+         "name": "STATUS_FINAL",
+         "shortDetail": "Final",
+         "state": "post"
+        }
+       },
+       "tournamentId": 421,
+       "type": {
+        "id": "1",
+        "slug": "mens-singles",
+        "text": "Men's Singles"
+       },
+       "venue": {
+        "court": "Court 9",
+        "fullName": "Toronto, Canada"
+       },
+       "wasSuspended": false
+      },
+      {
+       "competitors": [
+        {
+         "athlete": {
+          "displayName": "Thanasi Kokkinakis",
+          "fullName": "Thanasi Kokkinakis",
+          "shortName": "T. Kokkinakis"
+         },
+         "homeAway": "away",
+         "id": "2320",
+         "linescores": [
+          {
+           "value": 4.0,
+           "winner": false
+          },
+          {
+           "value": 3.0,
+           "winner": false
+          }
+         ],
+         "order": 2,
+         "winner": false
+        },
+        {
+         "athlete": {
+          "displayName": "Alexei Popyrin",
+          "fullName": "Alexei Popyrin",
+          "shortName": "A. Popyrin"
+         },
+         "homeAway": "home",
+         "id": "2862",
+         "linescores": [
+          {
+           "value": 6.0,
+           "winner": true
+          },
+          {
+           "value": 2.0,
+           "winner": false
+          }
+         ],
+         "order": 1,
+         "winner": true
+        }
+       ],
+       "date": "2026-08-01T16:05Z",
+       "id": "183336",
+       "round": {
+        "displayName": "Qualifying Final",
+        "id": "14"
+       },
+       "startDate": "2026-08-01T16:05Z",
+       "status": {
+        "period": 2,
+        "type": {
+         "completed": true,
+         "description": "Retired",
+         "detail": "Retired",
+         "id": "38",
+         "name": "STATUS_RETIRED",
+         "shortDetail": "Retired",
+         "state": "post"
+        }
+       },
+       "tournamentId": 421,
+       "type": {
+        "id": "1",
+        "slug": "mens-singles",
+        "text": "Men's Singles"
+       },
+       "venue": {
+        "court": "Center Court",
+        "fullName": "Toronto, Canada"
+       },
+       "wasSuspended": false
+      },
+      {
+       "competitors": [
+        {
+         "athlete": {
+          "displayName": "Alexander Blockx",
+          "fullName": "Alexander Blockx",
+          "shortName": "A. Blockx"
+         },
+         "homeAway": "away",
+         "id": "11757",
+         "order": 2,
+         "winner": true
+        },
+        {
+         "athlete": {
+          "displayName": "Jaume Munar",
+          "fullName": "Jaume Munar",
+          "shortName": "J. Munar"
+         },
+         "homeAway": "home",
+         "id": "2709",
+         "order": 1,
+         "winner": false
+        }
+       ],
+       "date": "2026-08-04T20:30Z",
+       "id": "181778",
+       "round": {
+        "displayName": "Round 2",
+        "id": "2"
+       },
+       "startDate": "2026-08-04T20:30Z",
+       "status": {
+        "period": 1,
+        "type": {
+         "completed": true,
+         "description": "Walkover",
+         "detail": "Walkover",
+         "id": "40",
+         "name": "STATUS_WALKOVER",
+         "shortDetail": "Walkover",
+         "state": "post"
+        }
+       },
+       "tournamentId": 421,
+       "type": {
+        "id": "1",
+        "slug": "mens-singles",
+        "text": "Men's Singles"
+       },
+       "venue": {
+        "court": "",
+        "fullName": "Toronto, Canada"
+       },
+       "wasSuspended": false
+      },
+      {
+       "competitors": [
+        {
+         "athlete": {
+          "displayName": "Alex de Minaur",
+          "fullName": "Alex de Minaur",
+          "shortName": "A. de Minaur"
+         },
+         "homeAway": "away",
+         "id": "2651",
+         "order": 2
+        },
+        {
+         "athlete": {
+          "displayName": "James Duckworth",
+          "fullName": "James Duckworth",
+          "shortName": "J. Duckworth"
+         },
+         "homeAway": "home",
+         "id": "1857",
+         "order": 1
+        }
+       ],
+       "date": "2026-08-04T23:15Z",
+       "id": "181737",
+       "round": {
+        "displayName": "Round 2",
+        "id": "2"
+       },
+       "startDate": "2026-08-04T23:15Z",
+       "status": {
+        "period": 1,
+        "type": {
+         "completed": false,
+         "description": "Scheduled",
+         "detail": "Tue, August 4th at 7:15 PM EDT",
+         "id": "1",
+         "name": "STATUS_SCHEDULED",
+         "shortDetail": "8/4 - 7:15 PM EDT",
+         "state": "pre"
+        }
+       },
+       "tournamentId": 421,
+       "type": {
+        "id": "1",
+        "slug": "mens-singles",
+        "text": "Men's Singles"
+       },
+       "venue": {
+        "court": "Rogers Court",
+        "fullName": "Toronto, Canada"
+       },
+       "wasSuspended": false
+      }
+     ],
+     "grouping": {
+      "displayName": "mens-singles",
+      "id": "1",
+      "slug": "mens-singles"
+     }
+    },
+    {
+     "competitions": [
+      {
+       "competitors": [
+        {
+         "athlete": {
+          "displayName": "Katerina Siniakova",
+          "fullName": "Katerina Siniakova",
+          "shortName": "K. Siniakova"
+         },
+         "homeAway": "away",
+         "id": "2248",
+         "linescores": [
+          {
+           "tiebreak": 7,
+           "value": 7.0
+          }
+         ],
+         "order": 2
+        },
+        {
+         "athlete": {
+          "displayName": "Kamilla Rakhimova",
+          "fullName": "Kamilla Rakhimova",
+          "shortName": "K. Rakhimova"
+         },
+         "homeAway": "home",
+         "id": "3908",
+         "linescores": [
+          {
+           "tiebreak": 1,
+           "value": 6.0
+          }
+         ],
+         "order": 1
+        }
+       ],
+       "date": "2026-08-04T21:55Z",
+       "id": "182168",
+       "round": {
+        "displayName": "Round 2",
+        "id": "2"
+       },
+       "startDate": "2026-08-04T21:55Z",
+       "status": {
+        "period": 1,
+        "type": {
+         "completed": false,
+         "description": "In Progress",
+         "detail": "1st Set",
+         "id": "2",
+         "name": "STATUS_IN_PROGRESS",
+         "shortDetail": "1st",
+         "state": "in"
+        }
+       },
+       "tournamentId": 421,
+       "type": {
+        "id": "2",
+        "slug": "womens-singles",
+        "text": "Women's Singles"
+       },
+       "venue": {
+        "court": "Court 1",
+        "fullName": "Toronto, Canada"
+       },
+       "wasSuspended": false
+      }
+     ],
+     "grouping": {
+      "displayName": "womens-singles",
+      "id": "1",
+      "slug": "womens-singles"
+     }
+    },
+    {
+     "competitions": [
+      {
+       "competitors": [
+        {
+         "homeAway": "away",
+         "id": "1344-1919",
+         "order": 2,
+         "roster": {
+          "displayName": "Yuki Bhambri / Michael Venus"
+         }
+        },
+        {
+         "homeAway": "home",
+         "id": "2293-2699",
+         "order": 1,
+         "roster": {
+          "displayName": "Christian Harrison / Neal Skupski"
+         }
+        }
+       ],
+       "date": "2026-08-05T04:00Z",
+       "id": "181846",
+       "round": {
+        "displayName": "Round 1",
+        "id": "1"
+       },
+       "startDate": "2026-08-05T04:00Z",
+       "status": {
+        "period": 1,
+        "type": {
+         "completed": false,
+         "description": "Scheduled",
+         "detail": "M/d - 'TBD'",
+         "id": "1",
+         "name": "STATUS_SCHEDULED",
+         "shortDetail": "TBD",
+         "state": "pre"
+        }
+       },
+       "tournamentId": 421,
+       "type": {
+        "id": "3",
+        "slug": "mens-doubles",
+        "text": "Men's Doubles"
+       },
+       "venue": {
+        "court": "",
+        "fullName": "Toronto, Canada"
+       },
+       "wasSuspended": false
+      }
+     ],
+     "grouping": {
+      "displayName": "mens-doubles",
+      "id": "1",
+      "slug": "mens-doubles"
+     }
+    }
+   ],
+   "id": "421-2026",
+   "major": false,
+   "name": "National Bank Open presented by Rogers",
+   "status": {
+    "period": 3,
+    "type": {
+     "completed": true,
+     "description": "Final",
+     "detail": "Final",
+     "id": "3",
+     "name": "STATUS_FINAL",
+     "shortDetail": "Final",
+     "state": "post"
+    }
+   }
+  }
+ ],
+ "leagues": [
+  {
+   "id": "851",
+   "name": "ATP"
+  }
+ ]
+}
