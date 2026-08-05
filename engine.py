@@ -84,17 +84,37 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
     check_loss_limit(ctx)
     if ctx.safety.tripped:
         return
-    if ctx.cfg.paper_trading and ctx.executor.has_pending(ticker):
+    # A pending resting BUY (awaiting entry) blocks further action on this
+    # ticker. A working resting SELL does NOT block the exit re-check, so a
+    # stop-loss can still preempt an unfilled take-profit.
+    if ctx.cfg.paper_trading and ctx.executor.has_pending(ticker, side="BUY"):
         return
 
     exit_sig = ctx.strategy.check_exit(ticker, bid, now=now)
     if exit_sig:
-        print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
         pos = ctx.strategy.positions[ticker]
         if ctx.cfg.paper_trading:
-            ctx.executor.submit_paper(
-                ticker, "SELL", pos.contracts, exit_sig["reason"], now=now)
+            is_stop = "stop-loss" in exit_sig["reason"]
+            working_sell = ctx.executor.has_pending(ticker, side="SELL")
+            if is_stop:
+                # Stop-loss crosses immediately; replace any working maker
+                # exit so risk is not left resting.
+                print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
+                if working_sell:
+                    ctx.executor.cancel_pending_paper(
+                        ticker=ticker, side="SELL")
+                ctx.executor.submit_paper(
+                    ticker, "SELL", pos.contracts, exit_sig["reason"],
+                    now=now, resting=False)
+            elif not working_sell:
+                # Rest a maker exit at the offer; it works until it fills or a
+                # stop-loss preempts it.
+                print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
+                ctx.executor.submit_paper(
+                    ticker, "SELL", pos.contracts, exit_sig["reason"],
+                    now=now, resting=True)
             return
+        print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
         result = ctx.executor.execute(ticker, "SELL", pos.contracts,
                                       expected_pre_position=pos.contracts)
         sync_execution_observation(ctx, ticker)
@@ -110,6 +130,10 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
                               exit_sig["reason"], fee=result[2],
                               ts=now)
         check_loss_limit(ctx)
+        return
+
+    # Holding a position with a working resting exit: nothing to enter here.
+    if ctx.cfg.paper_trading and ctx.executor.has_pending(ticker, side="SELL"):
         return
 
     hist = list(ctx.feed.history[ticker])[:-1]

@@ -1,7 +1,19 @@
 """Order execution.
 
 Paper: nonblocking pending orders fill only from a same-ticker observation at
-or after their due time, at ask/bid + slippage and bounded book depth.
+or after their due time, bounded by book depth. Orders are one of two kinds:
+
+* RESTING (maker) — entries and non-stop exits. The order rests at the near
+  touch captured when it was submitted (BUY at the bid, SELL at the ask) and
+  fills at that limit ONLY when a later quote trades through it (a BUY fills
+  when the ask trades down to the resting bid; a SELL fills when the bid
+  trades up to the resting ask). It pays no adverse slippage, but it also may
+  never fill — modelling real maker fill uncertainty / adverse selection.
+* MARKETABLE (taker) — stop-loss exits. The order crosses the spread on the
+  first due quote at bid/ask -/+ slippage, so risk is exited immediately.
+
+This keeps the conservative "never fabricate a fill" contract: a resting order
+that is not crossed simply stays working until it fills or is canceled.
 
 Live/demo (disabled both at bot and executor levels): official Create V2 body
 (side=bid|ask, separate price, fp string count, time_in_force,
@@ -38,6 +50,9 @@ class PendingPaperOrder:
     contracts: Decimal
     due_at: float
     reason: str
+    resting: bool = True
+    # Maker limit (cents) captured at submit; None marks a marketable order.
+    limit_price: object = None
 
 
 class Executor:
@@ -76,44 +91,84 @@ class Executor:
         return REAL_ORDER_EXECUTION_ENABLED
 
     # ---------- Paper ----------
-    def _paper_fill(self, ticker, side, contracts):
+    def _paper_fill(self, order):
+        """Attempt one aggregate fill for a due order; None if it cannot fill.
+
+        Resting (maker) orders fill at their captured limit only when the
+        market trades through it. Marketable (taker) orders cross the spread
+        immediately with adverse slippage.
+        """
+        ticker, side = order.ticker, order.side
         bid, bid_qty, ask, ask_qty = self.feed.top_of_book(ticker)
-        if side == "BUY":
-            if ask is None:
+        if order.resting:
+            limit = order.limit_price
+            if limit is None:
                 return None
-            price = min(Decimal(99), ask + self.cfg.sim_slippage_cents)
-            avail = ask_qty if ask_qty is not None else Decimal(0)
+            if side == "BUY":
+                # A resting bid fills only once the ask trades down to it.
+                if ask is None or ask > limit:
+                    return None
+                price, avail = limit, ask_qty
+            else:
+                # A resting offer fills only once the bid trades up to it.
+                if bid is None or bid < limit:
+                    return None
+                price, avail = limit, bid_qty
+            kind = "resting"
         else:
-            if bid is None:
-                return None
-            price = max(Decimal(0), bid - self.cfg.sim_slippage_cents)
-            avail = bid_qty if bid_qty is not None else Decimal(0)
-        filled = min(Decimal(str(contracts)), Decimal(str(avail)))
+            # Marketable: cross the spread with adverse slippage.
+            if side == "BUY":
+                if ask is None:
+                    return None
+                price = min(Decimal(99), ask + self.cfg.sim_slippage_cents)
+                avail = ask_qty
+            else:
+                if bid is None:
+                    return None
+                price = max(Decimal(0), bid - self.cfg.sim_slippage_cents)
+                avail = bid_qty
+            kind = "market"
+        avail = avail if avail is not None else Decimal(0)
+        filled = min(Decimal(str(order.contracts)), Decimal(str(avail)))
         if filled <= 0:
             return None
         fee = fee_usd(
             price, filled, side=side,
             balance_precision_usd=self.cfg.balance_precision_usd)
-        tag = "" if filled == contracts else f" (PARTIAL {filled}/{contracts})"
-        print(f"[PAPER] {side} {filled}x {ticker} @ {price}c fee {fee:.2f}{tag}")
+        tag = ("" if filled == order.contracts
+               else f" (PARTIAL {filled}/{order.contracts})")
+        print(f"[PAPER] {side} {filled}x {ticker} @ {price}c "
+              f"({kind}) fee {fee:.2f}{tag}")
         return price, filled, fee
 
-    def submit_paper(self, ticker, side, contracts, reason="", now=None):
+    def submit_paper(self, ticker, side, contracts, reason="", now=None,
+                     resting=None, limit_price=None):
         if not self.cfg.paper_trading:
             raise HaltError("submit_paper called outside paper mode")
         if self.has_pending(ticker):
             return None
+        if resting is None:
+            # BUY always rests; a SELL rests unless it is a stop-loss, which
+            # must cross immediately to exit risk.
+            resting = side == "BUY" or "stop-loss" not in reason
+        if resting and limit_price is None:
+            # Peg the maker limit at the near touch observed right now.
+            bid, _, ask, _ = self.feed.top_of_book(ticker)
+            limit_price = bid if side == "BUY" else ask
         submitted_at = self.clock() if now is None else now
         order = PendingPaperOrder(
             ticker=ticker, side=side,
             contracts=Decimal(str(contracts)),
             due_at=submitted_at + self.cfg.sim_latency_s,
-            reason=reason)
+            reason=reason, resting=bool(resting),
+            limit_price=(None if limit_price is None
+                         else Decimal(str(limit_price))))
         self.pending_paper.append(order)
         return order
 
-    def has_pending(self, ticker=None):
-        return any(ticker is None or o.ticker == ticker
+    def has_pending(self, ticker=None, side=None):
+        return any((ticker is None or o.ticker == ticker)
+                   and (side is None or o.side == side)
                    for o in self.pending_paper)
 
     def pending_count(self, side=None):
@@ -122,17 +177,33 @@ class Executor:
 
     def process_due_paper_orders(self, now=None, ticker=None):
         now = self.clock() if now is None else now
-        due = [o for o in self.pending_paper
-               if o.due_at <= now and (ticker is None or o.ticker == ticker)]
-        self.pending_paper = [o for o in self.pending_paper
-                              if o not in due]
-        return [(order, self._paper_fill(order.ticker, order.side,
-                                         order.contracts))
-                for order in due]
+        results = []
+        remaining = []
+        for order in self.pending_paper:
+            if not (order.due_at <= now
+                    and (ticker is None or order.ticker == ticker)):
+                remaining.append(order)
+                continue
+            fill = self._paper_fill(order)
+            if fill is not None:
+                results.append((order, fill))
+            elif order.resting:
+                # A resting maker order keeps working until it is crossed or
+                # canceled; it is never dropped or fabricated into a fill.
+                remaining.append(order)
+            else:
+                # A marketable order that cannot fill this quote is consumed;
+                # the engine re-evaluates and may resubmit on the next quote.
+                results.append((order, None))
+        self.pending_paper = remaining
+        return results
 
-    def cancel_pending_paper(self):
-        canceled = list(self.pending_paper)
-        self.pending_paper.clear()
+    def cancel_pending_paper(self, ticker=None, side=None):
+        canceled = [o for o in self.pending_paper
+                    if (ticker is None or o.ticker == ticker)
+                    and (side is None or o.side == side)]
+        remaining = [o for o in self.pending_paper if o not in canceled]
+        self.pending_paper = remaining
         return canceled
 
     # ---------- Live / demo (disabled at bot level in this build) ----------
