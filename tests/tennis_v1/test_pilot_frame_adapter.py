@@ -259,6 +259,61 @@ class PilotFrameAdapterTests(unittest.TestCase):
             values["frame"].l2_observation.raw_parent.durable_record_sequence,
         )
 
+    def test_duplicate_point_becomes_duplicate_point_abstention(self) -> None:
+        values = _valid_args()
+        api = consensus_fixture._research_api()
+        prior = replace(values["prior_state"], last_received_monotonic_ns=100)
+        values["prior_state"] = prior
+        duplicate_transition = consensus_fixture._transition(
+            api, accepted_state=prior
+        )
+        values["frame"] = ConsensusL2ResearchFrameV1(
+            duplicate_transition,
+            consensus_fixture._book_observation(api, captured_monotonic_ns=130),
+        )
+        projected = project_pilot_decision_frame(**values)
+        self.assertEqual(
+            projected.abstention.reason,
+            PilotSupportReason.DUPLICATE_POINT,
+        )
+
+    def test_correction_epoch_becomes_score_corrected_abstention(self) -> None:
+        values = _valid_args()
+        api = consensus_fixture._research_api()
+        after = values["frame"].consensus_transition.accepted_state
+        corrected = replace(after, correction_epoch=after.correction_epoch + 1)
+        transition = consensus_fixture._transition(api, accepted_state=corrected)
+        values["frame"] = ConsensusL2ResearchFrameV1(
+            transition,
+            consensus_fixture._book_observation(api, captured_monotonic_ns=130),
+        )
+        projected = project_pilot_decision_frame(**values)
+        self.assertEqual(
+            projected.abstention.reason,
+            PilotSupportReason.SCORE_CORRECTED,
+        )
+
+    def test_invalid_parent_becomes_digest_bound_book_untrusted_abstention(self) -> None:
+        for request_field in ("frame", "binding", "metadata", "execution_scenario"):
+            with self.subTest(request_field=request_field):
+                values = _valid_args()
+                values[request_field] = object()
+                projected = project_pilot_decision_frame(**values)
+                self.assertIsNone(projected.decision_frame)
+                self.assertEqual(
+                    projected.abstention.reason,
+                    PilotSupportReason.BOOK_UNTRUSTED,
+                )
+                self.assertNotIn("source_frame_id", projected.abstention.__dataclass_fields__)
+
+    def test_missing_parent_request_is_also_persisted(self) -> None:
+        projected = project_pilot_decision_frame()
+        self.assertIsNone(projected.decision_frame)
+        self.assertEqual(
+            projected.abstention.reason,
+            PilotSupportReason.BOOK_UNTRUSTED,
+        )
+
     def test_decision_frame_persists_direct_parent_evidence(self) -> None:
         actual = build_pilot_decision_frame(**_valid_args())
         args = _valid_args()

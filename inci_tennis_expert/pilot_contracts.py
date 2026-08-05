@@ -36,6 +36,7 @@ __all__ = (
     "PilotExecutionScenario",
     "PilotDecisionFrame",
     "PilotFrameAbstention",
+    "PilotInvalidFrameAbstention",
     "PilotFrameProjection",
     "PilotPolicyEstimate",
     "PilotImmediateBaselineEstimate",
@@ -739,9 +740,30 @@ class PilotFrameAbstention:
 
 
 @dataclass(frozen=True, slots=True)
+class PilotInvalidFrameAbstention:
+    """Digest-bound rejection when no trustworthy parent can be projected."""
+
+    reason: PilotSupportReason
+    frame_type: str
+    binding_type: str
+    metadata_type: str
+    execution_scenario_type: str
+    invalid_request_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.reason is not PilotSupportReason.BOOK_UNTRUSTED:
+            _fail("reason")
+        for value, name in ((self.frame_type, "frame_type"), (self.binding_type, "binding_type"), (self.metadata_type, "metadata_type"), (self.execution_scenario_type, "execution_scenario_type")):
+            _id(value, name)
+        projection = {name: getattr(self, name) for name in self.__dataclass_fields__ if name != "invalid_request_sha256"}
+        if self.invalid_request_sha256 != pilot_contract_sha256(projection):
+            _fail("invalid_request_sha256")
+
+
+@dataclass(frozen=True, slots=True)
 class PilotFrameProjection:
     decision_frame: PilotDecisionFrame | None
-    abstention: PilotFrameAbstention | None
+    abstention: PilotFrameAbstention | PilotInvalidFrameAbstention | None
     projection_sha256: str
 
     def __post_init__(self) -> None:
@@ -749,7 +771,7 @@ class PilotFrameProjection:
             _fail("frame_projection")
         if self.decision_frame is not None and type(self.decision_frame) is not PilotDecisionFrame:
             _fail("frame_projection")
-        if self.abstention is not None and type(self.abstention) is not PilotFrameAbstention:
+        if self.abstention is not None and type(self.abstention) not in (PilotFrameAbstention, PilotInvalidFrameAbstention):
             _fail("frame_projection")
         projection = {"decision_frame": self.decision_frame, "abstention": self.abstention}
         if self.projection_sha256 != pilot_contract_sha256(projection):

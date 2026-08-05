@@ -20,6 +20,8 @@ from inci_tennis_expert.pilot_contracts import (
     PilotContractError,
     PilotDecisionFrame,
     PilotFrameAbstention,
+    PilotInvalidFrameAbstention,
+    PilotSupportReason,
     PilotFrameProjection,
     PilotExecutionScenario,
     PilotPointEvent,
@@ -192,12 +194,15 @@ def build_pilot_decision_frame(
     )
     transition = frame.consensus_transition
     observation = frame.l2_observation
+    if transition.consensus_epoch != expected_consensus_epoch:
+        _fail("consensus_epoch")
     if (
-        transition.consensus_epoch != expected_consensus_epoch
-        or transition.correction_epoch != prior_state.correction_epoch
+        transition.correction_epoch != prior_state.correction_epoch
         or transition.correction_epoch != transition.accepted_state.correction_epoch
     ):
-        _fail("consensus_epoch")
+        _fail("score_corrected")
+    if transition.accepted_state == prior_state:
+        _fail("duplicate_point")
     pair_delay = observation.captured_monotonic_ns - transition.consensus_accepted_monotonic_ns
     if pair_delay < 0 or pair_delay > execution_scenario.maximum_pair_latency_ns:
         _fail("pair_stale")
@@ -256,11 +261,13 @@ def build_pilot_decision_frame(
     )
 
 
-def _abstention_reason(code: str) -> object:
-    from inci_tennis_expert.pilot_contracts import PilotSupportReason
-
+def _abstention_reason(code: str) -> PilotSupportReason:
     if code in {"consensus_epoch"}:
         return PilotSupportReason.CONSENSUS_EPOCH_CHANGED
+    if code in {"score_corrected"}:
+        return PilotSupportReason.SCORE_CORRECTED
+    if code in {"duplicate_point"}:
+        return PilotSupportReason.DUPLICATE_POINT
     if code in {"pair_stale", "market_orientation", "binding_mismatch"}:
         return PilotSupportReason.BOOK_UNTRUSTED
     return PilotSupportReason.INVALID_POINT_TRANSITION
@@ -269,12 +276,12 @@ def _abstention_reason(code: str) -> object:
 def project_pilot_decision_frame(**kwargs: object) -> PilotFrameProjection:
     """Return a persistable result; causal rejection never reaches a model."""
     try:
-        frame = kwargs["frame"]
-        binding = kwargs["binding"]
-        metadata = kwargs["metadata"]
-        scenario = kwargs["execution_scenario"]
+        frame = kwargs.get("frame")
+        binding = kwargs.get("binding")
+        metadata = kwargs.get("metadata")
+        scenario = kwargs.get("execution_scenario")
         if type(frame) is not ConsensusL2ResearchFrameV1 or type(binding) is not MatchBinding or type(metadata) is not BindingMetadata or type(scenario) is not PilotExecutionScenario:
-            _fail("frame_parent")
+            return _invalid_parent_projection(frame, binding, metadata, scenario)
         decision = build_pilot_decision_frame(**kwargs)  # type: ignore[arg-type]
         return PilotFrameProjection(decision, None, pilot_contract_sha256({"decision_frame": decision, "abstention": None}))
     except (PilotFrameAdapterError, PilotContractError) as error:
@@ -283,7 +290,7 @@ def project_pilot_decision_frame(**kwargs: object) -> PilotFrameProjection:
         metadata = kwargs.get("metadata")
         scenario = kwargs.get("execution_scenario")
         if type(frame) is not ConsensusL2ResearchFrameV1 or type(binding) is not MatchBinding or type(metadata) is not BindingMetadata or type(scenario) is not PilotExecutionScenario:
-            raise
+            return _invalid_parent_projection(frame, binding, metadata, scenario)
         transition = frame.consensus_transition
         observation = frame.l2_observation
         values: dict[str, object] = {
@@ -303,6 +310,30 @@ def project_pilot_decision_frame(**kwargs: object) -> PilotFrameProjection:
         }
         abstention = PilotFrameAbstention(abstention_sha256=pilot_contract_sha256(values), **values)  # type: ignore[arg-type]
         return PilotFrameProjection(None, abstention, pilot_contract_sha256({"decision_frame": None, "abstention": abstention}))
+
+
+def _invalid_parent_projection(
+    frame: object,
+    binding: object,
+    metadata: object,
+    scenario: object,
+) -> PilotFrameProjection:
+    """Persist only request type context; do not invent missing parent facts."""
+    values = {
+        "reason": PilotSupportReason.BOOK_UNTRUSTED,
+        "frame_type": type(frame).__name__,
+        "binding_type": type(binding).__name__,
+        "metadata_type": type(metadata).__name__,
+        "execution_scenario_type": type(scenario).__name__,
+    }
+    abstention = PilotInvalidFrameAbstention(
+        invalid_request_sha256=pilot_contract_sha256(values), **values
+    )
+    return PilotFrameProjection(
+        None,
+        abstention,
+        pilot_contract_sha256({"decision_frame": None, "abstention": abstention}),
+    )
 
 
 def _winner_for_exact_successor(
