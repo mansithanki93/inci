@@ -1,5 +1,31 @@
 # Inci Tennis v1 Event Core
 
+## Offline two-model pilot
+
+> **PLUMBING_ONLY / NO EDGE EVIDENCE / NO ORDERS**
+
+The Model 1 static exact baseline and Model 2 per-point Bayesian pilot run only
+against local canonical artifacts and replay records. The comparison is a
+deterministic research plumbing check; it makes no profitability claim and has
+no live transport or order authority.
+
+Write a clearly synthetic local example (the target directory must not exist):
+
+```bash
+python -m inci_tennis_runtime.two_model_pilot_cli \
+  --write-example /absolute/path/two-model-synthetic
+```
+
+Run the offline comparison (the output must not exist):
+
+```bash
+python -m inci_tennis_runtime.two_model_pilot_cli \
+  --replay /absolute/path/two-model-synthetic/events.jsonl \
+  --static-artifact /absolute/path/two-model-synthetic/static.json \
+  --dynamic-artifact /absolute/path/two-model-synthetic/dynamic.json \
+  --output /absolute/path/comparison.jsonl
+```
+
 ## Tennis v1 Phase 1 Research-Only Boundary
 
 Tennis v1 Phase 1 is a research-only event core. It captures validated input,
