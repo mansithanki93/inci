@@ -256,6 +256,7 @@ _IO_INVENTORY = (
     "inci_tennis_io/historical_store.py",
     "inci_tennis_io/clip_journal_store.py",
     "inci_tennis_io/espn_readonly.py",
+    "inci_tennis_io/kalshi_readonly.py",
     "inci_tennis_io/expert_journal_store.py",
     "inci_tennis_io/facade.py",
     "inci_tennis_io/provider_readonly.py",

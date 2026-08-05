@@ -93,7 +93,10 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "0971016a9f31ba114eb813b80e4e155d0f8bbdfed9786ce8d5319bf9a5a781e1"
         ),
         "expert_journal_store.py": (
-            "b77c699406639f8aced4a4f96abe0d770cf4b2865b72a2e39bcbdcd7b462eaaf"
+            "3c1fc8749f2876faa3f94f127c774f58839cf9f3fa92a5ac04ab7e5a59c7d9c2"
+        ),
+        "kalshi_readonly.py": (
+            "a9328e4bd575f2c2958db7862144edcf45e9ce1cf7eb633d6ebc90ff7c19615a"
         ),
         "facade.py": (
             "e96663b80e747b40b71d6e95fce71cec1c1f4f1dfbb6b2a5b0fc701eaced2e22"
@@ -297,7 +300,7 @@ ROOT_V6_PYTHON_PATHS = (
 )
 
 EXPECTED_REQUIREMENTS_SHA256 = (
-    "e43aac65de78bba78e9ca0e007f4ff1ba0598bfaba094dbf05005628464fb636"
+    "2dc4436a562bc87c026831120766c5772f064683f09c5da24863389b8e4db5e3"
 )
 
 EXPERT_PHASE_ONE_IMPORTS = frozenset(
@@ -2850,6 +2853,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io/historical_store.py",
             "inci_tennis_io/clip_journal_store.py",
             "inci_tennis_io/espn_readonly.py",
+            "inci_tennis_io/kalshi_readonly.py",
             "inci_tennis_io/expert_journal_store.py",
             "inci_tennis_io/facade.py",
             "inci_tennis_io/provider_readonly.py",
@@ -2974,6 +2978,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "expert_journal_store.py",
                 "facade.py",
                 "historical_store.py",
+                "kalshi_readonly.py",
                 "pinned_artifacts.py",
                 "ports.py",
                 "provider_readonly.py",

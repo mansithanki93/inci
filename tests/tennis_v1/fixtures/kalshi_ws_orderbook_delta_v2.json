@@ -1,0 +1,13 @@
+{
+ "msg": {
+  "delta_fp": "-1.00",
+  "market_id": "9b0f6b43-5b68-4f9f-9f02-9a2d1b8ac1a1",
+  "market_ticker": "KXATPMATCH-26AUG04-HOME",
+  "price_dollars": "0.4500",
+  "side": "no",
+  "ts_ms": 1785889587000
+ },
+ "seq": 3,
+ "sid": 2,
+ "type": "orderbook_delta"
+}

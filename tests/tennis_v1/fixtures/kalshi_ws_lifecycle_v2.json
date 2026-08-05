@@ -1,0 +1,9 @@
+{
+ "msg": {
+  "event_type": "deactivated",
+  "market_id": "9b0f6b43-5b68-4f9f-9f02-9a2d1b8ac1a1",
+  "market_ticker": "KXATPMATCH-26AUG04-HOME"
+ },
+ "sid": 3,
+ "type": "market_lifecycle_v2"
+}
