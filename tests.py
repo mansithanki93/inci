@@ -4723,6 +4723,168 @@ def test_replay_enforces_logged_market_lifecycle():
     print("PASS replay blocks close horizon but permits paper early-close data")
 
 
+def test_entry_diagnostics_and_custom_evaluator_preserve_public_decision():
+    """Only check_entry may govern custom-strategy BUY decisions."""
+    from collections import defaultdict
+
+    cfg = Config()
+    strategy = ScalpStrategy(cfg)
+    history = [(1.0, Decimal(60))]
+    args = ("T", history, 2.0, Decimal(59), Decimal(58), Decimal(60))
+
+    decision, rejection = strategy.evaluate_entry(*args)
+
+    assert decision is None
+    assert rejection == "dip_below_threshold"
+    assert strategy.check_entry(*args) == decision
+    signal_args = ("T", [(1.0, Decimal(60))], 2.0,
+                   Decimal(52), Decimal(51), Decimal(53))
+    signal, rejection = strategy.evaluate_entry(*signal_args)
+    assert rejection is None and signal["action"] == "BUY"
+    assert strategy.check_entry(*signal_args) == signal
+
+    class Feed:
+        def __init__(self, current_mid):
+            self.history = defaultdict(list)
+            self.history["T"] = [
+                (1.0, Decimal(60)), (2.0, current_mid)]
+
+        def top_of_book(self, ticker):
+            return self.book
+
+    class CustomStrategy(ScalpStrategy):
+        def __init__(self, config, incidental_result):
+            super().__init__(config)
+            self.incidental_result = incidental_result
+
+        def evaluate_entry(self, *args):
+            return self.incidental_result
+
+    class PrivateHelperCollisionStrategy(ScalpStrategy):
+        def __init__(self, config, incidental_result):
+            super().__init__(config)
+            self.incidental_result = incidental_result
+
+        def _evaluate_entry(self, *args):
+            return self.incidental_result
+
+    cases = (
+        (CustomStrategy, Decimal(59), Decimal(58), Decimal(60),
+         {"action": "BUY", "reason": "incidental"}, 0),
+        (CustomStrategy, Decimal(52), Decimal(51), Decimal(53), None, 1),
+        (PrivateHelperCollisionStrategy,
+         Decimal(59), Decimal(58), Decimal(60),
+         ({"action": "BUY", "reason": "incidental private helper"}, None),
+         0),
+        (PrivateHelperCollisionStrategy,
+         Decimal(52), Decimal(51), Decimal(53), None, 1),
+    )
+    for strategy_type, mid, bid, ask, incidental_result, expected_pending \
+            in cases:
+        feed = Feed(mid)
+        feed.book = (bid, Decimal(20), ask, Decimal(20))
+        custom = strategy_type(cfg, incidental_result)
+        executor = Executor(cfg, None, feed)
+        ctx = Context(cfg, feed, custom, executor, None, Safety(cfg),
+                      clock=lambda: 2.0)
+
+        process_tick(ctx, "T", mid, bid, ask, observed_at=2.0)
+
+        assert len(executor.pending_paper) == expected_pending
+        assert not ctx.safety.tripped
+    print("PASS diagnostics/custom evaluator preserve check_entry decisions")
+
+
+def test_engine_counts_silent_entry_rejections():
+    from collections import defaultdict
+
+    class Feed:
+        def __init__(self):
+            self.history = defaultdict(list)
+            self.history["T"] = [(1.0, Decimal(60)), (2.0, Decimal(59))]
+
+        def top_of_book(self, ticker):
+            return Decimal(58), Decimal(10), Decimal(60), Decimal(10)
+
+    class PendingPaperExecutor:
+        def process_due_paper_orders(self, now, ticker=None):
+            return []
+
+        def has_pending(self, ticker):
+            return True
+
+    cfg = Config()
+    ctx = Context(cfg, Feed(), ScalpStrategy(cfg), PendingPaperExecutor(),
+                  None, Safety(cfg), clock=lambda: 2.0)
+    process_tick(ctx, "T", Decimal(59), Decimal(58), Decimal(60),
+                 observed_at=2.0)
+
+    assert ctx.rejection_counts == {"pending_paper_order": 1}
+
+    non_pending = Context(
+        cfg, ctx.feed, ScalpStrategy(cfg),
+        type("NoPending", (), {
+            "process_due_paper_orders": lambda self, now, ticker=None: [],
+            "has_pending": lambda self, ticker: False,
+            "pending_count": lambda self, side: 0,
+        })(), None, Safety(cfg), clock=lambda: 2.0)
+    process_tick(non_pending, "T", Decimal(59), Decimal(58), Decimal(60),
+                 observed_at=2.0)
+    assert non_pending.rejection_counts == {"dip_below_threshold": 1}
+    print("PASS engine counts silent entry rejections")
+
+
+def test_run_loop_heartbeat_reports_sorted_nonzero_rejections():
+    from collections import defaultdict
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from bot import run_loop
+
+    class Feed:
+        def __init__(self):
+            self.history = defaultdict(list)
+
+        def get_quote(self, ticker):
+            self.history[ticker].append((clock[0], None))
+            return None, None, None, clock[0]
+
+        def top_of_book(self, ticker):
+            return None, None, None, None
+
+        def stale_tickers(self, tickers):
+            return []
+
+        def entry_allowed(self, ticker, now, required_seconds):
+            return ticker != "A"
+
+    clock = [0.0]
+    cfg = Config(); cfg.poll_interval = 0
+    feed = Feed()
+    ctx = Context(cfg, feed, ScalpStrategy(cfg),
+                  Executor(cfg, None, feed), None, Safety(cfg),
+                  clock=lambda: clock[0])
+    sleep_calls = [0]
+
+    def sleep(_delay):
+        sleep_calls[0] += 1
+        clock[0] += 60.0
+        if sleep_calls[0] == 2:
+            ctx.safety.trip("operator interrupt")
+
+    output = StringIO()
+    with redirect_stdout(output):
+        assert run_loop(ctx, None, ["Z", "A"], sleep=sleep)
+    heartbeats = [line for line in output.getvalue().splitlines()
+                  if line.startswith("[heartbeat]")]
+    assert heartbeats == [
+        "[heartbeat] sweep=1 monitored=2 active=2 "
+        "rejections=close_horizon=1,missing_quote=1",
+        "[heartbeat] sweep=2 monitored=2 active=2 "
+        "rejections=close_horizon=2,missing_quote=2",
+    ]
+    print("PASS heartbeat reports deterministic sorted rejection counters")
+
+
 def test_termination_signals_route_through_interrupt():
     import signal as _signal
     from bot import termination_signals_as_interrupt
@@ -7532,6 +7694,9 @@ if __name__ == "__main__":
     test_nonpaper_early_close_risk_is_visible_and_blocks_entry()
     test_live_fill_risk_uses_executor_requote_immediately()
     test_replay_enforces_logged_market_lifecycle()
+    test_entry_diagnostics_and_custom_evaluator_preserve_public_decision()
+    test_engine_counts_silent_entry_rejections()
+    test_run_loop_heartbeat_reports_sorted_nonzero_rejections()
     test_termination_signals_route_through_interrupt()
     test_live_and_demo_disabled()
-    print("\nALL TESTS PASS (202 tests)")
+    print("\nALL TESTS PASS (206 tests)")

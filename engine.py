@@ -7,6 +7,7 @@ from executor import HaltError
 from schemas import UnknownOrderState
 from fees import fee_usd
 from safety import ExposureError
+from strategy import ScalpStrategy
 
 
 class Context:
@@ -22,6 +23,7 @@ class Context:
         self.latest_bid = {}
         self.bid_ts = {}          # ticker -> time of last usable bid
         self.entry_status = {}    # ticker -> stable lifecycle gate status
+        self.rejection_counts = {}  # cumulative, diagnostic-only entry gates
 
 
 def set_entry_status(ctx, ticker, status, message=None):
@@ -30,6 +32,11 @@ def set_entry_status(ctx, ticker, status, message=None):
     ctx.entry_status[ticker] = status
     if message is not None and previous != status:
         print(message)
+
+
+def record_entry_rejection(ctx, reason):
+    """Record an entry gate without changing its decision or side effects."""
+    ctx.rejection_counts[reason] = ctx.rejection_counts.get(reason, 0) + 1
 
 
 def sync_execution_observation(ctx, ticker):
@@ -85,6 +92,7 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
     if ctx.safety.tripped:
         return
     if ctx.cfg.paper_trading and ctx.executor.has_pending(ticker):
+        record_entry_rejection(ctx, "pending_paper_order")
         return
 
     exit_sig = ctx.strategy.check_exit(ticker, bid, now=now)
@@ -117,6 +125,7 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
             and len(ctx.strategy.positions)
             + ctx.executor.pending_count("BUY")
             >= ctx.cfg.max_open_positions):
+        record_entry_rejection(ctx, "max_open_positions")
         return
     if (hasattr(ctx.feed, "entry_allowed")
             and not ctx.feed.entry_allowed(
@@ -125,6 +134,7 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
         set_entry_status(
             ctx, ticker, "blocked:close_horizon",
             f"[entry] BLOCKED {ticker}: insufficient close horizon")
+        record_entry_rejection(ctx, "close_horizon")
         return
     early_close_risk = (
         hasattr(ctx.feed, "early_close_risk")
@@ -135,6 +145,7 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
                 ctx, ticker, "blocked:can_close_early",
                 f"[entry] BLOCKED {ticker}: can_close_early=true "
                 "outside paper mode")
+            record_entry_rejection(ctx, "can_close_early")
             return
         set_entry_status(
             ctx, ticker, "paper_allowed:can_close_early",
@@ -142,8 +153,13 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
             "entry remains enabled")
     else:
         set_entry_status(ctx, ticker, "eligible")
-    entry_sig = ctx.strategy.check_entry(ticker, hist, now,
-                                         mid, bid, ask)
+    entry_sig = ctx.strategy.check_entry(ticker, hist, now, mid, bid, ask)
+    # Diagnostics are an implementation detail of the built-in strategy.
+    # Custom strategies keep the historical check_entry-only protocol.
+    rejection = (ctx.strategy.last_entry_rejection()
+                 if type(ctx.strategy) is ScalpStrategy else None)
+    if rejection is not None:
+        record_entry_rejection(ctx, rejection)
     if entry_sig:
         print(f"[signal] BUY {ticker}: {entry_sig['reason']}")
         if ctx.cfg.paper_trading:

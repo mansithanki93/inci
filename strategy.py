@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from fees import fee_usd, projected_scalp_pnl_usd
-from signals import dip_signal
+from signals import dip_signal_with_reason
 
 
 @dataclass
@@ -25,6 +25,7 @@ class ScalpStrategy:
         self.cfg = config
         self.ledger = ledger
         self.positions = {}
+        self._last_entry_rejection = None
         self._ledger_day = ledger.utc_day(now) if ledger is not None else None
         self.realized_pnl = (ledger.today_total(now) if ledger is not None
                              else Decimal('0'))
@@ -39,21 +40,21 @@ class ScalpStrategy:
         return self.realized_pnl
 
     # ---------- Entry: judged at the ASK ----------
-    def check_entry(self, ticker, history, now_ts, mid, bid, ask):
-        """history = (ts, mid) ticks strictly BEFORE this one."""
+    def _evaluate_entry(self, ticker, history, now_ts, mid, bid, ask):
+        """Read-only entry evaluation returning (signal, rejection_reason)."""
         self.refresh_daily_pnl(now_ts)
         if mid is None or bid is None or ask is None:
-            return None
+            return None, "missing_quote"
         if ticker in self.positions:
-            return None
+            return None, "position_open"
         if len(self.positions) >= self.cfg.max_open_positions:
-            return None
+            return None, "max_open_positions"
         if not (self.cfg.min_price <= ask <= self.cfg.max_price):
-            return None
+            return None, "entry_price_out_of_range"
         if (ask - bid) > self.cfg.max_spread:
-            return None
+            return None, "spread_too_wide"
         if self.realized_pnl <= -Decimal(str(self.cfg.max_daily_loss_usd)):
-            return None
+            return None, "daily_loss_limit"
         projected = projected_scalp_pnl_usd(
             ask, self.cfg.take_profit, self.cfg.contracts_per_trade,
             self.cfg.sim_slippage_cents,
@@ -61,14 +62,31 @@ class ScalpStrategy:
         # Match the aggregate, slipped paper execution rather than a
         # one-contract unslipped approximation.
         if projected <= 0:
-            return None
-        dip = dip_signal(history, now_ts, mid,
-                         self.cfg.dip_threshold, self.cfg.lookback_seconds)
+            return None, "projected_pnl_nonpositive"
+        dip, rejection = dip_signal_with_reason(
+            history, now_ts, mid, self.cfg.dip_threshold,
+            self.cfg.lookback_seconds)
         if dip is not None:
-            return {"action": "BUY",
-                    "reason": f"dip {dip:.1f}c; entry ask {ask}c, "
-                              f"projected net ${projected:+.4f}"}
-        return None
+            return ({"action": "BUY",
+                     "reason": f"dip {dip:.1f}c; entry ask {ask}c, "
+                               f"projected net ${projected:+.4f}"}, None)
+        return None, rejection
+
+    def evaluate_entry(self, ticker, history, now_ts, mid, bid, ask):
+        """Expose the built-in decision explanation without dispatch effects."""
+        return ScalpStrategy._evaluate_entry(
+            self, ticker, history, now_ts, mid, bid, ask)
+
+    def check_entry(self, ticker, history, now_ts, mid, bid, ask):
+        """history = (ts, mid) ticks strictly BEFORE this one."""
+        decision, rejection = ScalpStrategy._evaluate_entry(
+            self, ticker, history, now_ts, mid, bid, ask)
+        self._last_entry_rejection = rejection
+        return decision
+
+    def last_entry_rejection(self):
+        """Return diagnostics captured by the latest public entry check."""
+        return self._last_entry_rejection
 
     # ---------- Exit: judged at the BID ----------
     def check_exit(self, ticker, bid, now=None):

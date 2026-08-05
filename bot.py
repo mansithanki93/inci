@@ -385,6 +385,22 @@ def safe_shutdown(ctx, reconciler):
 def run_loop(ctx, reconciler, tickers, sleep=time.sleep):
     """Run monitoring and route every stop reason through safe shutdown."""
     safety = ctx.safety
+    sweeps = 0
+    last_heartbeat_at = None
+
+    def heartbeat(now):
+        nonlocal last_heartbeat_at
+        if last_heartbeat_at is not None and now - last_heartbeat_at < 60:
+            return
+        sweeps_rejections = getattr(ctx, "rejection_counts", {})
+        counters = ",".join(
+            f"{reason}={count}"
+            for reason, count in sorted(sweeps_rejections.items())
+            if count)
+        active = sum(ticker not in safety.quarantined for ticker in tickers)
+        print(f"[heartbeat] sweep={sweeps} monitored={len(tickers)} "
+              f"active={active} rejections={counters or 'none'}")
+        last_heartbeat_at = now
 
     def critical_tickers():
         critical = set(ctx.strategy.positions)
@@ -457,6 +473,8 @@ def run_loop(ctx, reconciler, tickers, sleep=time.sleep):
             if not sweep_had_error and not safety.tripped:
                 safety.global_ok()
             if not safety.tripped:
+                sweeps += 1
+                heartbeat(ctx.clock())
                 sleep(ctx.cfg.poll_interval)
     except KeyboardInterrupt:
         safety.trip("operator interrupt")
