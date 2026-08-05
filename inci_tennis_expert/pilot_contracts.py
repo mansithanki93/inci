@@ -531,8 +531,6 @@ class PilotBookSnapshot:
             _fail("contract_side")
         bids = _ordered_ladder(self.bid_levels, "bid_levels", ascending=False)
         asks = _ordered_ladder(self.ask_levels, "ask_levels", ascending=True)
-        if bids[0].price >= asks[0].price:
-            _fail("book_spread")
         for value, name, positive in (
             (self.captured_wall_ns, "captured_wall_ns", False),
             (self.captured_monotonic_ns, "captured_monotonic_ns", False),
