@@ -11,6 +11,7 @@ from re import compile as pattern_compile
 from inci_tennis_expert.contracts import SetScore, TennisState
 from inci_tennis_expert.pilot_contracts import (
     DynamicBeliefSnapshot,
+    PilotContractError,
     PilotOutcomeEstimate,
     PilotPointEvent,
     PilotSupportReason,
@@ -51,6 +52,9 @@ _CLAIM = "PLUMBING_ONLY"
 _AUTHORITY = "RESEARCH_ONLY / NO_ORDERS"
 _ID = pattern_compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z", RE_ASCII)
 _MAX_SIGNED_64 = 9_223_372_036_854_775_807
+_INVALID_EVENT_IDENTITY_DIGEST_DOMAIN = (
+    "inci-tennis-two-model-invalid-event-identity-v1"
+)
 
 
 class TwoModelPilotError(ValueError):
@@ -455,6 +459,8 @@ def _validation_reason(
     state: TwoModelPilotState,
     event: PilotPointEvent,
 ) -> TwoModelAbstentionReason | None:
+    if type(state.dynamic_model) is not DynamicPointModel:
+        _fail("state")
     if (
         not _serve_artifact_is_authentic(state.static_artifact)
         or not _dynamic_artifact_is_authentic(state.dynamic_artifact)
@@ -503,13 +509,59 @@ def _support_reason(reason: TwoModelAbstentionReason) -> PilotSupportReason:
     return PilotSupportReason.INVALID_POINT_TRANSITION
 
 
+def _safe_invalid_identity_value(value: object) -> dict[str, object]:
+    if value is None:
+        return {"python_type": "NoneType", "value": "none"}
+    if type(value) is bool:
+        return {"python_type": "bool", "value": value}
+    if type(value) is int:
+        return {"python_type": "int", "decimal_value": str(value)}
+    if type(value) is str:
+        return {"python_type": "str", "value": value}
+    if type(value) is Decimal:
+        return {"python_type": "Decimal", "value": str(value)}
+    _fail("event_digest")
+
+
+def _event_sha256(event: PilotPointEvent) -> str:
+    try:
+        return pilot_contract_sha256(event)
+    except PilotContractError:
+        identity_names = {
+            "canonical_match_id",
+            "point_id",
+            "sequence_number",
+        }
+        remaining_fields = {
+            field.name: getattr(event, field.name)
+            for field in fields(PilotPointEvent)
+            if field.name not in identity_names
+        }
+        return pilot_contract_sha256(
+            {
+                "domain": _INVALID_EVENT_IDENTITY_DIGEST_DOMAIN,
+                "contract_type": "PilotPointEvent",
+                "identity_fields": {
+                    "canonical_match_id": _safe_invalid_identity_value(
+                        event.canonical_match_id
+                    ),
+                    "point_id": _safe_invalid_identity_value(event.point_id),
+                    "sequence_number": _safe_invalid_identity_value(
+                        event.sequence_number
+                    ),
+                },
+                "remaining_fields": remaining_fields,
+            }
+        )
+
+
 def _abstention_row(
     state: TwoModelPilotState,
     event: PilotPointEvent,
     reason: TwoModelAbstentionReason,
 ) -> TwoModelComparisonRow:
     support_reason = _support_reason(reason)
-    event_sha256 = pilot_contract_sha256(event)
+    event_sha256 = _event_sha256(event)
     canonical_match_id = (
         event.canonical_match_id
         if type(event.canonical_match_id) is str

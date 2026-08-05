@@ -240,6 +240,21 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[bytes]:
 
 
 class TwoModelPilotTests(unittest.TestCase):
+    def test_non_model_dynamic_state_halts_with_fixed_code(self) -> None:
+        state = _initialized()
+        object.__setattr__(state, "dynamic_model", object())
+        event = _event(
+            point_id="point-1",
+            sequence_number=1,
+            before=_initial_state(),
+            winner=PlayerSide.HOME,
+        )
+
+        with self.assertRaisesRegex(TwoModelPilotError, "^state$"):
+            run_two_model_event(state, event)
+
+        self.assertEqual(state.last_valid_sequence_number, 0)
+
     def test_untrusted_state_digest_halts_before_model_prediction(self) -> None:
         state = _initialized()
         object.__setattr__(state, "state_sha256", "f" * 64)
@@ -473,6 +488,62 @@ class TwoModelPilotTests(unittest.TestCase):
                     row.prior_state_sha256,
                     row.resulting_state_sha256,
                 )
+
+    def test_oversized_sequence_uses_distinct_domain_marked_event_digest(self) -> None:
+        oversized = 9_223_372_036_854_775_808
+        rows = []
+        for sequence_number in (oversized, oversized + 1):
+            state = _initialized()
+            event = _event(
+                point_id="point-1",
+                sequence_number=1,
+                before=_initial_state(),
+                winner=PlayerSide.HOME,
+            )
+            object.__setattr__(event, "sequence_number", sequence_number)
+            remaining_fields = {
+                field.name: getattr(event, field.name)
+                for field in fields(PilotPointEvent)
+                if field.name
+                not in {"canonical_match_id", "point_id", "sequence_number"}
+            }
+            expected_sha256 = pilot_contract_sha256(
+                {
+                    "domain": "inci-tennis-two-model-invalid-event-identity-v1",
+                    "contract_type": "PilotPointEvent",
+                    "identity_fields": {
+                        "canonical_match_id": {
+                            "python_type": "str",
+                            "value": "match-1",
+                        },
+                        "point_id": {
+                            "python_type": "str",
+                            "value": "point-1",
+                        },
+                        "sequence_number": {
+                            "python_type": "int",
+                            "decimal_value": str(sequence_number),
+                        },
+                    },
+                    "remaining_fields": remaining_fields,
+                }
+            )
+
+            returned, row = run_two_model_event(state, event)
+
+            self.assertIs(returned, state)
+            self.assertIs(row.status, TwoModelRowStatus.ABSTAINED)
+            self.assertIs(
+                row.abstention_reason,
+                TwoModelAbstentionReason.INVALID_EVENT,
+            )
+            self.assertEqual(row.sequence_number, 1)
+            self.assertEqual(row.point_event_sha256, expected_sha256)
+            self.assertEqual(row.prior_state_sha256, row.resulting_state_sha256)
+            canonical_pilot_contract_bytes(row)
+            rows.append(row)
+
+        self.assertNotEqual(rows[0].point_event_sha256, rows[1].point_event_sha256)
 
     def test_identical_replays_are_byte_identical(self) -> None:
         first = _event(
