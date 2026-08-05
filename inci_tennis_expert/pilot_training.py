@@ -9,8 +9,9 @@ from pathlib import Path
 from re import ASCII as RE_ASCII
 from re import compile as pattern_compile
 
-from inci_tennis_expert.contracts import PlayerSide
+from inci_tennis_expert.contracts import PlayerSide, SetScore, TennisState
 from inci_tennis_expert.pilot_contracts import (
+    PilotContractError,
     PilotPointEvent,
     ServeStrengthArtifact,
     canonical_pilot_contract_bytes,
@@ -20,6 +21,7 @@ from inci_tennis_expert.pilot_dynamic_model import (
     DynamicParameterCandidate,
     DynamicPointArtifact,
     DynamicPointModel,
+    DynamicPointModelError,
     compute_dynamic_point_artifact_sha256,
 )
 
@@ -88,11 +90,42 @@ def _candidate_is_structurally_valid(
 
 def _event_is_structurally_valid(event: PilotPointEvent) -> bool:
     try:
-        rebuilt = PilotPointEvent(
-            **{
-                field.name: getattr(event, field.name)
-                for field in fields(PilotPointEvent)
+        rebuilt_states: list[TennisState] = []
+        for state in (event.before_state, event.after_state):
+            if (
+                type(state) is not TennisState
+                or type(state.completed_sets) is not tuple
+            ):
+                return False
+            rebuilt_sets = tuple(
+                SetScore(
+                    **{
+                        field.name: getattr(set_score, field.name)
+                        for field in fields(SetScore)
+                    }
+                )
+                for set_score in state.completed_sets
+                if type(set_score) is SetScore
+            )
+            if len(rebuilt_sets) != len(state.completed_sets):
+                return False
+            state_values = {
+                field.name: getattr(state, field.name)
+                for field in fields(TennisState)
             }
+            state_values["completed_sets"] = rebuilt_sets
+            rebuilt_state = TennisState(**state_values)  # type: ignore[arg-type]
+            if rebuilt_state != state:
+                return False
+            rebuilt_states.append(rebuilt_state)
+        event_values = {
+            field.name: getattr(event, field.name)
+            for field in fields(PilotPointEvent)
+        }
+        event_values["before_state"] = rebuilt_states[0]
+        event_values["after_state"] = rebuilt_states[1]
+        rebuilt = PilotPointEvent(
+            **event_values,  # type: ignore[arg-type]
         )
         return rebuilt == event
     except Exception:
@@ -339,6 +372,16 @@ def _build_serve_artifact_map(
             _fail("serve_artifact_post_start")
         if match_id in artifact.training_match_ids:
             _fail("serve_artifact_self_including")
+        if any(
+            type(probability) is not Decimal
+            or not probability.is_finite()
+            or not Decimal("0") < probability < Decimal("1")
+            for probability in (
+                artifact.home_serve_point_probability,
+                artifact.away_serve_point_probability,
+            )
+        ):
+            _fail("serve_artifact_probability")
         if not _serve_artifact_is_authentic(artifact):
             _fail("serve_artifact_authenticity")
     return artifacts
@@ -455,7 +498,12 @@ def _score_partition(
                 log_loss=+(loss_sum / row_count),
                 brier_score=+(brier_sum / row_count),
             )
-    except (DecimalException, ZeroDivisionError) as error:
+    except (
+        DecimalException,
+        DynamicPointModelError,
+        PilotContractError,
+        ZeroDivisionError,
+    ) as error:
         raise PilotTrainingError("candidate_scoring") from error
 
 
@@ -644,7 +692,10 @@ def canonical_dynamic_point_artifact_json_bytes(
     if type(artifact) is not DynamicPointArtifact:
         _fail("dynamic_artifact")
     try:
-        expected = compute_dynamic_point_artifact_sha256(
+        if not _candidate_is_structurally_valid(artifact.selected):
+            _fail("dynamic_artifact")
+        rebuilt = DynamicPointArtifact(
+            artifact_sha256=artifact.artifact_sha256,
             version=artifact.version,
             target_canonical_match_id=artifact.target_canonical_match_id,
             target_scheduled_start_wall_ns=artifact.target_scheduled_start_wall_ns,
@@ -656,10 +707,12 @@ def canonical_dynamic_point_artifact_json_bytes(
             code_sha256=artifact.code_sha256,
             selected=artifact.selected,
         )
+        if rebuilt != artifact:
+            _fail("dynamic_artifact")
+    except PilotTrainingError:
+        raise
     except Exception as error:
         raise PilotTrainingError("dynamic_artifact") from error
-    if artifact.artifact_sha256 != expected:
-        _fail("dynamic_artifact")
     return canonical_pilot_contract_bytes(artifact)
 
 

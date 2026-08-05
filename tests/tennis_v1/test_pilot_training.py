@@ -10,6 +10,7 @@ from inci_tennis_expert.contracts import (
     PlayerSide,
     ProviderPoint,
     ScoreValue,
+    SetScore,
     TennisState,
     TerminationKind,
 )
@@ -21,7 +22,10 @@ from inci_tennis_expert.pilot_contracts import (
     compute_training_match_ids_sha256,
     pilot_contract_sha256,
 )
-from inci_tennis_expert.pilot_dynamic_model import DynamicParameterCandidate
+from inci_tennis_expert.pilot_dynamic_model import (
+    DynamicParameterCandidate,
+    compute_dynamic_point_artifact_sha256,
+)
 from inci_tennis_expert.pilot_training import (
     PilotTrainingError,
     canonical_dynamic_point_artifact_json_bytes,
@@ -407,6 +411,37 @@ class PilotTrainingTests(unittest.TestCase):
         with self.assertRaisesRegex(PilotTrainingError, "^event_authenticity$"):
             fit_dynamic_point_parameters(**values)  # type: ignore[arg-type]
 
+    def test_nested_state_block_metadata_is_revalidated(self) -> None:
+        values = _fixture()
+        events = values["events"]
+        assert type(events) is tuple
+        object.__setattr__(events[0].before_state, "expected_revision", 123)
+        values["candidates"] = ()
+
+        with self.assertRaisesRegex(PilotTrainingError, "^event_authenticity$"):
+            fit_dynamic_point_parameters(**values)  # type: ignore[arg-type]
+
+    def test_nested_completed_set_contract_is_revalidated(self) -> None:
+        values = _fixture()
+        events = values["events"]
+        assert type(events) is tuple
+        forged_set = SetScore(6, 0, None, None)
+        object.__setattr__(forged_set, "games_away", False)
+        object.__setattr__(
+            events[0].before_state,
+            "completed_sets",
+            (forged_set,),
+        )
+        object.__setattr__(
+            events[0].after_state,
+            "completed_sets",
+            (forged_set,),
+        )
+        values["candidates"] = ()
+
+        with self.assertRaisesRegex(PilotTrainingError, "^event_authenticity$"):
+            fit_dynamic_point_parameters(**values)  # type: ignore[arg-type]
+
     def test_structurally_tampered_candidate_is_rejected_before_scoring(
         self,
     ) -> None:
@@ -534,6 +569,93 @@ class PilotTrainingTests(unittest.TestCase):
                 target_canonical_match_id="future-match",
                 target_scheduled_start_wall_ns=3_000,
             )
+
+    def test_canonical_artifact_bytes_revalidate_nested_candidate(self) -> None:
+        result = fit_dynamic_point_parameters(**_fixture())  # type: ignore[arg-type]
+        artifact = freeze_dynamic_point_artifact(
+            training_result=result,
+            target_canonical_match_id="future-match",
+            target_scheduled_start_wall_ns=3_000,
+        )
+        matrix = artifact.selected.transition_matrix
+        object.__setattr__(
+            artifact.selected,
+            "transition_matrix",
+            (
+                (Decimal("1"), Decimal("1"), Decimal("0")),
+                matrix[1],
+                matrix[2],
+            ),
+        )
+        object.__setattr__(
+            artifact,
+            "artifact_sha256",
+            compute_dynamic_point_artifact_sha256(
+                version=artifact.version,
+                target_canonical_match_id=artifact.target_canonical_match_id,
+                target_scheduled_start_wall_ns=(
+                    artifact.target_scheduled_start_wall_ns
+                ),
+                cutoff_wall_ns=artifact.cutoff_wall_ns,
+                training_match_ids=artifact.training_match_ids,
+                validation_match_ids=artifact.validation_match_ids,
+                source_data_sha256=artifact.source_data_sha256,
+                feature_definition_sha256=artifact.feature_definition_sha256,
+                code_sha256=artifact.code_sha256,
+                selected=artifact.selected,
+            ),
+        )
+
+        with self.assertRaisesRegex(PilotTrainingError, "^dynamic_artifact$"):
+            canonical_dynamic_point_artifact_json_bytes(artifact)
+
+    def test_endpoint_serve_priors_precede_candidate_grid_validation(self) -> None:
+        cases: list[tuple[str, ServeStrengthArtifact]] = []
+        for field_name in (
+            "home_serve_point_probability",
+            "away_serve_point_probability",
+        ):
+            endpoint_one = _serve_artifact("match-a", 1_000)
+            object.__setattr__(endpoint_one, field_name, Decimal("1"))
+            values = {
+                name: getattr(endpoint_one, name)
+                for name in endpoint_one.__dataclass_fields__
+                if name != "artifact_sha256"
+            }
+            object.__setattr__(
+                endpoint_one,
+                "artifact_sha256",
+                compute_serve_strength_artifact_sha256(**values),
+            )
+            cases.append((f"{field_name}=1", endpoint_one))
+
+            endpoint_zero = _serve_artifact("match-a", 1_000)
+            object.__setattr__(endpoint_zero, field_name, Decimal("0"))
+            values = {
+                name: getattr(endpoint_zero, name)
+                for name in endpoint_zero.__dataclass_fields__
+                if name != "artifact_sha256"
+            }
+            object.__setattr__(
+                endpoint_zero,
+                "artifact_sha256",
+                compute_serve_strength_artifact_sha256(**values),
+            )
+            cases.append((f"{field_name}=0", endpoint_zero))
+
+        for label, endpoint_artifact in cases:
+            with self.subTest(endpoint=label):
+                values = _fixture()
+                values["candidates"] = ()
+                values["serve_strength_artifacts"] = (
+                    endpoint_artifact,
+                    _serve_artifact("match-b", 2_000),
+                )
+                with self.assertRaisesRegex(
+                    PilotTrainingError,
+                    "^serve_artifact_probability$",
+                ):
+                    fit_dynamic_point_parameters(**values)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
