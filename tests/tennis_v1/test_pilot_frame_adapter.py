@@ -12,19 +12,27 @@ from inci_tennis_expert.contracts import (
     ContractSide,
     MatchBinding,
     PlayerSide,
+    ProviderPoint,
     SettlementSemantics,
     compute_membership_projection_sha256,
     compute_settlement_projection_sha256,
 )
+from inci_tennis_expert.tennis_score import apply_point
 from inci_tennis_expert.pilot_contracts import (
+    PilotAction,
+    PilotContractError,
+    PilotRoute,
+    PilotSupportReason,
     PilotExecutionScenario,
     compute_execution_scenario_sha256,
+    make_pilot_policy_estimate,
 )
 from tests.tennis_v1 import test_consensus_l2_research as consensus_fixture
 
 from inci_tennis_expert.pilot_frame_adapter import (
     PilotFrameAdapterError,
     build_pilot_decision_frame,
+    project_pilot_decision_frame,
 )
 
 
@@ -153,15 +161,38 @@ def _binding_metadata() -> BindingMetadata:
 
 def _valid_args() -> dict[str, object]:
     api = consensus_fixture._research_api()
-    accepted = consensus_fixture._transition(api)
+    seed = consensus_fixture._transition(api)
     prior = replace(
-        accepted.accepted_state,
-        points_home=accepted.accepted_state.points_home.__class__.LOVE,
+        seed.accepted_state,
+        points_home=seed.accepted_state.points_home.__class__.LOVE,
         revision=6,
         last_provider_event_id="primary-event-6",
         last_event_semantic_sha256=SHA_D,
         last_received_monotonic_ns=90,
     )
+    after = apply_point(
+        prior,
+        ProviderPoint(
+            provider_source_id=prior.provider_source_id,
+            revision_domain_id=prior.revision_domain_id,
+            source_lineage_sha256=prior.source_lineage_sha256,
+            provider_event_id="primary-event-7",
+            provider_match_id=prior.provider_match_id,
+            home_player_id=prior.home_player_id,
+            away_player_id=prior.away_player_id,
+            scheduled_start_wall_ns=prior.scheduled_start_wall_ns,
+            match_format=prior.match_format,
+            correction_epoch=prior.correction_epoch,
+            revision=7,
+            point_winner=PlayerSide.HOME,
+            server_before_point=PlayerSide.HOME,
+            source_wall_ns=1_000,
+            source_generated_wall_ns=990,
+            received_monotonic_ns=100,
+            clock_uncertainty_ns=prior.last_clock_uncertainty_ns,
+        ),
+    ).state
+    accepted = consensus_fixture._transition(api, accepted_state=after)
     observation = consensus_fixture._book_observation(api, captured_monotonic_ns=130)
     frame = ConsensusL2ResearchFrameV1(accepted, observation)
     return dict(
@@ -195,8 +226,78 @@ class PilotFrameAdapterTests(unittest.TestCase):
                 **values,
             )
 
+    def test_binding_event_ticker_must_match_both_market_metadata_records(self) -> None:
+        values = _valid_args()
+        binding = values.pop("binding")
+        assert isinstance(binding, MatchBinding)
+        with self.assertRaisesRegex(PilotFrameAdapterError, "^market_orientation$"):
+            build_pilot_decision_frame(
+                binding=replace(binding, kalshi_event_ticker="OTHER-EVENT"),
+                **values,
+            )
+
     def test_stale_pair_is_rejected_even_when_frame_contract_is_valid(self) -> None:
         values = _valid_args()
         values["execution_scenario"] = _execution_scenario(maximum_pair_latency_ns=9)
         with self.assertRaisesRegex(PilotFrameAdapterError, "^pair_stale$"):
             build_pilot_decision_frame(**values)
+
+    def test_stale_pair_becomes_a_digest_bound_persisted_abstention(self) -> None:
+        values = _valid_args()
+        values["execution_scenario"] = _execution_scenario(maximum_pair_latency_ns=9)
+        projected = project_pilot_decision_frame(**values)
+        self.assertIsNone(projected.decision_frame)
+        self.assertIsNotNone(projected.abstention)
+        assert projected.abstention is not None
+        self.assertEqual(projected.abstention.reason, PilotSupportReason.BOOK_UNTRUSTED)
+        self.assertEqual(
+            projected.abstention.source_frame_id,
+            values["frame"].frame_id,
+        )
+        self.assertEqual(
+            projected.abstention.raw_book_parent_durable_record_sequence,
+            values["frame"].l2_observation.raw_parent.durable_record_sequence,
+        )
+
+    def test_decision_frame_persists_direct_parent_evidence(self) -> None:
+        actual = build_pilot_decision_frame(**_valid_args())
+        args = _valid_args()
+        frame = args["frame"]
+        self.assertEqual(actual.consensus_record_sha256, frame.consensus_transition.consensus_record_sha256)
+        self.assertEqual(actual.l2_state_sha256, frame.l2_observation.l2_state_sha256)
+        self.assertEqual(actual.raw_book_parent_sha256, frame.l2_observation.raw_parent.raw_frame_sha256)
+        self.assertEqual(actual.raw_book_parent_durable_record_sequence, frame.l2_observation.raw_parent.durable_record_sequence)
+        self.assertEqual(actual.physical_connection_generation, frame.l2_observation.physical_connection_generation)
+
+    def test_policy_factory_derives_and_locks_its_authorized_book_route(self) -> None:
+        decision = build_pilot_decision_frame(**_valid_args())
+        buy = make_pilot_policy_estimate(
+            decision_frame=decision,
+            supported=True,
+            action=PilotAction.BUY,
+            abstention_reason=None,
+            selected_player_side=PlayerSide.HOME,
+            requested_quantity=Decimal("1"),
+            decision_monotonic_ns=130,
+            arrival_due_monotonic_ns=140,
+        )
+        self.assertEqual(buy.selected_market_ticker, decision.home_book.market_ticker)
+        self.assertEqual(buy.decision_book_sha256, decision.home_book.book_sha256)
+        with self.assertRaisesRegex(PilotContractError, "^locked_entry_route$"):
+            make_pilot_policy_estimate(
+                decision_frame=decision,
+                supported=True,
+                action=PilotAction.HOLD,
+                abstention_reason=None,
+                selected_player_side=PlayerSide.HOME,
+                requested_quantity=Decimal("1"),
+                decision_monotonic_ns=130,
+                arrival_due_monotonic_ns=140,
+                locked_entry_route=PilotRoute(
+                    PlayerSide.AWAY,
+                    decision.away_book.market_ticker,
+                    decision.away_book.market_id,
+                    decision.away_book.contract_side,
+                    decision.away_book.book_sha256,
+                ),
+            )

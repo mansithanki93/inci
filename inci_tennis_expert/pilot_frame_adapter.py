@@ -19,6 +19,8 @@ from inci_tennis_expert.pilot_contracts import (
     PilotBookSnapshot,
     PilotContractError,
     PilotDecisionFrame,
+    PilotFrameAbstention,
+    PilotFrameProjection,
     PilotExecutionScenario,
     PilotPointEvent,
     PilotPriceLevel,
@@ -27,7 +29,7 @@ from inci_tennis_expert.pilot_contracts import (
 )
 
 
-__all__ = ("PilotFrameAdapterError", "build_pilot_decision_frame")
+__all__ = ("PilotFrameAdapterError", "build_pilot_decision_frame", "project_pilot_decision_frame")
 
 
 class PilotFrameAdapterError(ValueError):
@@ -109,6 +111,8 @@ def _validate_binding(
         or away_metadata.yes_provider_player_id != binding.provider_away_player_id
         or home_metadata.yes_canonical_player_id != metadata.canonical_home_player_id
         or away_metadata.yes_canonical_player_id != metadata.canonical_away_player_id
+        or binding.kalshi_event_ticker != home_metadata.event_ticker
+        or binding.kalshi_event_ticker != away_metadata.event_ticker
     ):
         _fail("market_orientation")
 
@@ -228,6 +232,19 @@ def build_pilot_decision_frame(
         "match_binding_sha256": expert_contract_sha256(binding),
         "binding_metadata_sha256": expert_contract_sha256(metadata),
         "execution_scenario_sha256": execution_scenario.artifact_sha256,
+        "binding_artifact_sha256": binding.binding_artifact_sha256,
+        "consensus_record_sequence": transition.consensus_record_sequence,
+        "consensus_record_sha256": transition.consensus_record_sha256,
+        "prior_accepted_score_sha256": transition.prior_accepted_score_sha256,
+        "l2_state_sha256": observation.l2_state_sha256,
+        "raw_book_parent_sha256": observation.raw_parent.raw_frame_sha256,
+        "raw_book_parent_durable_record_sequence": observation.raw_parent.durable_record_sequence,
+        "raw_book_parent_durable_record_sha256": observation.raw_parent.durable_record_sha256,
+        "raw_book_parent_received_wall_ns": observation.raw_parent.received_wall_ns,
+        "raw_book_parent_received_monotonic_ns": observation.raw_parent.received_monotonic_ns,
+        "physical_connection_generation": observation.physical_connection_generation,
+        "subscription_id": observation.subscription_id,
+        "global_sequence": observation.global_sequence,
         "consensus_accepted_wall_ns": transition.consensus_accepted_wall_ns,
         "consensus_accepted_monotonic_ns": transition.consensus_accepted_monotonic_ns,
         "book_captured_wall_ns": observation.captured_wall_ns,
@@ -237,6 +254,55 @@ def build_pilot_decision_frame(
         decision_frame_sha256=pilot_contract_sha256(values),
         **values,  # type: ignore[arg-type]
     )
+
+
+def _abstention_reason(code: str) -> object:
+    from inci_tennis_expert.pilot_contracts import PilotSupportReason
+
+    if code in {"consensus_epoch"}:
+        return PilotSupportReason.CONSENSUS_EPOCH_CHANGED
+    if code in {"pair_stale", "market_orientation", "binding_mismatch"}:
+        return PilotSupportReason.BOOK_UNTRUSTED
+    return PilotSupportReason.INVALID_POINT_TRANSITION
+
+
+def project_pilot_decision_frame(**kwargs: object) -> PilotFrameProjection:
+    """Return a persistable result; causal rejection never reaches a model."""
+    try:
+        frame = kwargs["frame"]
+        binding = kwargs["binding"]
+        metadata = kwargs["metadata"]
+        scenario = kwargs["execution_scenario"]
+        if type(frame) is not ConsensusL2ResearchFrameV1 or type(binding) is not MatchBinding or type(metadata) is not BindingMetadata or type(scenario) is not PilotExecutionScenario:
+            _fail("frame_parent")
+        decision = build_pilot_decision_frame(**kwargs)  # type: ignore[arg-type]
+        return PilotFrameProjection(decision, None, pilot_contract_sha256({"decision_frame": decision, "abstention": None}))
+    except (PilotFrameAdapterError, PilotContractError) as error:
+        frame = kwargs.get("frame")
+        binding = kwargs.get("binding")
+        metadata = kwargs.get("metadata")
+        scenario = kwargs.get("execution_scenario")
+        if type(frame) is not ConsensusL2ResearchFrameV1 or type(binding) is not MatchBinding or type(metadata) is not BindingMetadata or type(scenario) is not PilotExecutionScenario:
+            raise
+        transition = frame.consensus_transition
+        observation = frame.l2_observation
+        values: dict[str, object] = {
+            "reason": _abstention_reason(str(error)), "canonical_match_id": binding.canonical_match_id,
+            "source_frame_id": frame.frame_id, "source_l2_observation_sha256": observation.observation_sha256,
+            "consensus_transition_sha256": transition.accepted_score_sha256, "accepted_score_sha256": transition.accepted_score_sha256,
+            "match_binding_sha256": expert_contract_sha256(binding), "binding_metadata_sha256": expert_contract_sha256(metadata),
+            "binding_artifact_sha256": binding.binding_artifact_sha256, "execution_scenario_sha256": scenario.artifact_sha256,
+            "consensus_record_sequence": transition.consensus_record_sequence, "consensus_record_sha256": transition.consensus_record_sha256,
+            "prior_accepted_score_sha256": transition.prior_accepted_score_sha256, "l2_state_sha256": observation.l2_state_sha256,
+            "raw_book_parent_sha256": observation.raw_parent.raw_frame_sha256, "raw_book_parent_durable_record_sequence": observation.raw_parent.durable_record_sequence,
+            "raw_book_parent_durable_record_sha256": observation.raw_parent.durable_record_sha256,
+            "raw_book_parent_received_wall_ns": observation.raw_parent.received_wall_ns, "raw_book_parent_received_monotonic_ns": observation.raw_parent.received_monotonic_ns,
+            "consensus_accepted_wall_ns": transition.consensus_accepted_wall_ns, "consensus_accepted_monotonic_ns": transition.consensus_accepted_monotonic_ns,
+            "book_captured_wall_ns": observation.captured_wall_ns, "book_captured_monotonic_ns": observation.captured_monotonic_ns,
+            "physical_connection_generation": observation.physical_connection_generation, "subscription_id": observation.subscription_id, "global_sequence": observation.global_sequence,
+        }
+        abstention = PilotFrameAbstention(abstention_sha256=pilot_contract_sha256(values), **values)  # type: ignore[arg-type]
+        return PilotFrameProjection(None, abstention, pilot_contract_sha256({"decision_frame": None, "abstention": abstention}))
 
 
 def _winner_for_exact_successor(
@@ -250,9 +316,9 @@ def _winner_for_exact_successor(
             # PilotPointEvent independently verifies the candidate score.  Its
             # local construction is deliberately deferred until this function
             # resolves a unique winner from score coordinates alone.
-            from inci_tennis_expert.pilot_contracts import _expected_next_score, _point_score_coordinates
+            from inci_tennis_expert.pilot_contracts import _expected_exact_next_state
 
-            if _expected_next_score(before, winner) == _point_score_coordinates(after):
+            if _expected_exact_next_state(before, after, winner) == after:
                 candidates.append(winner)
         except (ValueError, PilotContractError):
             continue

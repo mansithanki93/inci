@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 import unittest
 
@@ -16,8 +17,11 @@ from inci_tennis_expert.tennis_score import apply_point
 
 from inci_tennis_expert.pilot_contracts import (
     PilotContractError,
+    PilotAction,
+    PilotImmediateAction,
     PilotExecutionScenario,
     PilotPointEvent,
+    make_pilot_policy_estimate,
     ServeStrengthArtifact,
     compute_execution_scenario_sha256,
     compute_serve_strength_artifact_sha256,
@@ -136,6 +140,53 @@ class PilotPointEventTests(unittest.TestCase):
     def test_canonical_digest_is_stable(self) -> None:
         event = _valid_event()
         self.assertEqual(pilot_contract_sha256(event), pilot_contract_sha256(event))
+
+    def test_rejects_provenance_or_revision_not_equal_to_exact_successor(self) -> None:
+        event = _valid_event()
+        with self.assertRaisesRegex(PilotContractError, "^point_transition$"):
+            PilotPointEvent(
+                **{
+                    **{name: getattr(event, name) for name in event.__dataclass_fields__},
+                    "after_state": replace(event.after_state, revision=event.after_state.revision + 1),
+                }
+            )
+
+    def test_rejects_bo5_even_when_the_score_advance_is_legal(self) -> None:
+        event = _valid_event()
+        before = replace(
+            event.before_state,
+            match_format=MatchFormat.STANDARD_ADVANTAGE_BO5_TB7_ALL_SETS,
+        )
+        after = apply_point(
+            before,
+            ProviderPoint(
+                provider_source_id=before.provider_source_id,
+                revision_domain_id=before.revision_domain_id,
+                source_lineage_sha256=before.source_lineage_sha256,
+                provider_event_id="event-bo5",
+                provider_match_id=before.provider_match_id,
+                home_player_id=before.home_player_id,
+                away_player_id=before.away_player_id,
+                scheduled_start_wall_ns=before.scheduled_start_wall_ns,
+                match_format=before.match_format,
+                correction_epoch=before.correction_epoch,
+                revision=before.revision + 1,
+                point_winner=PlayerSide.HOME,
+                server_before_point=PlayerSide.HOME,
+                source_wall_ns=before.last_source_wall_ns + 1,
+                source_generated_wall_ns=before.last_source_generated_wall_ns + 1,
+                received_monotonic_ns=before.last_received_monotonic_ns + 1,
+                clock_uncertainty_ns=before.last_clock_uncertainty_ns,
+            ),
+        ).state
+        with self.assertRaisesRegex(PilotContractError, "^point_transition$"):
+            PilotPointEvent(
+                **{
+                    **{name: getattr(event, name) for name in event.__dataclass_fields__},
+                    "before_state": before,
+                    "after_state": after,
+                }
+            )
 
 
 class PilotArtifactTests(unittest.TestCase):

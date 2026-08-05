@@ -13,6 +13,7 @@ from typing import Final
 
 from inci_tennis_expert.contracts import (
     ContractSide,
+    MatchFormat,
     PlayerSide,
     TennisState,
 )
@@ -25,6 +26,7 @@ __all__ = (
     "PilotSupportReason",
     "PilotAction",
     "PilotImmediateAction",
+    "PilotRoute",
     "PilotPriceLevel",
     "PilotPointEvent",
     "ServeStrengthArtifact",
@@ -33,6 +35,8 @@ __all__ = (
     "PilotBookSnapshot",
     "PilotExecutionScenario",
     "PilotDecisionFrame",
+    "PilotFrameAbstention",
+    "PilotFrameProjection",
     "PilotPolicyEstimate",
     "PilotImmediateBaselineEstimate",
     "PilotComparisonRow",
@@ -41,6 +45,8 @@ __all__ = (
     "compute_serve_strength_artifact_sha256",
     "compute_execution_scenario_sha256",
     "compute_pilot_book_snapshot_sha256",
+    "make_pilot_policy_estimate",
+    "make_pilot_immediate_baseline_estimate",
 )
 
 
@@ -303,28 +309,33 @@ def _point_score_coordinates(state: TennisState) -> tuple[object, ...]:
     )
 
 
-def _expected_next_score(before: TennisState, winner: PlayerSide) -> tuple[object, ...]:
+def _expected_exact_next_state(
+    before: TennisState,
+    after: TennisState,
+    winner: PlayerSide,
+) -> TennisState:
+    """Replay the asserted provider point using all accepted provenance."""
     synthetic = ProviderPoint(
         provider_source_id=before.provider_source_id,
         revision_domain_id=before.revision_domain_id,
         source_lineage_sha256=before.source_lineage_sha256,
-        provider_event_id="pilot-point-transition",
+        provider_event_id=after.last_provider_event_id,
         provider_match_id=before.provider_match_id,
         home_player_id=before.home_player_id,
         away_player_id=before.away_player_id,
         scheduled_start_wall_ns=before.scheduled_start_wall_ns,
         match_format=before.match_format,
         correction_epoch=before.correction_epoch,
-        revision=before.revision + 1,
+        revision=after.revision,
         point_winner=winner,
         server_before_point=before.server_for_next_point,
-        source_wall_ns=before.last_source_wall_ns + 1,
-        source_generated_wall_ns=before.last_source_generated_wall_ns + 1,
-        received_monotonic_ns=before.last_received_monotonic_ns + 1,
-        clock_uncertainty_ns=before.last_clock_uncertainty_ns,
+        source_wall_ns=after.last_source_wall_ns,
+        source_generated_wall_ns=after.last_source_generated_wall_ns,
+        received_monotonic_ns=after.last_received_monotonic_ns,
+        clock_uncertainty_ns=after.last_clock_uncertainty_ns,
     )
     result = apply_point(before, synthetic)
-    return _point_score_coordinates(result.state)
+    return result.state
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,8 +372,18 @@ class PilotPointEvent:
         _integer(self.accepted_monotonic_ns, "accepted_monotonic_ns")
         before = self.before_state
         after = self.after_state
+        try:
+            expected_after = _expected_exact_next_state(
+                before, after, self.winner
+            )
+        except Exception:
+            _fail("point_transition")
         if (
-            before.server_for_next_point is not self.server
+            before.match_format
+            is not MatchFormat.STANDARD_ADVANTAGE_BO3_TB7_ALL_SETS
+            or after.match_format
+            is not MatchFormat.STANDARD_ADVANTAGE_BO3_TB7_ALL_SETS
+            or before.server_for_next_point is not self.server
             or before.provider_source_id != after.provider_source_id
             or before.revision_domain_id != after.revision_domain_id
             or before.source_lineage_sha256 != after.source_lineage_sha256
@@ -372,8 +393,7 @@ class PilotPointEvent:
             or before.scheduled_start_wall_ns != after.scheduled_start_wall_ns
             or before.match_format != after.match_format
             or before.correction_epoch != after.correction_epoch
-            or after.revision <= before.revision
-            or _point_score_coordinates(after) != _expected_next_score(before, self.winner)
+            or after != expected_after
             or self.accepted_monotonic_ns < after.last_received_monotonic_ns
         ):
             _fail("point_transition")
@@ -599,6 +619,19 @@ class PilotDecisionFrame:
     match_binding_sha256: str
     binding_metadata_sha256: str
     execution_scenario_sha256: str
+    binding_artifact_sha256: str
+    consensus_record_sequence: int
+    consensus_record_sha256: str
+    prior_accepted_score_sha256: str | None
+    l2_state_sha256: str
+    raw_book_parent_sha256: str
+    raw_book_parent_durable_record_sequence: int
+    raw_book_parent_durable_record_sha256: str
+    raw_book_parent_received_wall_ns: int
+    raw_book_parent_received_monotonic_ns: int
+    physical_connection_generation: int
+    subscription_id: int
+    global_sequence: int
     consensus_accepted_wall_ns: int
     consensus_accepted_monotonic_ns: int
     book_captured_wall_ns: int
@@ -626,9 +659,23 @@ class PilotDecisionFrame:
             (self.consensus_transition_sha256, "consensus_transition_sha256"), (self.accepted_score_sha256, "accepted_score_sha256"),
             (self.match_binding_sha256, "match_binding_sha256"), (self.binding_metadata_sha256, "binding_metadata_sha256"),
             (self.execution_scenario_sha256, "execution_scenario_sha256"),
+            (self.binding_artifact_sha256, "binding_artifact_sha256"),
+            (self.consensus_record_sha256, "consensus_record_sha256"),
+            (self.l2_state_sha256, "l2_state_sha256"),
+            (self.raw_book_parent_sha256, "raw_book_parent_sha256"),
+            (self.raw_book_parent_durable_record_sha256, "raw_book_parent_durable_record_sha256"),
         ):
             _digest(value, name)
+        if self.prior_accepted_score_sha256 is not None:
+            _digest(self.prior_accepted_score_sha256, "prior_accepted_score_sha256")
         for value, name in (
+            (self.consensus_record_sequence, "consensus_record_sequence"),
+            (self.raw_book_parent_durable_record_sequence, "raw_book_parent_durable_record_sequence"),
+            (self.raw_book_parent_received_wall_ns, "raw_book_parent_received_wall_ns"),
+            (self.raw_book_parent_received_monotonic_ns, "raw_book_parent_received_monotonic_ns"),
+            (self.physical_connection_generation, "physical_connection_generation"),
+            (self.subscription_id, "subscription_id"),
+            (self.global_sequence, "global_sequence"),
             (self.consensus_accepted_wall_ns, "consensus_accepted_wall_ns"), (self.consensus_accepted_monotonic_ns, "consensus_accepted_monotonic_ns"),
             (self.book_captured_wall_ns, "book_captured_wall_ns"), (self.book_captured_monotonic_ns, "book_captured_monotonic_ns"),
         ):
@@ -640,6 +687,75 @@ class PilotDecisionFrame:
             _fail("decision_frame_sha256")
 
 
+@dataclass(frozen=True, slots=True)
+class PilotFrameAbstention:
+    reason: PilotSupportReason
+    canonical_match_id: str
+    source_frame_id: str
+    source_l2_observation_sha256: str
+    consensus_transition_sha256: str
+    accepted_score_sha256: str
+    match_binding_sha256: str
+    binding_metadata_sha256: str
+    binding_artifact_sha256: str
+    execution_scenario_sha256: str
+    consensus_record_sequence: int
+    consensus_record_sha256: str
+    prior_accepted_score_sha256: str | None
+    l2_state_sha256: str
+    raw_book_parent_sha256: str
+    raw_book_parent_durable_record_sequence: int
+    raw_book_parent_durable_record_sha256: str
+    raw_book_parent_received_wall_ns: int
+    raw_book_parent_received_monotonic_ns: int
+    consensus_accepted_wall_ns: int
+    consensus_accepted_monotonic_ns: int
+    book_captured_wall_ns: int
+    book_captured_monotonic_ns: int
+    physical_connection_generation: int
+    subscription_id: int
+    global_sequence: int
+    abstention_sha256: str
+
+    def __post_init__(self) -> None:
+        _exact(self.reason, PilotSupportReason, "reason")
+        _id(self.canonical_match_id, "canonical_match_id")
+        for value, name in (
+            (self.source_frame_id, "source_frame_id"), (self.source_l2_observation_sha256, "source_l2_observation_sha256"),
+            (self.consensus_transition_sha256, "consensus_transition_sha256"), (self.accepted_score_sha256, "accepted_score_sha256"),
+            (self.match_binding_sha256, "match_binding_sha256"), (self.binding_metadata_sha256, "binding_metadata_sha256"),
+            (self.binding_artifact_sha256, "binding_artifact_sha256"), (self.execution_scenario_sha256, "execution_scenario_sha256"),
+            (self.consensus_record_sha256, "consensus_record_sha256"), (self.l2_state_sha256, "l2_state_sha256"),
+            (self.raw_book_parent_sha256, "raw_book_parent_sha256"), (self.raw_book_parent_durable_record_sha256, "raw_book_parent_durable_record_sha256"),
+        ):
+            _digest(value, name)
+        if self.prior_accepted_score_sha256 is not None:
+            _digest(self.prior_accepted_score_sha256, "prior_accepted_score_sha256")
+        for value, name in ((self.consensus_record_sequence, "consensus_record_sequence"), (self.raw_book_parent_durable_record_sequence, "raw_book_parent_durable_record_sequence"), (self.raw_book_parent_received_wall_ns, "raw_book_parent_received_wall_ns"), (self.raw_book_parent_received_monotonic_ns, "raw_book_parent_received_monotonic_ns"), (self.consensus_accepted_wall_ns, "consensus_accepted_wall_ns"), (self.consensus_accepted_monotonic_ns, "consensus_accepted_monotonic_ns"), (self.book_captured_wall_ns, "book_captured_wall_ns"), (self.book_captured_monotonic_ns, "book_captured_monotonic_ns"), (self.physical_connection_generation, "physical_connection_generation"), (self.subscription_id, "subscription_id"), (self.global_sequence, "global_sequence")):
+            _integer(value, name)
+        projection = {name: getattr(self, name) for name in self.__dataclass_fields__ if name != "abstention_sha256"}
+        if self.abstention_sha256 != pilot_contract_sha256(projection):
+            _fail("abstention_sha256")
+
+
+@dataclass(frozen=True, slots=True)
+class PilotFrameProjection:
+    decision_frame: PilotDecisionFrame | None
+    abstention: PilotFrameAbstention | None
+    projection_sha256: str
+
+    def __post_init__(self) -> None:
+        if (self.decision_frame is None) == (self.abstention is None):
+            _fail("frame_projection")
+        if self.decision_frame is not None and type(self.decision_frame) is not PilotDecisionFrame:
+            _fail("frame_projection")
+        if self.abstention is not None and type(self.abstention) is not PilotFrameAbstention:
+            _fail("frame_projection")
+        projection = {"decision_frame": self.decision_frame, "abstention": self.abstention}
+        if self.projection_sha256 != pilot_contract_sha256(projection):
+            _fail("projection_sha256")
+
+
 def _validate_route(
     *, action: PilotAction | PilotImmediateAction, selected_player_side: PlayerSide | None,
     selected_market_ticker: str | None, selected_market_id: str | None,
@@ -647,7 +763,7 @@ def _validate_route(
     requested_quantity: Decimal, decision_monotonic_ns: int, arrival_due_monotonic_ns: int | None,
     buying: bool,
 ) -> None:
-    if action in ((PilotAction.BUY, PilotAction.SELL) if buying else (PilotImmediateAction.BUY_NOW, PilotImmediateAction.SELL)):
+    if action in ((PilotAction.BUY, PilotAction.HOLD, PilotAction.SELL) if buying else (PilotImmediateAction.BUY_NOW, PilotImmediateAction.HOLD, PilotImmediateAction.SELL)):
         if selected_player_side is None or selected_market_ticker is None or selected_market_id is None or selected_contract_side is None or decision_book_sha256 is None:
             _fail("selected_route")
         _exact(selected_player_side, PlayerSide, "selected_route")
@@ -664,11 +780,39 @@ def _validate_route(
 
 
 @dataclass(frozen=True, slots=True)
+class PilotRoute:
+    player_side: PlayerSide
+    market_ticker: str
+    market_id: str
+    contract_side: ContractSide
+    entry_book_sha256: str
+
+    def __post_init__(self) -> None:
+        _exact(self.player_side, PlayerSide, "route")
+        _ticker(self.market_ticker, "route")
+        _id(self.market_id, "route")
+        if self.contract_side is not ContractSide.YES:
+            _fail("route")
+        _digest(self.entry_book_sha256, "route")
+
+
+def _book_for_side(frame: PilotDecisionFrame, side: PlayerSide) -> PilotBookSnapshot:
+    return frame.home_book if side is PlayerSide.HOME else frame.away_book
+
+
+def _route_for_book(book: PilotBookSnapshot) -> PilotRoute:
+    return PilotRoute(book.player_side, book.market_ticker, book.market_id, book.contract_side, book.book_sha256)
+
+
+@dataclass(frozen=True, slots=True)
 class PilotPolicyEstimate:
     supported: bool
     action: PilotAction
     abstention_reason: PilotSupportReason | None
     point_event_sha256: str
+    decision_frame: PilotDecisionFrame
+    decision_frame_sha256: str
+    locked_entry_route: PilotRoute | None
     selected_player_side: PlayerSide | None
     selected_market_ticker: str | None
     selected_market_id: str | None
@@ -687,6 +831,13 @@ class PilotPolicyEstimate:
         _exact(self.supported, bool, "supported")
         _exact(self.action, PilotAction, "action")
         _digest(self.point_event_sha256, "point_event_sha256")
+        if type(self.decision_frame) is not PilotDecisionFrame:
+            _fail("decision_frame")
+        _digest(self.decision_frame_sha256, "decision_frame_sha256")
+        if self.decision_frame_sha256 != self.decision_frame.decision_frame_sha256 or self.point_event_sha256 != pilot_contract_sha256(self.decision_frame.point_event):
+            _fail("decision_frame")
+        if self.locked_entry_route is not None:
+            _exact(self.locked_entry_route, PilotRoute, "locked_entry_route")
         _integer(self.decision_monotonic_ns, "decision_monotonic_ns")
         if self.arrival_due_monotonic_ns is not None:
             _integer(self.arrival_due_monotonic_ns, "arrival_due_monotonic_ns")
@@ -695,6 +846,14 @@ class PilotPolicyEstimate:
         if self.supported == (self.abstention_reason is not None) or (not self.supported and self.action is not PilotAction.ABSTAIN):
             _fail("policy_support")
         _validate_route(action=self.action, selected_player_side=self.selected_player_side, selected_market_ticker=self.selected_market_ticker, selected_market_id=self.selected_market_id, selected_contract_side=self.selected_contract_side, decision_book_sha256=self.decision_book_sha256, requested_quantity=self.requested_quantity, decision_monotonic_ns=self.decision_monotonic_ns, arrival_due_monotonic_ns=self.arrival_due_monotonic_ns, buying=True)
+        if self.action in (PilotAction.BUY, PilotAction.HOLD, PilotAction.SELL):
+            assert self.selected_player_side is not None
+            book = _book_for_side(self.decision_frame, self.selected_player_side)
+            if (self.selected_market_ticker, self.selected_market_id, self.selected_contract_side, self.decision_book_sha256) != (book.market_ticker, book.market_id, book.contract_side, book.book_sha256):
+                _fail("selected_route")
+            if self.action in (PilotAction.HOLD, PilotAction.SELL):
+                if self.locked_entry_route is None or (self.locked_entry_route.player_side, self.locked_entry_route.market_ticker, self.locked_entry_route.market_id, self.locked_entry_route.contract_side) != (book.player_side, book.market_ticker, book.market_id, book.contract_side):
+                    _fail("locked_entry_route")
         for value in (self.buy_value, self.wait_value, self.sell_value, self.hold_value):
             if value is not None:
                 _decimal(value, "policy_value")
@@ -708,6 +867,9 @@ class PilotImmediateBaselineEstimate:
     action: PilotImmediateAction
     abstention_reason: PilotSupportReason | None
     point_event_sha256: str
+    decision_frame: PilotDecisionFrame
+    decision_frame_sha256: str
+    locked_entry_route: PilotRoute | None
     selected_player_side: PlayerSide | None
     selected_market_ticker: str | None
     selected_market_id: str | None
@@ -721,6 +883,13 @@ class PilotImmediateBaselineEstimate:
         _exact(self.supported, bool, "supported")
         _exact(self.action, PilotImmediateAction, "action")
         _digest(self.point_event_sha256, "point_event_sha256")
+        if type(self.decision_frame) is not PilotDecisionFrame:
+            _fail("decision_frame")
+        _digest(self.decision_frame_sha256, "decision_frame_sha256")
+        if self.decision_frame_sha256 != self.decision_frame.decision_frame_sha256 or self.point_event_sha256 != pilot_contract_sha256(self.decision_frame.point_event):
+            _fail("decision_frame")
+        if self.locked_entry_route is not None:
+            _exact(self.locked_entry_route, PilotRoute, "locked_entry_route")
         _integer(self.decision_monotonic_ns, "decision_monotonic_ns")
         if self.arrival_due_monotonic_ns is not None:
             _integer(self.arrival_due_monotonic_ns, "arrival_due_monotonic_ns")
@@ -729,6 +898,86 @@ class PilotImmediateBaselineEstimate:
         if self.supported == (self.abstention_reason is not None) or (not self.supported and self.action is not PilotImmediateAction.ABSTAIN):
             _fail("baseline_support")
         _validate_route(action=self.action, selected_player_side=self.selected_player_side, selected_market_ticker=self.selected_market_ticker, selected_market_id=self.selected_market_id, selected_contract_side=self.selected_contract_side, decision_book_sha256=self.decision_book_sha256, requested_quantity=self.requested_quantity, decision_monotonic_ns=self.decision_monotonic_ns, arrival_due_monotonic_ns=self.arrival_due_monotonic_ns, buying=False)
+        if self.action in (PilotImmediateAction.BUY_NOW, PilotImmediateAction.HOLD, PilotImmediateAction.SELL):
+            assert self.selected_player_side is not None
+            book = _book_for_side(self.decision_frame, self.selected_player_side)
+            if (self.selected_market_ticker, self.selected_market_id, self.selected_contract_side, self.decision_book_sha256) != (book.market_ticker, book.market_id, book.contract_side, book.book_sha256):
+                _fail("selected_route")
+            if self.action in (PilotImmediateAction.HOLD, PilotImmediateAction.SELL) and (self.locked_entry_route is None or self.locked_entry_route.player_side is not book.player_side or self.locked_entry_route.market_ticker != book.market_ticker or self.locked_entry_route.market_id != book.market_id or self.locked_entry_route.contract_side is not book.contract_side):
+                _fail("locked_entry_route")
+
+
+def make_pilot_policy_estimate(
+    *,
+    decision_frame: PilotDecisionFrame,
+    supported: bool,
+    action: PilotAction,
+    abstention_reason: PilotSupportReason | None,
+    selected_player_side: PlayerSide | None,
+    requested_quantity: Decimal,
+    decision_monotonic_ns: int,
+    arrival_due_monotonic_ns: int | None,
+    buy_value: Decimal | None = None,
+    wait_value: Decimal | None = None,
+    sell_value: Decimal | None = None,
+    hold_value: Decimal | None = None,
+    buy_branch_holding_horizon_ns: int | None = None,
+    locked_entry_route: PilotRoute | None = None,
+) -> PilotPolicyEstimate:
+    if type(decision_frame) is not PilotDecisionFrame:
+        _fail("decision_frame")
+    book = _book_for_side(decision_frame, selected_player_side) if selected_player_side is not None else None
+    routed = action in (PilotAction.BUY, PilotAction.HOLD, PilotAction.SELL)
+    if routed != (book is not None):
+        _fail("selected_route")
+    return PilotPolicyEstimate(
+        supported=supported, action=action, abstention_reason=abstention_reason,
+        point_event_sha256=pilot_contract_sha256(decision_frame.point_event),
+        decision_frame=decision_frame, decision_frame_sha256=decision_frame.decision_frame_sha256,
+        locked_entry_route=locked_entry_route if locked_entry_route is not None else (_route_for_book(book) if action is PilotAction.BUY and book is not None else None),
+        selected_player_side=selected_player_side,
+        selected_market_ticker=book.market_ticker if book is not None else None,
+        selected_market_id=book.market_id if book is not None else None,
+        selected_contract_side=book.contract_side if book is not None else None,
+        decision_book_sha256=book.book_sha256 if book is not None else None,
+        requested_quantity=requested_quantity, decision_monotonic_ns=decision_monotonic_ns,
+        arrival_due_monotonic_ns=arrival_due_monotonic_ns, buy_value=buy_value,
+        wait_value=wait_value, sell_value=sell_value, hold_value=hold_value,
+        buy_branch_holding_horizon_ns=buy_branch_holding_horizon_ns,
+    )
+
+
+def make_pilot_immediate_baseline_estimate(
+    *,
+    decision_frame: PilotDecisionFrame,
+    supported: bool,
+    action: PilotImmediateAction,
+    abstention_reason: PilotSupportReason | None,
+    selected_player_side: PlayerSide | None,
+    requested_quantity: Decimal,
+    decision_monotonic_ns: int,
+    arrival_due_monotonic_ns: int | None,
+    locked_entry_route: PilotRoute | None = None,
+) -> PilotImmediateBaselineEstimate:
+    if type(decision_frame) is not PilotDecisionFrame:
+        _fail("decision_frame")
+    book = _book_for_side(decision_frame, selected_player_side) if selected_player_side is not None else None
+    routed = action in (PilotImmediateAction.BUY_NOW, PilotImmediateAction.HOLD, PilotImmediateAction.SELL)
+    if routed != (book is not None):
+        _fail("selected_route")
+    return PilotImmediateBaselineEstimate(
+        supported=supported, action=action, abstention_reason=abstention_reason,
+        point_event_sha256=pilot_contract_sha256(decision_frame.point_event),
+        decision_frame=decision_frame, decision_frame_sha256=decision_frame.decision_frame_sha256,
+        locked_entry_route=locked_entry_route if locked_entry_route is not None else (_route_for_book(book) if action is PilotImmediateAction.BUY_NOW and book is not None else None),
+        selected_player_side=selected_player_side,
+        selected_market_ticker=book.market_ticker if book is not None else None,
+        selected_market_id=book.market_id if book is not None else None,
+        selected_contract_side=book.contract_side if book is not None else None,
+        decision_book_sha256=book.book_sha256 if book is not None else None,
+        requested_quantity=requested_quantity, decision_monotonic_ns=decision_monotonic_ns,
+        arrival_due_monotonic_ns=arrival_due_monotonic_ns,
+    )
 
 
 @dataclass(frozen=True, slots=True)
