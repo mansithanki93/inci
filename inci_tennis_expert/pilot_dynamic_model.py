@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from decimal import Context, Decimal, DecimalException, ROUND_HALF_EVEN, localcontext
 from enum import Enum
+from fractions import Fraction
 from re import ASCII as RE_ASCII
 from re import compile as pattern_compile
 
@@ -66,7 +67,7 @@ def _weights(value: object, name: str) -> tuple[Decimal, Decimal, Decimal]:
         for weight in value
     ):
         _fail(name)
-    if sum(value, Decimal("0")) != Decimal("1"):
+    if sum((Fraction(weight) for weight in value), Fraction(0)) != Fraction(1):
         _fail(name)
     return value
 
@@ -241,6 +242,24 @@ def _serve_artifact_is_authentic(artifact: ServeStrengthArtifact) -> bool:
         return False
 
 
+def _dynamic_artifact_is_authentic(artifact: DynamicPointArtifact) -> bool:
+    try:
+        return artifact.artifact_sha256 == compute_dynamic_point_artifact_sha256(
+            version=artifact.version,
+            target_canonical_match_id=artifact.target_canonical_match_id,
+            target_scheduled_start_wall_ns=artifact.target_scheduled_start_wall_ns,
+            cutoff_wall_ns=artifact.cutoff_wall_ns,
+            training_match_ids=artifact.training_match_ids,
+            validation_match_ids=artifact.validation_match_ids,
+            source_data_sha256=artifact.source_data_sha256,
+            feature_definition_sha256=artifact.feature_definition_sha256,
+            code_sha256=artifact.code_sha256,
+            selected=artifact.selected,
+        )
+    except Exception:
+        return False
+
+
 def _event_matches_artifacts(
     event: PilotPointEvent,
     serve_artifact: ServeStrengthArtifact,
@@ -259,19 +278,7 @@ def _event_matches_artifacts(
             and event.canonical_match_id not in dynamic_artifact.training_match_ids
             and event.canonical_match_id not in dynamic_artifact.validation_match_ids
             and _serve_artifact_is_authentic(serve_artifact)
-            and dynamic_artifact.artifact_sha256
-            == compute_dynamic_point_artifact_sha256(
-                version=dynamic_artifact.version,
-                target_canonical_match_id=dynamic_artifact.target_canonical_match_id,
-                target_scheduled_start_wall_ns=dynamic_artifact.target_scheduled_start_wall_ns,
-                cutoff_wall_ns=dynamic_artifact.cutoff_wall_ns,
-                training_match_ids=dynamic_artifact.training_match_ids,
-                validation_match_ids=dynamic_artifact.validation_match_ids,
-                source_data_sha256=dynamic_artifact.source_data_sha256,
-                feature_definition_sha256=dynamic_artifact.feature_definition_sha256,
-                code_sha256=dynamic_artifact.code_sha256,
-                selected=dynamic_artifact.selected,
-            )
+            and _dynamic_artifact_is_authentic(dynamic_artifact)
         )
     except Exception:
         return False
@@ -283,8 +290,16 @@ def _state_probability(baseline: Decimal, offset: Decimal) -> Decimal:
         type(baseline) is not Decimal
         or not baseline.is_finite()
         or not Decimal("0") < baseline < Decimal("1")
+        or type(offset) is not Decimal
+        or not offset.is_finite()
     ):
         _fail("serve_probability")
+    if offset.adjusted() > _CONTEXT.Emax:
+        return (
+            Decimal("1") - _SCORER_EPSILON
+            if offset > 0
+            else _SCORER_EPSILON
+        )
     try:
         with localcontext(_CONTEXT):
             log_odds = baseline.ln() - (Decimal("1") - baseline).ln()
@@ -331,10 +346,10 @@ def _persist_weights(
         recipient = max(range(3), key=lambda index: (normalized[index], -index))
         persisted[recipient] += residual
         result = tuple(persisted)
-    if (
-        any(value < 0 for value in result)
-        or sum(result, Decimal("0")) != Decimal("1")
-    ):
+    if any(value < 0 for value in result) or sum(
+        (Fraction(value) for value in result),
+        Fraction(0),
+    ) != Fraction(1):
         _fail("belief_normalization")
     return result  # type: ignore[return-value]
 
@@ -427,6 +442,7 @@ class DynamicPointModel:
             or serve_artifact.target_scheduled_start_wall_ns
             != dynamic_artifact.target_scheduled_start_wall_ns
             or not _serve_artifact_is_authentic(serve_artifact)
+            or not _dynamic_artifact_is_authentic(dynamic_artifact)
         ):
             _fail("artifact_mismatch")
         initial_event_sha256 = pilot_contract_sha256(

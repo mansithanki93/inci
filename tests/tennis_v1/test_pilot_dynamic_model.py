@@ -206,6 +206,90 @@ def _model(
 
 
 class DynamicPointModelTests(unittest.TestCase):
+    def test_candidate_rejects_tiny_excess_initial_mass_exactly(self) -> None:
+        with self.assertRaisesRegex(
+            DynamicPointModelError,
+            "^home_initial_weights$",
+        ):
+            replace(
+                _candidate(),
+                home_initial_weights=(
+                    Decimal("1"),
+                    Decimal("1e-100"),
+                    Decimal("0"),
+                ),
+            )
+
+    def test_candidate_rejects_tiny_excess_transition_mass_exactly(self) -> None:
+        candidate = _candidate()
+        with self.assertRaisesRegex(
+            DynamicPointModelError,
+            "^transition_matrix$",
+        ):
+            replace(
+                candidate,
+                transition_matrix=(
+                    (
+                        Decimal("1"),
+                        Decimal("1e-100"),
+                        Decimal("0"),
+                    ),
+                    candidate.transition_matrix[1],
+                    candidate.transition_matrix[2],
+                ),
+            )
+
+    def test_positive_offset_beyond_decimal_emax_is_open_and_finite(self) -> None:
+        model = _model(offsets=(Decimal("1e1000000"),) * 3)
+
+        for side in (PlayerSide.HOME, PlayerSide.AWAY):
+            for probability in model.state_serve_probabilities(side):
+                self.assertTrue(probability.is_finite())
+                self.assertGreater(probability, Decimal("0"))
+                self.assertLess(probability, Decimal("1"))
+        self.assertTrue(model.evaluate(_point()).supported)
+
+    def test_negative_offset_beyond_decimal_emax_is_open_and_finite(self) -> None:
+        model = _model(offsets=(Decimal("-1e1000000"),) * 3)
+
+        for side in (PlayerSide.HOME, PlayerSide.AWAY):
+            for probability in model.state_serve_probabilities(side):
+                self.assertTrue(probability.is_finite())
+                self.assertGreater(probability, Decimal("0"))
+                self.assertLess(probability, Decimal("1"))
+        self.assertTrue(model.evaluate(_point()).supported)
+
+    def test_initialize_rejects_tampered_dynamic_artifact_payload(self) -> None:
+        candidate = _candidate()
+        cases = (
+            ("cutoff", "cutoff_wall_ns", 8_998),
+            ("partitions", "training_match_ids", ("other-training",)),
+            (
+                "selected",
+                "selected",
+                _candidate(
+                    (
+                        Decimal("-0.6"),
+                        Decimal("0"),
+                        Decimal("0.6"),
+                    )
+                ),
+            ),
+        )
+        for label, field, value in cases:
+            with self.subTest(tamper=label):
+                artifact = _artifact(candidate)
+                object.__setattr__(artifact, field, value)
+
+                with self.assertRaisesRegex(
+                    DynamicPointModelError,
+                    "^artifact_mismatch$",
+                ):
+                    DynamicPointModel.initialize(
+                        serve_artifact=_serve_artifact(),
+                        dynamic_artifact=artifact,
+                    )
+
     def test_server_win_moves_home_mass_upward(self) -> None:
         model = _model()
         before = model.belief
