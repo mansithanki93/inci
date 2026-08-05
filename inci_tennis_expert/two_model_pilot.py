@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from decimal import Decimal
 from enum import Enum
+from re import ASCII as RE_ASCII
+from re import compile as pattern_compile
 
 from inci_tennis_expert.contracts import SetScore, TennisState
 from inci_tennis_expert.pilot_contracts import (
@@ -47,6 +49,8 @@ _CODE_VERSION = "two-model-pilot-v1"
 _SCHEMA_VERSION = "two-model-comparison-v1"
 _CLAIM = "PLUMBING_ONLY"
 _AUTHORITY = "RESEARCH_ONLY / NO_ORDERS"
+_ID = pattern_compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z", RE_ASCII)
+_MAX_SIGNED_64 = 9_223_372_036_854_775_807
 
 
 class TwoModelPilotError(ValueError):
@@ -168,6 +172,65 @@ def _event_is_authentic(event: object) -> bool:
         }
         values["before_state"], values["after_state"] = states
         return PilotPointEvent(**values) == event
+    except Exception:
+        return False
+
+
+def _rebuilt_tennis_state(state: object) -> TennisState:
+    if type(state) is not TennisState or type(state.completed_sets) is not tuple:
+        _fail("state")
+    completed_sets = tuple(
+        SetScore(
+            **{
+                field.name: getattr(set_score, field.name)
+                for field in fields(SetScore)
+            }
+        )
+        for set_score in state.completed_sets
+        if type(set_score) is SetScore
+    )
+    if len(completed_sets) != len(state.completed_sets):
+        _fail("state")
+    values = {
+        field.name: getattr(state, field.name)
+        for field in fields(TennisState)
+    }
+    values["completed_sets"] = completed_sets
+    return TennisState(**values)
+
+
+def _state_is_authentic(state: TwoModelPilotState) -> bool:
+    try:
+        belief = DynamicBeliefSnapshot(
+            **{
+                field.name: getattr(state.dynamic_model.belief, field.name)
+                for field in fields(DynamicBeliefSnapshot)
+            }
+        )
+        dynamic_model = DynamicPointModel(
+            serve_artifact=state.static_artifact,
+            dynamic_artifact=state.dynamic_artifact,
+            belief=belief,
+            observed_point_ids=state.dynamic_model.observed_point_ids,
+        )
+        last_after_state = (
+            None
+            if state.last_after_state is None
+            else _rebuilt_tennis_state(state.last_after_state)
+        )
+        rebuilt = TwoModelPilotState(
+            schema_version=state.schema_version,
+            code_version=state.code_version,
+            static_artifact=state.static_artifact,
+            dynamic_artifact=state.dynamic_artifact,
+            dynamic_model=dynamic_model,
+            last_valid_sequence_number=state.last_valid_sequence_number,
+            seen_point_ids=state.seen_point_ids,
+            correction_epoch=state.correction_epoch,
+            last_after_state=last_after_state,
+            state_sha256=state.state_sha256,
+        )
+        return rebuilt == state
     except Exception:
         return False
 
@@ -294,11 +357,12 @@ class TwoModelComparisonRow:
                 and type(self.abstention_reason) is not TwoModelAbstentionReason
             )
             or type(self.canonical_match_id) is not str
-            or not self.canonical_match_id
+            or _ID.fullmatch(self.canonical_match_id) is None
             or type(self.point_id) is not str
-            or not self.point_id
+            or _ID.fullmatch(self.point_id) is None
             or type(self.sequence_number) is not int
             or self.sequence_number <= 0
+            or self.sequence_number > _MAX_SIGNED_64
             or any(
                 type(digest) is not str
                 or len(digest) != 64
@@ -398,6 +462,8 @@ def _validation_reason(
         or state.dynamic_model.dynamic_artifact != state.dynamic_artifact
     ):
         return TwoModelAbstentionReason.ARTIFACT_MISMATCH
+    if not _state_is_authentic(state):
+        _fail("state")
     if not _event_is_authentic(event):
         return TwoModelAbstentionReason.INVALID_EVENT
     if event.canonical_match_id != state.static_artifact.target_canonical_match_id:
@@ -443,6 +509,25 @@ def _abstention_row(
     reason: TwoModelAbstentionReason,
 ) -> TwoModelComparisonRow:
     support_reason = _support_reason(reason)
+    event_sha256 = pilot_contract_sha256(event)
+    canonical_match_id = (
+        event.canonical_match_id
+        if type(event.canonical_match_id) is str
+        and _ID.fullmatch(event.canonical_match_id) is not None
+        else f"invalid-match-{event_sha256[:16]}"
+    )
+    point_id = (
+        event.point_id
+        if type(event.point_id) is str
+        and _ID.fullmatch(event.point_id) is not None
+        else f"invalid-point-{event_sha256[:16]}"
+    )
+    sequence_number = (
+        event.sequence_number
+        if type(event.sequence_number) is int
+        and 0 < event.sequence_number <= _MAX_SIGNED_64
+        else 1
+    )
     return _make_row(
         schema_version=_SCHEMA_VERSION,
         code_version=_CODE_VERSION,
@@ -450,10 +535,10 @@ def _abstention_row(
         authority=_AUTHORITY,
         status=TwoModelRowStatus.ABSTAINED,
         abstention_reason=reason,
-        canonical_match_id=event.canonical_match_id,
-        point_id=event.point_id,
-        sequence_number=event.sequence_number,
-        point_event_sha256=pilot_contract_sha256(event),
+        canonical_match_id=canonical_match_id,
+        point_id=point_id,
+        sequence_number=sequence_number,
+        point_event_sha256=event_sha256,
         static_artifact_sha256=state.static_artifact.artifact_sha256,
         dynamic_artifact_sha256=state.dynamic_artifact.artifact_sha256,
         prior_state_sha256=state.state_sha256,

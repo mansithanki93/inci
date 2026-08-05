@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import tempfile
 
 from inci_tennis_expert.contracts import (
     MatchFormat,
@@ -241,19 +242,28 @@ def _read_replay(path: Path) -> tuple[PilotPointEvent, ...]:
 
 def _write_exclusive(path: Path, data: bytes) -> None:
     candidate = _absolute(path, "output")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    temporary_path: Path | None = None
     try:
-        descriptor = os.open(candidate, flags, 0o600)
-        try:
-            view = memoryview(data)
-            while view:
-                written = os.write(descriptor, view)
-                if written <= 0:
-                    _halt("output_write")
-                view = view[written:]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{candidate.name}.",
+            suffix=".tmp",
+            dir=candidate.parent,
+        )
+        temporary_path = Path(temporary_name)
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                _halt("output_write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.link(temporary_path, candidate, follow_symlinks=False)
+        os.unlink(temporary_path)
+        temporary_path = None
         parent_descriptor = os.open(candidate.parent, os.O_RDONLY)
         try:
             os.fsync(parent_descriptor)
@@ -263,6 +273,19 @@ def _write_exclusive(path: Path, data: bytes) -> None:
         raise
     except OSError as error:
         raise PilotCliError("output") from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
 
 def _serve_example() -> ServeStrengthArtifact:

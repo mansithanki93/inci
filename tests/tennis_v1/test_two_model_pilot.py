@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import replace
+from dataclasses import fields, replace
 from decimal import Decimal
+import errno
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from inci_tennis_expert.contracts import (
     MatchFormat,
@@ -25,6 +28,7 @@ from inci_tennis_expert.pilot_contracts import (
     canonical_pilot_contract_bytes,
     compute_serve_strength_artifact_sha256,
     compute_training_match_ids_sha256,
+    pilot_contract_sha256,
 )
 from inci_tennis_expert.pilot_dynamic_model import (
     DynamicParameterCandidate,
@@ -35,11 +39,13 @@ from inci_tennis_expert.pilot_static_model import evaluate_static_outcome
 from inci_tennis_expert.tennis_score import apply_point
 from inci_tennis_expert.two_model_pilot import (
     TwoModelAbstentionReason,
+    TwoModelPilotError,
     TwoModelRowStatus,
     encode_two_model_rows,
     initialize_two_model_pilot,
     run_two_model_event,
 )
+from inci_tennis_runtime.two_model_pilot_cli import PilotCliError, _write_exclusive
 
 
 SHA_A = "a" * 64
@@ -234,6 +240,75 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[bytes]:
 
 
 class TwoModelPilotTests(unittest.TestCase):
+    def test_untrusted_state_digest_halts_before_model_prediction(self) -> None:
+        state = _initialized()
+        object.__setattr__(state, "state_sha256", "f" * 64)
+        event = _event(
+            point_id="point-1",
+            sequence_number=1,
+            before=_initial_state(),
+            winner=PlayerSide.HOME,
+        )
+
+        with patch.object(
+            type(state.dynamic_model),
+            "predictive_home_point_probability",
+            side_effect=AssertionError("prediction reached"),
+        ):
+            with self.assertRaisesRegex(TwoModelPilotError, "^state$"):
+                run_two_model_event(state, event)
+
+        self.assertEqual(state.last_valid_sequence_number, 0)
+        self.assertEqual(state.dynamic_model.observed_point_ids, ())
+
+    def test_nested_belief_or_model_tamper_halts_before_sequence_advance(self) -> None:
+        event = _event(
+            point_id="point-1",
+            sequence_number=1,
+            before=_initial_state(),
+            winner=PlayerSide.HOME,
+        )
+        cases = (
+            (
+                "belief_weights",
+                lambda state: object.__setattr__(
+                    state.dynamic_model.belief,
+                    "home_weights",
+                    (Decimal("1"), Decimal("0"), Decimal("0")),
+                ),
+            ),
+            (
+                "belief_digest",
+                lambda state: object.__setattr__(
+                    state.dynamic_model.belief,
+                    "belief_sha256",
+                    "f" * 64,
+                ),
+            ),
+            (
+                "model_observed_ids",
+                lambda state: object.__setattr__(
+                    state.dynamic_model,
+                    "observed_point_ids",
+                    ("ghost-point",),
+                ),
+            ),
+        )
+        for label, mutate in cases:
+            with self.subTest(tamper=label):
+                state = _initialized()
+                mutate(state)
+
+                with patch.object(
+                    type(state.dynamic_model),
+                    "predictive_home_point_probability",
+                    side_effect=AssertionError("prediction reached"),
+                ):
+                    with self.assertRaisesRegex(TwoModelPilotError, "^state$"):
+                        run_two_model_event(state, event)
+
+                self.assertEqual(state.last_valid_sequence_number, 0)
+
     def test_static_and_causal_dynamic_outputs_share_exact_point(self) -> None:
         state = _initialized()
         event = _event(
@@ -241,6 +316,9 @@ class TwoModelPilotTests(unittest.TestCase):
             sequence_number=1,
             before=_initial_state(),
             winner=PlayerSide.HOME,
+        )
+        expected_pre_point_probability = (
+            state.dynamic_model.predictive_home_point_probability(event)
         )
 
         next_state, row = run_two_model_event(state, event)
@@ -250,6 +328,10 @@ class TwoModelPilotTests(unittest.TestCase):
         self.assertEqual(row.point_id, event.point_id)
         self.assertEqual(row.dynamic_prior_belief, state.dynamic_model.belief)
         self.assertEqual(row.dynamic_post_belief, next_state.dynamic_model.belief)
+        self.assertEqual(
+            row.dynamic_pre_home_point_probability,
+            expected_pre_point_probability,
+        )
         self.assertNotEqual(
             row.dynamic_pre_home_point_probability,
             row.model_2_dynamic.home_next_point_probability,
@@ -343,6 +425,55 @@ class TwoModelPilotTests(unittest.TestCase):
         self.assertFalse(row.model_1_static.supported)
         self.assertFalse(row.model_2_dynamic.supported)
 
+    def test_invalid_event_identity_uses_safe_digest_bound_abstention_fields(self) -> None:
+        cases = (
+            ("point_id", "", "point_id"),
+            ("canonical_match_id", "bad match", "canonical_match_id"),
+            ("sequence_number", 0, "sequence_number"),
+            ("sequence_type", "one", "sequence_number"),
+        )
+        for label, value, field_name in cases:
+            with self.subTest(tamper=label):
+                state = _initialized()
+                event = _event(
+                    point_id="point-1",
+                    sequence_number=1,
+                    before=_initial_state(),
+                    winner=PlayerSide.HOME,
+                )
+                object.__setattr__(event, field_name, value)
+                event_sha256 = pilot_contract_sha256(event)
+
+                returned, row = run_two_model_event(state, event)
+
+                self.assertIs(returned, state)
+                self.assertIs(row.status, TwoModelRowStatus.ABSTAINED)
+                self.assertIs(
+                    row.abstention_reason,
+                    TwoModelAbstentionReason.INVALID_EVENT,
+                )
+                self.assertEqual(row.point_event_sha256, event_sha256)
+                expected_point_id = (
+                    f"invalid-point-{event_sha256[:16]}"
+                    if field_name == "point_id"
+                    else "point-1"
+                )
+                expected_match_id = (
+                    f"invalid-match-{event_sha256[:16]}"
+                    if field_name == "canonical_match_id"
+                    else "match-1"
+                )
+                self.assertEqual(row.point_id, expected_point_id)
+                self.assertEqual(row.canonical_match_id, expected_match_id)
+                self.assertEqual(
+                    row.sequence_number,
+                    1,
+                )
+                self.assertEqual(
+                    row.prior_state_sha256,
+                    row.resulting_state_sha256,
+                )
+
     def test_identical_replays_are_byte_identical(self) -> None:
         first = _event(
             point_id="point-1",
@@ -372,10 +503,34 @@ class TwoModelPilotTests(unittest.TestCase):
 
 
 class TwoModelPilotCliTests(unittest.TestCase):
+    def test_atomic_output_failure_leaves_no_partial_final_or_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            output = directory / "comparison.jsonl"
+            original_write = os.write
+            calls = 0
+
+            def short_then_enospc(fd: int, data: object) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return original_write(fd, memoryview(data)[:7])
+                raise OSError(errno.ENOSPC, "synthetic disk full")
+
+            with patch(
+                "inci_tennis_runtime.two_model_pilot_cli.os.write",
+                side_effect=short_then_enospc,
+            ):
+                with self.assertRaisesRegex(PilotCliError, "^output$"):
+                    _write_exclusive(output, b"canonical-comparison-bytes")
+
+            self.assertFalse(output.exists())
+            self.assertEqual(tuple(directory.iterdir()), ())
+
     def test_cli_runs_real_synthetic_fixture_and_writes_only_comparison_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            replay, static, dynamic, _ = _write_inputs(directory)
+            replay, static, dynamic, events = _write_inputs(directory)
             output = directory / "comparison.jsonl"
             second_output = directory / "comparison-second.jsonl"
 
@@ -407,16 +562,54 @@ class TwoModelPilotCliTests(unittest.TestCase):
                 second_result.stderr.decode(),
             )
             self.assertEqual(output.read_bytes(), second_output.read_bytes())
+            state = _initialized()
+            expected_rows = []
+            for event in events:
+                state, row = run_two_model_event(state, event)
+                expected_rows.append(row)
+            self.assertEqual(
+                output.read_bytes(),
+                encode_two_model_rows(tuple(expected_rows)),
+            )
             rows = output.read_bytes().splitlines()
             self.assertEqual(len(rows), 2)
-            for encoded in rows:
+            for encoded, event, expected_row in zip(
+                rows,
+                events,
+                expected_rows,
+                strict=True,
+            ):
                 document = json.loads(encoded)
                 value = document["value"]
+                row_fields = value["fields"]
                 self.assertEqual(value["$contract"], "TwoModelComparisonRow")
-                self.assertEqual(value["fields"]["claim"], "PLUMBING_ONLY")
+                self.assertEqual(row_fields["claim"], "PLUMBING_ONLY")
                 self.assertEqual(
-                    value["fields"]["authority"],
+                    row_fields["authority"],
                     "RESEARCH_ONLY / NO_ORDERS",
+                )
+                self.assertEqual(
+                    row_fields["status"],
+                    {"$enum": "TwoModelRowStatus", "value": "models_evaluated"},
+                )
+                self.assertTrue(row_fields["model_1_static"]["fields"]["supported"])
+                self.assertTrue(row_fields["model_2_dynamic"]["fields"]["supported"])
+                self.assertEqual(
+                    row_fields["point_event_sha256"],
+                    pilot_contract_sha256(event),
+                )
+                row_projection = {
+                    field.name: getattr(expected_row, field.name)
+                    for field in fields(expected_row)
+                    if field.name != "row_sha256"
+                }
+                self.assertEqual(
+                    expected_row.row_sha256,
+                    pilot_contract_sha256(row_projection),
+                )
+                self.assertEqual(
+                    row_fields["row_sha256"],
+                    expected_row.row_sha256,
                 )
 
     def test_cli_rejects_symlink_existing_output_malformed_partial_and_tamper(self) -> None:
@@ -455,12 +648,45 @@ class TwoModelPilotCliTests(unittest.TestCase):
                         str(output),
                     )
                     self.assertEqual(result.returncode, 1, result.stderr.decode())
+            self.assertEqual(existing.read_bytes(), b"keep")
+            self.assertFalse(
+                any(path.name.endswith(".tmp") for path in directory.iterdir())
+            )
 
     def test_cli_usage_errors_return_two(self) -> None:
         result = _run_cli("--replay", "/missing")
         self.assertEqual(result.returncode, 2)
 
     def test_modules_have_no_live_or_trading_dependency(self) -> None:
+        allowed = {
+            "inci_tennis_expert/two_model_pilot.py": {
+                "__future__",
+                "dataclasses",
+                "decimal",
+                "enum",
+                "re",
+                "inci_tennis_expert.contracts",
+                "inci_tennis_expert.pilot_contracts",
+                "inci_tennis_expert.pilot_dynamic_model",
+                "inci_tennis_expert.pilot_static_model",
+            },
+            "inci_tennis_runtime/two_model_pilot_cli.py": {
+                "__future__",
+                "argparse",
+                "decimal",
+                "json",
+                "os",
+                "pathlib",
+                "stat",
+                "sys",
+                "tempfile",
+                "inci_tennis_expert.contracts",
+                "inci_tennis_expert.pilot_contracts",
+                "inci_tennis_expert.pilot_dynamic_model",
+                "inci_tennis_expert.tennis_score",
+                "inci_tennis_expert.two_model_pilot",
+            },
+        }
         forbidden = {
             "socket",
             "urllib",
@@ -489,6 +715,11 @@ class TwoModelPilotCliTests(unittest.TestCase):
                     imported.update(alias.name for alias in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.module is not None:
                     imported.add(node.module)
+            self.assertEqual(
+                imported - allowed[relative],
+                set(),
+                f"{relative}: unexpected imports",
+            )
             components = {
                 component
                 for module in imported
