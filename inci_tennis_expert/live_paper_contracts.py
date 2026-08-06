@@ -212,6 +212,7 @@ class LivePaperSourceObservation:
     raw_receipt_sha256: str
     captured_wall_ns: int
     captured_monotonic_ns: int
+    independence_proof_sha256: str | None = None
     authority_label: str = _PAPER_LOCAL_REVISION_AUTHORITY
 
     def __post_init__(self) -> None:
@@ -226,6 +227,12 @@ class LivePaperSourceObservation:
         _digest(self.raw_receipt_sha256, "raw_receipt_sha256")
         _integer(self.captured_wall_ns, "captured_wall_ns")
         _integer(self.captured_monotonic_ns, "captured_monotonic_ns")
+        if self.independence_proof_sha256 is not None:
+            _digest(self.independence_proof_sha256, "independence_proof_sha256")
+        if (self.independence_proven is True) != (
+            self.independence_proof_sha256 is not None
+        ):
+            _fail("independence_proof_sha256")
         if self.authority_label != _PAPER_LOCAL_REVISION_AUTHORITY:
             _fail("authority_label")
 
@@ -236,6 +243,7 @@ class LivePaperSupport:
     lineage_sha256: str
     independent_lineage_id: str
     independence_proven: bool
+    independence_proof_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _digest(self.raw_receipt_sha256, "raw_receipt_sha256")
@@ -243,6 +251,10 @@ class LivePaperSupport:
         _id(self.independent_lineage_id, "independent_lineage_id")
         if type(self.independence_proven) is not bool:
             _fail("independence_proven")
+        if self.independence_proof_sha256 is not None:
+            _digest(self.independence_proof_sha256, "independence_proof_sha256")
+        if self.independence_proven != (self.independence_proof_sha256 is not None):
+            _fail("independence_proof_sha256")
 
 
 def _supporting_sources(

@@ -124,6 +124,7 @@ def _observation(
     captured_monotonic_ns: int = 1_000,
     canonical_match_id: str = "match-1",
     raw_receipt_sha256: str = SHA_D,
+    independence_proof_sha256: str | None = SHA_B,
 ) -> object:
     contracts, _ = api
     return contracts.LivePaperSourceObservation(
@@ -137,6 +138,9 @@ def _observation(
         raw_receipt_sha256=raw_receipt_sha256,
         captured_wall_ns=captured_monotonic_ns,
         captured_monotonic_ns=captured_monotonic_ns,
+        independence_proof_sha256=(
+            independence_proof_sha256 if independent is True else None
+        ),
     )
 
 
@@ -180,12 +184,19 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
             score.initial_live_paper_score_coordinator_state("match-1"),
             (
                 _observation(api, before),
-                _observation(api, twin, source_id="source-b", lineage_id="lineage-b", lineage_sha256=SHA_B, raw_receipt_sha256=SHA_C),
+                _observation(api, twin, source_id="source-b", lineage_id="lineage-b", lineage_sha256=SHA_B, raw_receipt_sha256=SHA_C, independence_proof_sha256=SHA_D),
             ),
         )
 
         self.assertIs(decision.anchor.trust, contracts.PaperScoreTrust.CONSENSUS_PAPER)
         self.assertEqual(decision.anchor.supporting_lineage_sha256s, (SHA_A, SHA_B))
+        self.assertEqual(
+            tuple(
+                (support.raw_receipt_sha256, support.independence_proof_sha256)
+                for support in decision.anchor.supporting_sources
+            ),
+            ((SHA_C, SHA_D), (SHA_D, SHA_B)),
+        )
 
     def test_mirrored_endpoints_on_one_lineage_remain_single_source_paper(self) -> None:
         api = _api()
@@ -317,9 +328,26 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
             SHA_D, "fixture", facts, None, None, (), True,
         )
 
+        with self.assertRaisesRegex(ValueError, "^independence_proof_sha256$"):
+            score.observation_from_live_score_facts(
+                canonical_match_id="match-1", context=context,
+                normalized=normalized, local_revision=7,
+                independence_proof_sha256=None,
+            )
+        unproven_context = replace(context, lineage_independence_proven=False)
+        unproven_normalized = replace(
+            normalized, lineage_independence_proven=False,
+        )
+        with self.assertRaisesRegex(ValueError, "^independence_proof_sha256$"):
+            score.observation_from_live_score_facts(
+                canonical_match_id="match-1", context=unproven_context,
+                normalized=unproven_normalized, local_revision=7,
+                independence_proof_sha256=SHA_C,
+            )
+
         observation = score.observation_from_live_score_facts(
             canonical_match_id="match-1", context=context, normalized=normalized,
-            local_revision=7,
+            local_revision=7, independence_proof_sha256=SHA_C,
         )
 
         self.assertEqual(observation.canonical_match_id, "match-1")
@@ -330,8 +358,8 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
     def test_consensus_contract_requires_auditable_proven_support_mapping(self) -> None:
         api = _api()
         contracts, _ = api
-        support_a = contracts.LivePaperSupport(SHA_A, SHA_B, "lineage-a", False)
-        support_b = contracts.LivePaperSupport(SHA_C, SHA_D, "lineage-b", True)
+        support_a = contracts.LivePaperSupport(SHA_A, SHA_B, "lineage-a", False, None)
+        support_b = contracts.LivePaperSupport(SHA_C, SHA_D, "lineage-b", True, SHA_A)
 
         with self.assertRaisesRegex(contracts.LivePaperContractError, "^consensus_support$"):
             contracts.make_live_paper_anchor(
@@ -347,6 +375,30 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
                 accepted_monotonic_ns=1_000,
                 supporting_independent_lineage_ids=("lineage-a", "lineage-b"),
                 supporting_sources=(support_a, support_b),
+            )
+
+    def test_proven_lineage_requires_proof_and_unproven_lineage_rejects_one(self) -> None:
+        api = _api()
+        contracts, _ = api
+        values = dict(
+            canonical_match_id="match-1",
+            provider_slot="fixture",
+            source_id="source-a",
+            independent_lineage_id="lineage-a",
+            lineage_sha256=SHA_A,
+            state=_state(),
+            raw_receipt_sha256=SHA_D,
+            captured_wall_ns=1_000,
+            captured_monotonic_ns=1_000,
+        )
+
+        with self.assertRaisesRegex(contracts.LivePaperContractError, "^independence_proof_sha256$"):
+            contracts.LivePaperSourceObservation(
+                independence_proven=True, independence_proof_sha256=None, **values
+            )
+        with self.assertRaisesRegex(contracts.LivePaperContractError, "^independence_proof_sha256$"):
+            contracts.LivePaperSourceObservation(
+                independence_proven=False, independence_proof_sha256=SHA_B, **values
             )
 
     def test_exact_successor_emits_exact_winner_server_and_one_ordinal(self) -> None:

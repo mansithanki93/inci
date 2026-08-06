@@ -116,3 +116,38 @@ OK
 `git diff --check` completed successfully. The fix adds immutable
 `LivePaperSupport` entries that bind every accepted receipt to its lineage,
 independence ID, and proof flag; consensus requires two proven support records.
+
+## Fix round 2 (2026-08-05)
+
+### RED
+
+```text
+$ /Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest \
+  tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_proven_lineage_requires_proof_and_unproven_lineage_rejects_one \
+  tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_two_proven_independent_lineages_upgrade_anchor_to_consensus \
+  tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_facts_projection_binds_canonical_match_and_uses_paper_local_revision_identity -v
+Ran 3 tests in 0.019s
+FAILED (errors=3)
+```
+
+Each error was expected: `LivePaperSourceObservation` and
+`observation_from_live_score_facts` did not yet accept
+`independence_proof_sha256`, so a true independence claim lacked a durable
+proof reference.
+
+### GREEN
+
+```text
+$ /Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest \
+  tests.tennis_v1.test_live_paper_score tests.tennis_v1.test_tennis_score \
+  tests.tennis_v1.test_pilot_contracts -v
+Ran 51 tests in 0.047s
+OK
+```
+
+`independence_proof_sha256` is now required and digest-validated exactly when
+`independence_proven` is true; false/unknown claims reject a proof. The facts
+projection requires it whenever the manifest-bound context claims proof. Each
+consensus support record carries the proof digest into its enclosing anchor or
+transition digest. This round references, but deliberately does not validate,
+the proof content against a manifest; that is deferred to Task 5.

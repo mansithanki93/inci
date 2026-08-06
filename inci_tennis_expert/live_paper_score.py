@@ -81,6 +81,7 @@ def _selection(observations: tuple[LivePaperSourceObservation, ...], now_monoton
             item.lineage_sha256,
             item.independent_lineage_id,
             item.independence_proven is True,
+            item.independence_proof_sha256,
         )
         existing = supports_by_receipt.get(support.raw_receipt_sha256)
         if existing is not None and existing != support:
@@ -250,7 +251,7 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
     return next_state, _decision(LivePaperScoreDecisionKind.POINT_ACCEPTED, trust=trust, anchor=anchor, transition=transition, reason="exact_point_successor")
 
 
-def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveScoreCaptureContext, normalized: NormalizedLiveScore, local_revision: int) -> LivePaperSourceObservation:
+def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveScoreCaptureContext, normalized: NormalizedLiveScore, local_revision: int, independence_proof_sha256: str | None) -> LivePaperSourceObservation:
     """Project parser facts into the separate, locally-revisioned paper domain."""
     if type(canonical_match_id) is not str or not canonical_match_id:
         raise ValueError("canonical_match_id")
@@ -258,6 +259,11 @@ def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveS
         raise TypeError("capture")
     if type(local_revision) is not int or local_revision <= 0:
         raise ValueError("local_revision")
+    if context.lineage_independence_proven is True:
+        if type(independence_proof_sha256) is not str:
+            raise ValueError("independence_proof_sha256")
+    elif independence_proof_sha256 is not None:
+        raise ValueError("independence_proof_sha256")
     facts = normalized.facts
     if facts is None or normalized.provider_source_id != context.provider_source_id or normalized.source_lineage_sha256 != context.source_lineage_sha256 or normalized.raw_capture_id != context.raw_capture_id or normalized.lineage_independence_proven != context.lineage_independence_proven:
         raise ValueError("paper_score_facts")
@@ -316,5 +322,6 @@ def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveS
         raw_receipt_sha256=normalized.raw_sha256,
         captured_wall_ns=context.local_capture_wall_ns,
         captured_monotonic_ns=context.local_capture_monotonic_ns,
+        independence_proof_sha256=independence_proof_sha256,
         authority_label="PAPER_LOCAL_REVISION_TRANSPORT_ONLY",
     )
