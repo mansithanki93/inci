@@ -4,6 +4,10 @@ unless the take-profit clears fees at that entry price (fix #4).
 Size is capped to visible ask depth so the edge gate matches what a
 delayed IOC can actually lift. Positions support partial fills (fix #2)
 and P&L is net of fees.
+
+Take-profit is variable when tp_trail_cents > 0: take_profit only ARMS the
+exit after a fee-covering move; the position then tracks the peak bid and
+sells on a trail giveback so a set-driven spike can run past the floor.
 """
 import time
 from dataclasses import dataclass
@@ -20,6 +24,7 @@ class Position:
     contracts: Decimal        # currently held
     opened_at: float
     entry_fee_usd: Decimal
+    peak_bid: Decimal | None = None  # high-water mark for trailing TP
 
 
 class ScalpStrategy:
@@ -66,11 +71,11 @@ class ScalpStrategy:
         if depth <= 0:
             return None
         size = min(Decimal(str(self.cfg.contracts_per_trade)), depth)
+        # Edge gate uses the arm floor; trail runners are upside beyond that.
         projected = projected_scalp_pnl_usd(
             ask, self.cfg.take_profit, size,
             self.cfg.sim_slippage_cents,
             self.cfg.balance_precision_usd)
-        # Match the aggregate delayed-IOC paper path on executable size.
         if projected <= 0:
             return None
         dip = dip_signal(history, now_ts, mid,
@@ -87,14 +92,38 @@ class ScalpStrategy:
         pos = self.positions.get(ticker)
         if pos is None or bid is None:
             return None
+        if pos.peak_bid is None or bid > pos.peak_bid:
+            pos.peak_bid = bid
         move = bid - pos.entry_price          # what we'd actually realize
+        peak_move = pos.peak_bid - pos.entry_price
+        giveback = pos.peak_bid - bid
         held = (now if now is not None else time.time()) - pos.opened_at
-        if move >= self.cfg.take_profit:
-            return {"action": "SELL", "reason": f"take-profit, bid {move:+.0f}c vs entry"}
+        # Hard risk first — stops do not wait on a trail.
         if move <= -self.cfg.stop_loss:
-            return {"action": "SELL", "reason": f"stop-loss, bid {move:+.0f}c vs entry"}
+            return {"action": "SELL",
+                    "reason": f"stop-loss, bid {move:+.0f}c vs entry"}
+        trail = self.cfg.tp_trail_cents
+        if peak_move >= self.cfg.take_profit:
+            if trail <= 0:
+                # Legacy fixed TP: sell as soon as the arm floor is printing.
+                if move >= self.cfg.take_profit:
+                    return {
+                        "action": "SELL",
+                        "reason": (f"take-profit, bid {move:+.0f}c "
+                                   f"vs entry"),
+                    }
+            # Trailing TP: require a giveback from the peak, but never sell
+            # below the fee-covering arm floor (move >= take_profit).
+            elif (giveback >= trail and move >= self.cfg.take_profit):
+                return {
+                    "action": "SELL",
+                    "reason": (f"take-profit trail, peak {peak_move:+.0f}c "
+                               f"giveback {giveback:.0f}c "
+                               f"(bid {move:+.0f}c)"),
+                }
         if held >= self.cfg.max_hold_seconds:
-            return {"action": "SELL", "reason": f"time exit {held:.0f}s ({move:+.0f}c)"}
+            return {"action": "SELL",
+                    "reason": f"time exit {held:.0f}s ({move:+.0f}c)"}
         return None
 
     # ---------- Fills (supports partials; P&L net of fees; fix #2, #6) ----------
@@ -108,8 +137,10 @@ class ScalpStrategy:
         if side == "BUY":
             pos = self.positions.get(ticker)
             if pos is None:
-                self.positions[ticker] = Position(ticker, fill_price, filled,
-                                                  now if now is not None else time.time(), fee)
+                self.positions[ticker] = Position(
+                    ticker, fill_price, filled,
+                    now if now is not None else time.time(), fee,
+                    peak_bid=None)
             else:  # average in (shouldn't normally happen, but be safe)
                 total = pos.contracts + filled
                 pos.entry_price = (pos.entry_price * pos.contracts

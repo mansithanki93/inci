@@ -25,7 +25,8 @@ from sports_discovery import ContractProvenance
 RESEARCH_SCHEMA_VERSION = 6
 RESEARCH_CONFIG_FIELDS = (
     "use_demo_env", "tickers", "sports", "max_monitored_markets",
-    "dip_threshold", "lookback_seconds", "take_profit", "stop_loss",
+    "dip_threshold", "lookback_seconds", "take_profit", "tp_trail_cents",
+    "stop_loss",
     "max_hold_seconds", "contracts_per_trade", "max_open_positions",
     "max_daily_loss_usd", "min_price", "max_price", "max_spread",
     "sim_latency_s", "sim_slippage_cents", "balance_precision_usd",
