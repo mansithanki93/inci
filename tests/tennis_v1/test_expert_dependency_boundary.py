@@ -206,10 +206,10 @@ EXPECTED_PACKAGE_AST_SHA256 = {
 
 LIVE_PAPER_MODULE_AST_SHA256 = {
     "live_paper_contracts.py": (
-        "c4af161dd6e88b3e5471d6a70d40b2c844a808ecbfeadaca6ab48a1b750ce5e9"
+        "d53991f2ec7134dc0de6294ebdffe1758d376d3495ad09aafe1f216cb739ac8f"
     ),
     "live_paper_execution.py": (
-        "52ff7be5d8f0a6567f0de360bbfe949181aea55948db40124322fb1bb05def73"
+        "885a98585f74c6ba709233a7d59396b92663be5550de4c064b70e34101c1b6a8"
     ),
     "live_paper_score.py": (
         "6fefcc8627ae6fa64cf50865699b31077c221bb8f95e105cf52300b010f346b0"

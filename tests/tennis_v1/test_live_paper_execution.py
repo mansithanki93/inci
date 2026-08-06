@@ -10,9 +10,14 @@ from inci_tennis_adapters.kalshi_v2 import (
 )
 from inci_tennis_expert.contracts import PlayerSide
 from inci_tennis_expert.fee_schedule import FrozenFeeSchedule
-from inci_tennis_expert.live_paper_contracts import LivePaperMarketBinding
+from inci_tennis_expert.live_paper_contracts import (
+    LivePaperContractError,
+    LivePaperMarketBinding,
+)
 from inci_tennis_expert.live_paper_execution import (
     PaperActionKind,
+    PaperDecisionReason,
+    LivePaperExecutionError,
     PaperPortfolioState,
     evaluate_live_paper_entry,
     project_paper_l2,
@@ -23,7 +28,7 @@ from inci_tennis_expert.live_two_model import (
     LiveEdgeClaim,
     LiveTwoModelForecast,
 )
-from inci_tennis_expert.pilot_contracts import PilotOutcomeEstimate
+from inci_tennis_expert.pilot_contracts import PilotOutcomeEstimate, PilotSupportReason
 from inci_tennis_expert.live_paper_contracts import PaperScoreTrust
 
 
@@ -116,6 +121,255 @@ def _state() -> PaperPortfolioState:
 
 
 class LivePaperExecutionTests(unittest.TestCase):
+    def test_binding_rejects_non_uuid_and_wrapper_market_identity_drift(self) -> None:
+        """Catches a caller relabelling a different market as the frozen match."""
+        with self.assertRaises(LivePaperContractError):
+            replace(_binding(), home_market_id="not-a-kalshi-uuid")
+        binding = _binding()
+        book = project_paper_l2(
+            _raw_book(), binding=binding, raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000, captured_monotonic_ns=1_000_000_000,
+            clock_uncertainty_ns=0, home_ticker=binding.home_ticker,
+            away_ticker=binding.away_ticker,
+        )
+        with self.assertRaises(LivePaperExecutionError):
+            replace(book, home=replace(book.home, ticker="KXTENNIS-OTHER"))
+        with self.assertRaises(LivePaperExecutionError):
+            replace(book, away=replace(book.away, market_id=HOME_ID))
+        with self.assertRaises(LivePaperExecutionError):
+            replace(book, home=replace(book.home, yes_player_side=PlayerSide.AWAY))
+
+    def test_monotonic_freshness_includes_uncertainty_at_exact_boundary(self) -> None:
+        """Catches accepting a five-second-old capture whose uncertainty exceeds the limit."""
+        binding = _binding()
+        book = project_paper_l2(
+            _raw_book(), binding=binding, raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000, captured_monotonic_ns=1_000_000_000,
+            clock_uncertainty_ns=1, home_ticker=binding.home_ticker,
+            away_ticker=binding.away_ticker,
+        )
+        stale = evaluate_live_paper_entry(
+            _forecast(), book, _state(), decision_wall_ns=6_000_000_000,
+            decision_monotonic_ns=6_000_000_000,
+        )
+        self.assertEqual(stale.reason, PaperDecisionReason.BOOK_STALE)
+        exact = evaluate_live_paper_entry(
+            _forecast(), replace(book, clock_uncertainty_ns=0), _state(),
+            decision_wall_ns=6_000_000_000, decision_monotonic_ns=6_000_000_000,
+        )
+        self.assertEqual(exact.reason, PaperDecisionReason.ACCEPTED)
+        future = evaluate_live_paper_entry(
+            _forecast(), replace(book, captured_monotonic_ns=6_000_000_001), _state(),
+            decision_wall_ns=6_000_000_000, decision_monotonic_ns=6_000_000_000,
+        )
+        self.assertEqual(future.reason, PaperDecisionReason.BOOK_STALE)
+        inconsistent = evaluate_live_paper_entry(
+            _forecast(), replace(book, clock_uncertainty_ns=0), _state(),
+            decision_wall_ns=6_000_000_001, decision_monotonic_ns=1_000_000_001,
+        )
+        self.assertEqual(inconsistent.reason, PaperDecisionReason.BOOK_STALE)
+
+    def test_policy_rejects_when_only_smaller_size_meets_edge(self) -> None:
+        """Catches silently downsizing after the fee-constrained maximum fails its edge gate."""
+        binding = _binding()
+        raw = _raw_book()
+        home = replace(
+            raw.markets[0], yes_levels=(),
+            no_levels=((Decimal("0.01"), Decimal("1")), (Decimal("0.80"), Decimal("9"))),
+        )
+        away = replace(raw.markets[1], yes_levels=(), no_levels=())
+        book = project_paper_l2(
+            replace(raw, markets=(home, away)), binding=binding,
+            raw_parent_receipt_sha256="3" * 64, captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        model = replace(
+            _forecast().model_1, home_match_probability=Decimal("0.77"),
+            lower_home_match_probability=Decimal("0.77"),
+            upper_home_match_probability=Decimal("0.77"),
+        )
+        forecast = replace(_forecast(), model_1=model, model_2=model)
+        decision = evaluate_live_paper_entry(
+            forecast, book, _state(), decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        self.assertEqual(decision.reason, PaperDecisionReason.EDGE_BELOW_MINIMUM)
+
+    def test_raw_endpoint_levels_project_but_are_not_executable(self) -> None:
+        """Catches rejecting reducer-valid 0/1 levels instead of excluding them from fills."""
+        binding = _binding()
+        raw = _raw_book()
+        home = replace(
+            raw.markets[0], yes_levels=((Decimal("0"), Decimal("10")),),
+            no_levels=((Decimal("1"), Decimal("10")),),
+        )
+        book = project_paper_l2(
+            replace(raw, markets=(home, raw.markets[1])), binding=binding,
+            raw_parent_receipt_sha256="3" * 64, captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        self.assertEqual(book.home.yes_bids[0].price, Decimal("0"))
+        self.assertEqual(book.home.yes_asks[0].price, Decimal("0"))
+
+    def test_entry_gates_cover_incomplete_book_first_set_and_model_support(self) -> None:
+        """Catches an entry bypassing a typed policy gate."""
+        binding = _binding()
+        book = project_paper_l2(
+            _raw_book(), binding=binding, raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000, captured_monotonic_ns=1_000_000_000,
+            clock_uncertainty_ns=0, home_ticker=binding.home_ticker,
+            away_ticker=binding.away_ticker,
+        )
+        first_set = evaluate_live_paper_entry(
+            _forecast(), book, replace(_state(), completed_sets=0),
+            decision_wall_ns=1_000_000_000, decision_monotonic_ns=1_000_000_000,
+        )
+        self.assertEqual(first_set.reason, PaperDecisionReason.BEFORE_COMPLETED_SET)
+        incomplete = evaluate_live_paper_entry(
+            _forecast(), replace(book, complete=False), _state(),
+            decision_wall_ns=1_000_000_000, decision_monotonic_ns=1_000_000_000,
+        )
+        self.assertEqual(incomplete.reason, PaperDecisionReason.BOOK_INCOMPLETE)
+        unsupported_model = replace(
+            _forecast().model_1, supported=False,
+            home_next_point_probability=None, home_current_set_probability=None,
+            home_match_probability=None, lower_home_match_probability=None,
+            upper_home_match_probability=None, abstention_reason=PilotSupportReason.UNSUPPORTED_NO_MARKOUT_KERNEL,
+        )
+        unsupported = evaluate_live_paper_entry(
+            replace(_forecast(), model_1=unsupported_model, supported=False), book, _state(),
+            decision_wall_ns=1_000_000_000, decision_monotonic_ns=1_000_000_000,
+        )
+        self.assertEqual(unsupported.reason, PaperDecisionReason.FORECAST_UNSUPPORTED)
+
+    def test_fee_constrained_largest_quantity_and_partial_depth_are_exact(self) -> None:
+        """Catches ignoring taker fees, fractional depth, or reused displayed size."""
+        binding = _binding()
+        raw = _raw_book()
+        home = replace(raw.markets[0], yes_levels=(), no_levels=((Decimal("0.70"), Decimal("100")),))
+        away = replace(raw.markets[1], yes_levels=(), no_levels=())
+        first = project_paper_l2(
+            replace(raw, markets=(home, away)), binding=binding,
+            raw_parent_receipt_sha256="3" * 64, captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        costly = replace(
+            _state(),
+            fee_schedule=replace(_state().fee_schedule, taker_rate=Decimal("1")),
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), first, costly, decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        self.assertEqual(decision.action.quantity, Decimal("98"))
+
+        partial_home = replace(home, no_levels=((Decimal("0.70"), Decimal("3")),))
+        partial = project_paper_l2(
+            replace(raw, markets=(partial_home, away), global_sequence=2), binding=binding,
+            raw_parent_receipt_sha256="4" * 64, captured_wall_ns=2_000_000_000,
+            captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        reduced, events = reduce_paper_book(
+            decision.state, partial, observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertEqual(events[0].fill.quantity, Decimal("3"))
+        self.assertEqual(reduced.pending_action.remaining_quantity, Decimal("95"))
+        reused, events = reduce_paper_book(
+            reduced, partial, observed_wall_ns=2_000_000_001,
+            observed_monotonic_ns=2_000_000_001,
+        )
+        self.assertFalse(events)
+        self.assertEqual(reused.pending_action.remaining_quantity, Decimal("95"))
+
+    def test_invalid_reducer_transport_numbers_fail_before_projection(self) -> None:
+        """Catches incomplete or non-positive reducer transport identity reaching policy."""
+        binding = _binding()
+        for raw in (
+            replace(_raw_book(), physical_connection_generation=0),
+            replace(_raw_book(), subscription_id=0),
+            replace(_raw_book(), global_sequence=0),
+            replace(_raw_book(), markets=(_raw_book().markets[0],)),
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(LivePaperExecutionError):
+                    project_paper_l2(
+                        raw, binding=binding, raw_parent_receipt_sha256="3" * 64,
+                        captured_wall_ns=1_000_000_000, captured_monotonic_ns=1_000_000_000,
+                        clock_uncertainty_ns=0, home_ticker=binding.home_ticker,
+                        away_ticker=binding.away_ticker,
+                    )
+
+    def test_loss_and_horizon_exits_are_delayed_and_insufficient_bids_leave_residual(self) -> None:
+        """Catches fabricating a flatten when a -$5 or horizon SELL lacks bid depth."""
+        binding = _binding()
+        raw = _raw_book()
+        home = replace(raw.markets[0], yes_levels=((Decimal("0.30"), Decimal("50")),), no_levels=((Decimal("0.70"), Decimal("50")),))
+        first = project_paper_l2(
+            replace(raw, markets=(home, raw.markets[1])), binding=binding,
+            raw_parent_receipt_sha256="3" * 64, captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), first, _state(), decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        entered, events = reduce_paper_book(
+            decision.state,
+            project_paper_l2(
+                replace(raw, markets=(home, raw.markets[1]), global_sequence=2), binding=binding,
+                raw_parent_receipt_sha256="4" * 64, captured_wall_ns=2_000_000_000,
+                captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+                home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+            ),
+            observed_wall_ns=2_000_000_000, observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertEqual(events[0].fill.quantity, Decimal("50"))
+        loss_home = replace(home, yes_levels=((Decimal("0.10"), Decimal("50")),), no_levels=((Decimal("0.90"), Decimal("50")),))
+        loss_mark = project_paper_l2(
+            replace(raw, markets=(loss_home, raw.markets[1]), global_sequence=3), binding=binding,
+            raw_parent_receipt_sha256="5" * 64, captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        pending, events = reduce_paper_book(
+            entered, loss_mark, observed_wall_ns=3_000_000_000,
+            observed_monotonic_ns=3_000_000_000,
+        )
+        self.assertFalse(events)
+        self.assertEqual(pending.pending_action.kind, PaperActionKind.SELL)
+        shallow_home = replace(loss_home, yes_levels=((Decimal("0.10"), Decimal("3")),))
+        shallow = project_paper_l2(
+            replace(raw, markets=(shallow_home, raw.markets[1]), global_sequence=4), binding=binding,
+            raw_parent_receipt_sha256="6" * 64, captured_wall_ns=4_000_000_000,
+            captured_monotonic_ns=4_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        residual, events = reduce_paper_book(
+            pending, shallow, observed_wall_ns=4_000_000_000,
+            observed_monotonic_ns=4_000_000_000,
+        )
+        self.assertEqual(events[0].fill.quantity, Decimal("3"))
+        self.assertEqual(residual.position.quantity, Decimal("47"))
+        self.assertEqual(residual.pending_action.remaining_quantity, Decimal("47"))
+
+        horizon = reduce_paper_book(
+            entered,
+            project_paper_l2(
+                replace(raw, markets=(home, raw.markets[1]), global_sequence=3), binding=binding,
+                raw_parent_receipt_sha256="7" * 64, captured_wall_ns=302_000_000_000,
+                captured_monotonic_ns=302_000_000_000, clock_uncertainty_ns=0,
+                home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+            ),
+            observed_wall_ns=302_000_000_000, observed_monotonic_ns=302_000_000_000,
+        )[0]
+        self.assertEqual(horizon.pending_action.kind, PaperActionKind.SELL)
+
     def test_yes_no_ladders_are_executable_and_fill_only_from_later_book(self) -> None:
         """Catches filling the decision snapshot or reusing visible depth."""
         binding = _binding()

@@ -36,6 +36,10 @@ __all__ = (
 
 
 _ID = pattern_compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z", ASCII)
+_UUID = pattern_compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
 _SHA256 = pattern_compile(r"[0-9a-f]{64}\Z", ASCII)
 _MAX_SIGNED_64 = 9_223_372_036_854_775_807
 _PAPER_LOCAL_REVISION_AUTHORITY = "PAPER_LOCAL_REVISION_TRANSPORT_ONLY"
@@ -67,8 +71,10 @@ class LivePaperMarketBinding:
         _id(self.away_player_id, "away_player_id")
         _id(self.home_ticker, "home_ticker")
         _id(self.away_ticker, "away_ticker")
-        _id(self.home_market_id, "home_market_id")
-        _id(self.away_market_id, "away_market_id")
+        if type(self.home_market_id) is not str or _UUID.fullmatch(self.home_market_id) is None:
+            _fail("home_market_id")
+        if type(self.away_market_id) is not str or _UUID.fullmatch(self.away_market_id) is None:
+            _fail("away_market_id")
         if (
             self.home_player_id == self.away_player_id
             or self.home_ticker == self.away_ticker
