@@ -34,6 +34,8 @@ RESEARCH_CONFIG_FIELDS = (
     "close_buffer_seconds",
     "espn_gate_enabled", "espn_leagues", "espn_cache_s",
     "espn_min_model_prob", "espn_min_edge",
+    "live_tennis_enabled", "live_tennis_tours", "live_tennis_cache_s",
+    "live_tennis_include_upcoming", "live_tennis_ticker_substrings",
 )
 REPLAY_CODE_FILES = (
     "analyze.py", "bot.py", "config.py", "engine.py", "executor.py",

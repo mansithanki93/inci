@@ -7710,9 +7710,13 @@ if __name__ == "__main__":
         test_neutral_model_rejects_match_already_lost,
         test_parse_espn_competition_live,
         test_gate_blocks_unbound_and_allows_edge,
+        test_parse_live_tennis_match_itf,
+        test_gate_binds_itf_via_live_tennis_secondary,
     )
     test_names_match_surname()
     test_neutral_model_rejects_match_already_lost()
     test_parse_espn_competition_live()
     test_gate_blocks_unbound_and_allows_edge()
-    print("\nALL TESTS PASS (212 tests)")
+    test_parse_live_tennis_match_itf()
+    test_gate_binds_itf_via_live_tennis_secondary()
+    print("\nALL TESTS PASS (214 tests)")

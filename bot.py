@@ -531,6 +531,18 @@ def run_session(cfg, client):
                   f"(leagues={','.join(cfg.espn_leagues)}; "
                   f"min_p={cfg.espn_min_model_prob}; "
                   f"min_edge={cfg.espn_min_edge})")
+            if cfg.live_tennis_enabled:
+                from live_tennis import resolve_api_key
+                if espn_gate.live_tennis_cache is not None:
+                    print("[live-tennis] ITF secondary feed enabled "
+                          f"(tours={','.join(cfg.live_tennis_tours)}; "
+                          f"cache_s={cfg.live_tennis_cache_s}; "
+                          f"upcoming={cfg.live_tennis_include_upcoming})")
+                elif resolve_api_key(cfg):
+                    print("[live-tennis] enabled but cache not attached")
+                else:
+                    print("[live-tennis] enabled but no API key "
+                          "(set LIVETENNISAPI_KEY); ITF stays fail-closed")
         ctx = Context(cfg, feed, strategy, executor, log, safety,
                       espn_gate=espn_gate)
 

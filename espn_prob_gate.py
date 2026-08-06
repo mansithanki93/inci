@@ -1,13 +1,15 @@
-"""Fail-closed ESPN score + win-prob gate for v6 paper entries.
+"""Fail-closed score + win-prob gate for v6 paper entries.
 
 An entry is allowed only when:
-1. the Kalshi contract binds to an ESPN ATP/WTA match by player name,
+1. the Kalshi contract binds to a scoreboard match by player name
+   (ESPN ATP/WTA, plus Live Tennis ITF/challenger when configured),
 2. the match is live (or pre, with neutral score),
 3. score-model P(win) clears ``espn_min_model_prob``,
 4. model edge vs market ask clears ``espn_min_edge``.
 
-Unbound markets (common for ITF on Kalshi) are blocked — price dips alone
-cannot authorize a buy.
+Unbound markets are blocked — price dips alone cannot authorize a buy.
+Live Tennis is polled only after ESPN bind fails for ITF-marked tickers,
+so free-tier API quota is not burned on ATP/WTA sessions.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from espn_tennis import EspnMatch, EspnScoreboardCache
+from live_tennis import LiveTennisCache, resolve_api_key
 from tennis_win_prob import (
     completed_sets_won,
     current_games,
@@ -69,13 +72,38 @@ class GateDecision:
     espn_player: str | None = None
 
 
+def ticker_wants_live_tennis(ticker: str, event_title: str = "",
+                             substrings=("ITF",)) -> bool:
+    """True when the contract should consult the Live Tennis secondary feed."""
+    hay = f"{ticker or ''} {event_title or ''}".upper()
+    return any(str(part).upper() in hay for part in substrings if part)
+
+
 class EspnProbGate:
-    def __init__(self, config, cache: EspnScoreboardCache | None = None):
+    def __init__(
+            self,
+            config,
+            cache: EspnScoreboardCache | None = None,
+            live_tennis_cache: LiveTennisCache | None = None,
+    ):
         self.cfg = config
         self.cache = cache or EspnScoreboardCache(
             leagues=tuple(getattr(config, "espn_leagues", ("atp", "wta"))),
             ttl_s=float(getattr(config, "espn_cache_s", 15.0)),
         )
+        self.live_tennis_cache = live_tennis_cache
+        if (self.live_tennis_cache is None
+                and bool(getattr(config, "live_tennis_enabled", False))):
+            api_key = resolve_api_key(config)
+            if api_key:
+                self.live_tennis_cache = LiveTennisCache(
+                    api_key=api_key,
+                    tours=tuple(getattr(
+                        config, "live_tennis_tours", ("itf",))),
+                    ttl_s=float(getattr(config, "live_tennis_cache_s", 120.0)),
+                    include_upcoming=bool(getattr(
+                        config, "live_tennis_include_upcoming", False)),
+                )
 
     def enabled(self) -> bool:
         return bool(getattr(self.cfg, "espn_gate_enabled", True))
@@ -99,11 +127,26 @@ class EspnProbGate:
                 False, f"blocked:espn_unavailable ({error})")
 
         bound = self._bind(player_name, event_title, matches)
+        lt_error = None
+        if bound is None and self.live_tennis_cache is not None:
+            needles = tuple(getattr(
+                self.cfg, "live_tennis_ticker_substrings", ("ITF",)))
+            if ticker_wants_live_tennis(ticker, event_title, needles):
+                try:
+                    lt_matches = self.live_tennis_cache.matches()
+                except Exception as error:  # noqa: BLE001
+                    lt_error = str(error)
+                    lt_matches = ()
+                if lt_matches:
+                    bound = self._bind(player_name, event_title, lt_matches)
         if bound is None:
+            extra = ""
+            if lt_error:
+                extra = f"; live_tennis_unavailable ({lt_error})"
             return GateDecision(
                 False,
                 "blocked:no_espn_bind "
-                "(ITF/unlisted matches cannot trade on dips alone)")
+                f"(ITF/unlisted matches cannot trade on dips alone{extra})")
         match, me, opp = bound
         if match.state == "post":
             return GateDecision(
@@ -128,6 +171,8 @@ class EspnProbGate:
         min_p = Decimal(str(self.cfg.espn_min_model_prob))
         min_edge = Decimal(str(self.cfg.espn_min_edge))
         edge = model_p - market_prob
+        source = ("live_tennis" if str(match.competition_id).startswith("lt:")
+                  else "espn")
         if model_p < min_p:
             return GateDecision(
                 False,
@@ -147,7 +192,7 @@ class EspnProbGate:
                 espn_player=me.display_name)
         return GateDecision(
             True,
-            f"espn_ok model {model_p:.3f} edge {edge:+.3f} "
+            f"{source}_ok model {model_p:.3f} edge {edge:+.3f} "
             f"score {sets_me}-{sets_opp} ({match.detail})",
             model_prob=model_p, market_prob=market_prob, edge=edge,
             espn_match_id=match.competition_id,

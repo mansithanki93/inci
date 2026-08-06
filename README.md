@@ -7,8 +7,9 @@ latency, depth-capped, remainder canceled — not maker GTC. Take-profit is
 variable: `take_profit` is the fee-covering arm floor, then `tp_trail_cents`
 lets a spike run and exits on pullback from the peak (`0` = fixed TP). Paper
 entries are also gated by a free ESPN ATP/WTA scoreboard feed plus a
-score-based match-win probability model: no ESPN bind (common for ITF) or no
-model edge means no buy. It also models spread, stop-loss slippage, fees,
+score-based match-win probability model. ITF can bind via an optional Live
+Tennis API key (`LIVETENNISAPI_KEY`); without a key or bind, or with no model
+edge, there is no buy. It also models spread, stop-loss slippage, fees,
 position limits, and shutdown behavior. Research evidence does not prove live
 profitability.
 
@@ -43,6 +44,8 @@ Credentials stay outside Git:
 ```bash
 export KALSHI_API_KEY_ID="your-key-id"
 export KALSHI_PRIVATE_KEY_PATH="/absolute/path/outside-the-repo/key.pem"
+# Optional — ITF scoreboard bind (free key at https://livetennisapi.com/subscribe/free)
+export LIVETENNISAPI_KEY="twjp_…"
 ```
 
 ## Sports discovery
