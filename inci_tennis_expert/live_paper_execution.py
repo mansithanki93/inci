@@ -124,9 +124,7 @@ class LivePaperL2Market:
             _fail("market")
         _ladder(self.yes_bids, ascending=False, name="yes_bids")
         _ladder(self.yes_asks, ascending=True, name="yes_asks")
-        bids = tuple(level for level in self.yes_bids if _executable(level))
-        asks = tuple(level for level in self.yes_asks if _executable(level))
-        if bids and asks and bids[0].price > asks[0].price:
+        if self.yes_bids and self.yes_asks and self.yes_bids[0].price > self.yes_asks[0].price:
             _fail("crossed_book")
 
 
@@ -411,9 +409,7 @@ def _frame_reason(book: LivePaperL2Frame, state: PaperPortfolioState, now_wall: 
     ):
         return PaperDecisionReason.BOOK_STALE
     for market in (book.home, book.away):
-        bids = tuple(level for level in market.yes_bids if _executable(level))
-        asks = tuple(level for level in market.yes_asks if _executable(level))
-        if bids and asks and bids[0].price > asks[0].price:
+        if market.yes_bids and market.yes_asks and market.yes_bids[0].price > market.yes_asks[0].price:
             return PaperDecisionReason.BOOK_CROSSED
     return None
 

@@ -304,6 +304,68 @@ class LivePaperExecutionTests(unittest.TestCase):
                         away_ticker=binding.away_ticker,
                     )
 
+    def test_every_crossed_ladder_including_endpoints_is_rejected(self) -> None:
+        """Catches treating a 1 YES bid and 0 complemented ask as harmless endpoints."""
+        binding = _binding()
+        raw = _raw_book()
+        endpoint_cross = replace(
+            raw.markets[0],
+            yes_levels=((Decimal("1"), Decimal("10")),),
+            no_levels=((Decimal("1"), Decimal("10")),),
+        )
+        interior_cross = replace(
+            raw.markets[0],
+            yes_levels=((Decimal("0.80"), Decimal("10")),),
+            no_levels=((Decimal("0.80"), Decimal("10")),),
+        )
+        for market in (endpoint_cross, interior_cross):
+            with self.subTest(market=market):
+                with self.assertRaises(LivePaperExecutionError):
+                    project_paper_l2(
+                        replace(raw, markets=(market, raw.markets[1])), binding=binding,
+                        raw_parent_receipt_sha256="3" * 64,
+                        captured_wall_ns=1_000_000_000,
+                        captured_monotonic_ns=1_000_000_000,
+                        clock_uncertainty_ns=0, home_ticker=binding.home_ticker,
+                        away_ticker=binding.away_ticker,
+                    )
+
+    def test_gap_frame_abstains_for_decision_and_cannot_fill_pending_action(self) -> None:
+        """Catches using a gap-marked full book for either a decision or a fill."""
+        binding = _binding()
+        first = project_paper_l2(
+            _raw_book(), binding=binding, raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000, captured_monotonic_ns=1_000_000_000,
+            clock_uncertainty_ns=0, home_ticker=binding.home_ticker,
+            away_ticker=binding.away_ticker,
+        )
+        self.assertEqual(
+            evaluate_live_paper_entry(
+                _forecast(), replace(first, gap_free=False), _state(),
+                decision_wall_ns=1_000_000_000, decision_monotonic_ns=1_000_000_000,
+            ).reason,
+            PaperDecisionReason.BOOK_SEQUENCE_GAP,
+        )
+        pending = evaluate_live_paper_entry(
+            _forecast(), first, _state(), decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        gap = replace(
+            project_paper_l2(
+                _raw_book(sequence=2), binding=binding, raw_parent_receipt_sha256="4" * 64,
+                captured_wall_ns=2_000_000_000, captured_monotonic_ns=2_000_000_000,
+                clock_uncertainty_ns=0, home_ticker=binding.home_ticker,
+                away_ticker=binding.away_ticker,
+            ),
+            gap_free=False,
+        )
+        unchanged, events = reduce_paper_book(
+            pending.state, gap, observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertFalse(events)
+        self.assertEqual(unchanged.pending_action, pending.action)
+
     def test_loss_and_horizon_exits_are_delayed_and_insufficient_bids_leave_residual(self) -> None:
         """Catches fabricating a flatten when a -$5 or horizon SELL lacks bid depth."""
         binding = _binding()
