@@ -186,6 +186,29 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             parse_cli_arguments(base + ["--live-readonly", "--score-stream", "/tmp/scores", "--kalshi-stream", "/tmp/books", "--bootstrap-home-serve", "0.64", "--bootstrap-away-serve", "0.61"])
         parsed = parse_cli_arguments(base + ["--score-stream", "/tmp/scores", "--kalshi-stream", "/tmp/books", "--static-artifact", "/tmp/static", "--dynamic-artifact", "/tmp/dynamic"])
         self.assertFalse(parsed.live_readonly)
+        replay = parse_cli_arguments([
+            "--replay-only", "--session-log", "/tmp/session.jsonl",
+        ])
+        self.assertTrue(replay.replay_only)
+        for conflict in (
+            ["--manifest", "/tmp/manifest.json"],
+            ["--checkpoint", "/tmp/checkpoint.json"],
+            ["--score-stream", "/tmp/scores"],
+            ["--kalshi-stream", "/tmp/books"],
+            ["--static-artifact", "/tmp/static"],
+            ["--dynamic-artifact", "/tmp/dynamic"],
+            ["--bootstrap-home-serve", "0.64"],
+            ["--bootstrap-away-serve", "0.61"],
+            ["--live-readonly"],
+            ["--stop-at-eof"],
+            ["--duration-seconds", "10"],
+        ):
+            with self.subTest(replay_conflict=conflict):
+                with self.assertRaises(LivePaperCliError):
+                    parse_cli_arguments([
+                        "--replay-only", "--session-log", "/tmp/session.jsonl",
+                        *conflict,
+                    ])
         for forbidden in ("--score-freshness", "--latency-seconds", "--maximum-debit", "--minimum-edge", "--maximum-hold"):
             with self.assertRaises(LivePaperCliError):
                 parse_cli_arguments(base + ["--score-stream", "/tmp/scores", "--kalshi-stream", "/tmp/books", "--bootstrap-home-serve", "0.64", "--bootstrap-away-serve", "0.61", forbidden, "1"])
@@ -293,6 +316,87 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             )
             with self.assertRaises(LivePaperCliError):
                 _jsonl(path, "score")
+
+    def test_growing_jsonl_reader_retains_partial_suffix_and_authenticates_prefix(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import (
+            LivePaperCliError,
+            _GrowingJsonlReader,
+        )
+
+        row = b'{"captured_wall_ns":1,"captured_monotonic_ns":1}'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stream.jsonl"
+            path.write_bytes(row[:24])
+            reader = _GrowingJsonlReader(path, "score")
+            self.assertEqual(reader.poll(), [])
+            with path.open("ab") as stream:
+                stream.write(row[24:] + b"\n")
+            parsed = reader.poll()
+            self.assertEqual(
+                tuple((item[0], item[2]) for item in parsed),
+                ((1, "score"),),
+            )
+            changed = bytearray(path.read_bytes())
+            changed[2] = ord("X")
+            path.write_bytes(changed)
+            with self.assertRaisesRegex(
+                LivePaperCliError, "growing_stream_prefix_changed"
+            ):
+                reader.poll()
+
+            partial = Path(directory) / "partial.jsonl"
+            partial.write_bytes(row)
+            partial_reader = _GrowingJsonlReader(partial, "score")
+            self.assertEqual(partial_reader.poll(), [])
+            with self.assertRaisesRegex(LivePaperCliError, "score_partial_line"):
+                partial_reader.finish()
+
+    def test_clock_boundary_rejects_cross_poll_and_resume_regressions(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import (
+            LivePaperCliError,
+            _validate_clock_order,
+        )
+
+        first = [
+            (10, 1, "score", {
+                "captured_wall_ns": 20,
+                "captured_monotonic_ns": 10,
+            }),
+            (10, 1, "kalshi", {
+                "captured_wall_ns": 20,
+                "captured_monotonic_ns": 10,
+            }),
+        ]
+        self.assertEqual(_validate_clock_order(first, None), (20, 10))
+        for boundary, rows in (
+            ((20, 10), [(11, 2, "score", {
+                "captured_wall_ns": 19,
+                "captured_monotonic_ns": 11,
+            })]),
+            ((20, 10), [(9, 2, "score", {
+                "captured_wall_ns": 21,
+                "captured_monotonic_ns": 9,
+            })]),
+        ):
+            with self.subTest(boundary=boundary, rows=rows):
+                with self.assertRaisesRegex(
+                    LivePaperCliError, "captured_clock_regression"
+                ):
+                    _validate_clock_order(rows, boundary)
+
+        with self.assertRaisesRegex(
+            LivePaperCliError, "captured_clock_regression"
+        ):
+            _validate_clock_order([
+                (10, 1, "score", {
+                    "captured_wall_ns": 20,
+                    "captured_monotonic_ns": 10,
+                }),
+                (11, 1, "kalshi", {
+                    "captured_wall_ns": 19,
+                    "captured_monotonic_ns": 11,
+                }),
+            ], None)
 
     def test_bridge_parses_raw_score_and_raw_ws_payloads_without_normalized_input(self) -> None:
         from inci_tennis_runtime.live_paper_capture_bridge import GrowingJsonlCaptureBridge, LivePaperBridgeError, LivePaperCaptureObserver, manifest_from_document
@@ -916,24 +1020,24 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             actions = tuple(row.payload.body for row in replay.records if row.kind is LivePaperRecordKind.ACTION)
             fills = tuple(row.payload.body.fill for row in replay.records if row.kind is LivePaperRecordKind.FILL)
             self.assertEqual(tuple(action.kind for action in actions), (PaperActionKind.BUY, PaperActionKind.SELL))
-            self.assertEqual(tuple(fill.action_kind for fill in fills), (PaperActionKind.BUY, PaperActionKind.BUY, PaperActionKind.SELL))
-            self.assertLess(fills[0].quantity, actions[0].quantity)
-            self.assertEqual(sum((fill.quantity for fill in fills[:2]), Decimal("0")), actions[0].quantity)
-            self.assertEqual(run([
-                "--manifest", str(manifest), "--score-stream", str(scores),
-                "--kalshi-stream", str(books), "--session-log", str(session),
-                "--checkpoint", str(checkpoint), "--bootstrap-home-serve", "0.80",
-                "--bootstrap-away-serve", "0.20", "--stop-at-eof", "--replay-only",
-            ], stdout=io.StringIO()), 0)
-            self.assertEqual(session.read_bytes(), first)
-
-            checkpoint.write_bytes(b"corrupt-checkpoint")
-            self.assertEqual(run([
-                "--manifest", str(manifest), "--score-stream", str(scores),
-                "--kalshi-stream", str(books), "--session-log", str(session),
-                "--checkpoint", str(checkpoint), "--bootstrap-home-serve", "0.80",
-                "--bootstrap-away-serve", "0.20", "--stop-at-eof", "--replay-only",
-            ], stdout=io.StringIO()), 0)
+            self.assertEqual(
+                tuple(fill.action_kind for fill in fills),
+                (PaperActionKind.BUY, PaperActionKind.SELL),
+            )
+            self.assertEqual(fills[0].quantity, actions[0].quantity)
+            manifest.unlink()
+            scores.unlink()
+            books.unlink()
+            checkpoint.unlink()
+            replay_output = io.StringIO()
+            with mock.patch(
+                "inci_tennis_runtime.live_two_model_paper_cli._DurableSessionWriter",
+                side_effect=AssertionError("writer opened during replay"),
+            ):
+                self.assertEqual(run([
+                    "--replay-only", "--session-log", str(session),
+                ], stdout=replay_output), 0)
+            self.assertIn("replay_verified", replay_output.getvalue())
             self.assertEqual(session.read_bytes(), first)
 
     def test_resume_rebuilds_raw_adapter_state_without_refeeding_committed_input(self) -> None:
@@ -1020,6 +1124,33 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                 encoding="ascii",
             )
 
+            regressing = _score_envelope(
+                _score_payload(points="15 - 0"),
+                ordinal=2,
+                wall=999_999_999,
+                mono=1_000_000_001,
+            )
+            scores.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                    for row in (score, regressing)
+                ),
+                encoding="ascii",
+            )
+            errors = io.StringIO()
+            self.assertEqual(run([
+                "--manifest", str(manifest_path), "--score-stream", str(scores),
+                "--kalshi-stream", str(books), "--session-log", str(session),
+                "--checkpoint", str(checkpoint), "--bootstrap-home-serve", "0.80",
+                "--bootstrap-away-serve", "0.20", "--stop-at-eof",
+            ], stdout=io.StringIO(), stderr=errors), 1)
+            self.assertIn("captured_clock_regression", errors.getvalue())
+            self.assertEqual(session.read_bytes(), committed)
+            scores.write_text(
+                json.dumps(score, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="ascii",
+            )
+
             self.assertEqual(run([
                 "--manifest", str(manifest_path), "--score-stream", str(scores),
                 "--kalshi-stream", str(books), "--session-log", str(session),
@@ -1092,6 +1223,79 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                     "--duration-seconds", "10",
                 ], stdout=io.StringIO()), 1)
             self.assertEqual(forbidden, [])
+
+    def test_live_startup_discloses_frozen_authority_before_transport_and_dashboard_is_operational(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import run
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            session = root / "session.jsonl"
+            checkpoint = root / "checkpoint.json"
+            document = _manifest()
+            provider = document["providers"][0]  # type: ignore[index]
+            provider["slot"] = "sportradar"
+            provider["source_id"] = "sportradar-primary"
+            manifest.write_text(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                encoding="ascii",
+            )
+            snapshots: list[str] = []
+
+            def fake_transport(*args: object, **kwargs: object) -> int:
+                del args
+                snapshots.append(kwargs["stdout"].getvalue())  # type: ignore[union-attr]
+                return 1
+
+            import inci_tennis_runtime.live_shadow_cli as live_shadow_cli
+
+            output = io.StringIO()
+            with mock.patch.object(
+                live_shadow_cli, "run_cli", side_effect=fake_transport
+            ):
+                self.assertEqual(run([
+                    "--live-readonly", "--manifest", str(manifest),
+                    "--session-log", str(session), "--checkpoint", str(checkpoint),
+                    "--bootstrap-home-serve", "0.80",
+                    "--bootstrap-away-serve", "0.20",
+                    "--duration-seconds", "10",
+                ], stdout=output), 1)
+
+            before_transport = snapshots[0]
+            self.assertEqual(
+                before_transport.splitlines()[0],
+                "LIVE MODELS 1+2 / PAPER ONLY / NO REAL ORDERS",
+            )
+            for expected in (
+                "sources=sportradar/sportradar-primary:independence_proven=true",
+                "trust_eligibility=SINGLE_SOURCE_PAPER",
+                "artifact_authority=OPERATOR_BOOTSTRAP",
+                "static_sha256=",
+                "dynamic_sha256=",
+                "canonical_match_id=canonical-match-1",
+                "scheduled_start_wall_ns=2000000000",
+                "match_format=STANDARD_ADVANTAGE_BO3_TB7_ALL_SETS",
+                f"HOME=KXTENNIS-HOME/{HOME_MARKET_ID}/YES_HOME",
+                f"AWAY=KXTENNIS-AWAY/{AWAY_MARKET_ID}/YES_AWAY",
+                "max_debit=50",
+                "minimum_edge=5",
+                "exit_profit=+5",
+                "exit_loss=-5",
+                "maximum_hold=300s",
+                "decision_latency=1s",
+                "freshness=5s",
+                f"state_root={root}",
+                "NO REAL ORDERS",
+            ):
+                self.assertIn(expected, before_transport)
+            dashboard = output.getvalue().splitlines()[-1]
+            for field in (
+                "elapsed=", "source_health=", "trust=", "model1_set=",
+                "model2_match=", "home_book=", "away_book=", "book_age=",
+                "pending=", "last_decision=", "rejection_counts=",
+                "paper_position=", "pnl=",
+            ):
+                self.assertIn(field, dashboard)
 
     def test_live_nonzero_collector_status_writes_halted_terminal(self) -> None:
         from inci_tennis_runtime.live_two_model_paper_cli import run

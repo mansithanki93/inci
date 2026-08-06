@@ -30,6 +30,7 @@ from inci_tennis_expert.live_paper_session import (
     encode_live_paper_records,
     load_live_paper_checkpoint,
     reduce_live_paper_input,
+    replay_live_paper_records,
 )
 from inci_tennis_expert.live_two_model import (
     LiveArtifactAuthority,
@@ -69,11 +70,11 @@ class _Parser(argparse.ArgumentParser):
 @dataclass(frozen=True, slots=True)
 class LivePaperCliArguments:
     live_readonly: bool
-    manifest: Path
+    manifest: Path | None
     score_stream: Path | None
     kalshi_stream: Path | None
     session_log: Path
-    checkpoint: Path
+    checkpoint: Path | None
     static_artifact: Path | None
     dynamic_artifact: Path | None
     bootstrap_home_serve: Decimal | None
@@ -100,16 +101,16 @@ def _parser() -> _Parser:
         description="Live Models 1+2 paper-only runner; never places orders",
     )
     parser.add_argument("--live-readonly", action="store_true")
-    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--manifest", type=Path)
     parser.add_argument("--score-stream", type=Path)
     parser.add_argument("--kalshi-stream", type=Path)
-    parser.add_argument("--session-log", required=True, type=Path)
-    parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument("--session-log", type=Path)
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--static-artifact", type=Path)
     parser.add_argument("--dynamic-artifact", type=Path)
     parser.add_argument("--bootstrap-home-serve", type=_probability)
     parser.add_argument("--bootstrap-away-serve", type=_probability)
-    parser.add_argument("--duration-seconds", type=int, default=600)
+    parser.add_argument("--duration-seconds", type=int)
     parser.add_argument("--stop-at-eof", action="store_true")
     parser.add_argument("--replay-only", action="store_true")
     return parser
@@ -117,6 +118,28 @@ def _parser() -> _Parser:
 
 def parse_cli_arguments(argv: list[str] | None) -> LivePaperCliArguments:
     value = _parser().parse_args(argv)
+    if value.session_log is None:
+        _fail("invalid_arguments")
+    if value.replay_only:
+        conflicts = (
+            value.live_readonly, value.manifest, value.score_stream,
+            value.kalshi_stream, value.checkpoint, value.static_artifact,
+            value.dynamic_artifact, value.bootstrap_home_serve,
+            value.bootstrap_away_serve, value.duration_seconds,
+            value.stop_at_eof,
+        )
+        if (
+            value.duration_seconds is not None
+            or value.stop_at_eof
+            or any(item not in (None, False) for item in conflicts[:-2])
+        ):
+            _fail("replay_option_conflict")
+        return LivePaperCliArguments(
+            False, None, None, None, value.session_log, None,
+            None, None, None, None, 600, False, True,
+        )
+    if value.manifest is None or value.checkpoint is None:
+        _fail("invalid_arguments")
     streams = (value.score_stream, value.kalshi_stream)
     if value.live_readonly:
         if any(item is not None for item in streams) or value.stop_at_eof:
@@ -129,22 +152,19 @@ def parse_cli_arguments(argv: list[str] | None) -> LivePaperCliArguments:
     bootstrap_mode = all(item is None for item in artifacts) and all(item is not None for item in priors)
     if not (artifact_mode ^ bootstrap_mode):
         _fail("artifact_bootstrap_xor")
+    duration_seconds = 600 if value.duration_seconds is None else value.duration_seconds
     minimum_duration = 10 if value.live_readonly else 1
     if (
-        type(value.duration_seconds) is not int
-        or not minimum_duration <= value.duration_seconds <= 3_600
+        type(duration_seconds) is not int
+        or not minimum_duration <= duration_seconds <= 3_600
     ):
         _fail("duration_seconds")
-    if value.replay_only and not value.stop_at_eof and not value.live_readonly:
-        # Replay consumes the durable session only; this guard avoids implying
-        # the input streams are tailed during replay.
-        pass
     return LivePaperCliArguments(
         value.live_readonly, value.manifest, value.score_stream,
         value.kalshi_stream, value.session_log, value.checkpoint,
         value.static_artifact, value.dynamic_artifact,
         value.bootstrap_home_serve, value.bootstrap_away_serve,
-        value.duration_seconds, value.stop_at_eof, value.replay_only,
+        duration_seconds, value.stop_at_eof, False,
     )
 
 
@@ -255,31 +275,104 @@ def _reject_json_number(_: str) -> object:
     _fail("json_number")
 
 
+def _jsonl_row(
+    line: bytes, source: str, ordinal: int,
+) -> tuple[int, int, str, dict[str, object]]:
+    if not line or len(line) > _MAX_LINE_BYTES:
+        _fail(source + "_line")
+    try:
+        value = json.loads(
+            line.decode("ascii"),
+            object_pairs_hook=_strict_json_pairs,
+            parse_float=_reject_json_number,
+            parse_constant=_reject_json_number,
+        )
+    except Exception as error:
+        raise LivePaperCliError(source + "_json") from error
+    if type(value) is not dict:
+        _fail(source + "_json")
+    wall = value.get("captured_wall_ns")
+    mono = value.get("captured_monotonic_ns")
+    if type(wall) is not int or type(mono) is not int:
+        _fail(source + "_clock")
+    return mono, ordinal, source, value
+
+
+class _GrowingJsonlReader:
+    """Bounded append reader retaining an incomplete final JSONL row."""
+
+    def __init__(self, path: Path, source: str) -> None:
+        self.path = path
+        self.source = source
+        self.offset = 0
+        self.partial = b""
+        self.authenticated_prefix = b""
+        self.ordinal = 0
+
+    def poll(self) -> list[tuple[int, int, str, dict[str, object]]]:
+        raw = _read_regular(
+            self.path, self.source + "_stream", _MAX_STREAM_BYTES
+        )
+        if (
+            len(raw) < self.offset
+            or raw[: self.offset] != self.authenticated_prefix
+        ):
+            _fail("growing_stream_prefix_changed")
+        suffix = raw[self.offset:]
+        self.authenticated_prefix = raw
+        self.offset = len(raw)
+        pending = self.partial + suffix
+        last_newline = pending.rfind(b"\n")
+        if last_newline < 0:
+            if len(pending) > _MAX_LINE_BYTES:
+                _fail(self.source + "_partial_line")
+            self.partial = pending
+            return []
+        complete = pending[:last_newline]
+        self.partial = pending[last_newline + 1:]
+        if len(self.partial) > _MAX_LINE_BYTES:
+            _fail(self.source + "_partial_line")
+        rows: list[tuple[int, int, str, dict[str, object]]] = []
+        for line in complete.split(b"\n"):
+            self.ordinal += 1
+            rows.append(_jsonl_row(line, self.source, self.ordinal))
+        return rows
+
+    def finish(self) -> None:
+        if self.partial:
+            _fail(self.source + "_partial_line")
+
+
 def _jsonl(path: Path, source: str) -> list[tuple[int, int, str, dict[str, object]]]:
-    raw = _read_regular(path, source + "_stream", _MAX_STREAM_BYTES)
-    if raw and not raw.endswith(b"\n"):
-        _fail(source + "_partial_line")
-    rows: list[tuple[int, int, str, dict[str, object]]] = []
-    for ordinal, line in enumerate(raw.splitlines(), 1):
-        if not line or len(line) > _MAX_LINE_BYTES:
-            _fail(source + "_line")
-        try:
-            value = json.loads(
-                line.decode("ascii"),
-                object_pairs_hook=_strict_json_pairs,
-                parse_float=_reject_json_number,
-                parse_constant=_reject_json_number,
-            )
-        except Exception as error:
-            raise LivePaperCliError(source + "_json") from error
-        if type(value) is not dict:
-            _fail(source + "_json")
-        wall = value.get("captured_wall_ns")
-        mono = value.get("captured_monotonic_ns")
-        if type(wall) is not int or type(mono) is not int:
-            _fail(source + "_clock")
-        rows.append((mono, ordinal, source, value))
+    reader = _GrowingJsonlReader(path, source)
+    rows = reader.poll()
+    reader.finish()
     return rows
+
+
+def _ordered_rows(
+    rows: list[tuple[int, int, str, dict[str, object]]],
+) -> list[tuple[int, int, str, dict[str, object]]]:
+    return sorted(
+        rows,
+        key=lambda item: (
+            item[0], int(item[3]["captured_wall_ns"]),
+            0 if item[2] == "score" else 1, item[1],
+        ),
+    )
+
+
+def _validate_clock_order(
+    rows: list[tuple[int, int, str, dict[str, object]]],
+    boundary: tuple[int, int] | None,
+) -> tuple[int, int] | None:
+    current = boundary
+    for mono, _, _, row in rows:
+        wall = int(row["captured_wall_ns"])
+        if current is not None and (wall < current[0] or mono < current[1]):
+            _fail("captured_clock_regression")
+        current = (wall, mono)
+    return current
 
 
 class _DurableSessionWriter:
@@ -462,6 +555,68 @@ def _artifact_pair(args: LivePaperCliArguments, manifest: LivePaperManifest) -> 
     return static, dynamic, LiveArtifactAuthority.TRAINED_ARTIFACT
 
 
+def _startup_disclosure(
+    stream: TextIO,
+    bridge: GrowingJsonlCaptureBridge,
+    manifest: LivePaperManifest,
+    state_root: Path,
+) -> None:
+    config = bridge.state.config
+    sources = ",".join(
+        f"{provider.slot}/{provider.source_id}:"
+        + "independence_proven="
+        + (
+            "true" if provider.independence_proven is True
+            else "false" if provider.independence_proven is False
+            else "unknown"
+        )
+        for provider in config.provider_authorities
+    )
+    proven_lineages = {
+        provider.independent_lineage_id
+        for provider in config.provider_authorities
+        if provider.independence_proven is True
+    }
+    trust_eligibility = (
+        "CONSENSUS_PAPER"
+        if len(proven_lineages) >= 2
+        else "SINGLE_SOURCE_PAPER"
+        if config.provider_authorities
+        else "ABSTAINED"
+    )
+    binding = config.market_binding
+    stream.write(
+        "startup "
+        f"sources={sources} trust_eligibility={trust_eligibility} "
+        f"artifact_authority={config.artifact_authority.value} "
+        f"static_sha256={config.static_artifact.artifact_sha256} "
+        f"dynamic_sha256={config.dynamic_artifact.artifact_sha256} "
+        f"canonical_match_id={config.canonical_match_id} "
+        f"scheduled_start_wall_ns={binding.scheduled_start_wall_ns} "
+        f"match_format={manifest.match_format.name} "
+        f"HOME={binding.home_ticker}/{binding.home_market_id}/YES_HOME "
+        f"AWAY={binding.away_ticker}/{binding.away_market_id}/YES_AWAY "
+        f"max_debit={format(config.maximum_debit, 'f')} "
+        f"minimum_edge={format(config.minimum_edge, 'f')} "
+        f"exit_profit=+{format(config.exit_profit, 'f')} "
+        f"exit_loss=-{format(config.exit_loss, 'f')} "
+        f"maximum_hold={config.maximum_hold_ns // 1_000_000_000}s "
+        f"decision_latency={config.decision_latency_ns // 1_000_000_000}s "
+        f"freshness={config.score_freshness_ns // 1_000_000_000}s "
+        f"score_freshness={config.score_freshness_ns // 1_000_000_000}s "
+        f"book_freshness={config.book_freshness_ns // 1_000_000_000}s "
+        f"state_root={state_root} NO REAL ORDERS\n"
+    )
+    stream.flush()
+
+
+def _top_executable(levels: object) -> str:
+    for level in levels:  # type: ignore[union-attr]
+        if Decimal("0") < level.price < Decimal("1"):
+            return f"{format(level.price, 'f')}@{format(level.quantity, 'f')}"
+    return "--"
+
+
 def _dashboard(
     stream: TextIO,
     bridge: GrowingJsonlCaptureBridge,
@@ -470,6 +625,7 @@ def _dashboard(
     now_monotonic_ns: int | None = None,
 ) -> None:
     state = bridge.state
+    records = bridge.records
     anchor = state.score_coordinator.anchor
     trust = "ABSTAINED" if anchor is None else anchor.trust.value
     forecast = state.latest_forecast
@@ -480,7 +636,7 @@ def _dashboard(
     position = state.portfolio.position
     position_text = "flat" if position is None else f"{position.ticker} x {position.quantity}"
     cash = Decimal("0")
-    for record in bridge.records:
+    for record in records:
         if record.kind is not LivePaperRecordKind.FILL:
             continue
         fill = record.payload.body.fill
@@ -492,7 +648,7 @@ def _dashboard(
         )
     pnl = format(cash, "f") if position is None else "--"
     if position is not None:
-        for record in reversed(bridge.records):
+        for record in reversed(records):
             if record.kind is LivePaperRecordKind.MARK:
                 mark = record.payload.body
                 if mark.ticker == position.ticker and mark.fully_priced:
@@ -516,7 +672,7 @@ def _dashboard(
         observed_now = max(
             (
                 value
-                for record in bridge.records
+                for record in records
                 for value in (
                     getattr(record.payload.body, "observed_monotonic_ns", None),
                     getattr(
@@ -530,17 +686,78 @@ def _dashboard(
             default=None,
         )
     book_age = "--" if latest_book is None or observed_now is None else f"{max(0, observed_now - latest_book) / 1_000_000_000:.3f}s"
+    elapsed = (
+        "--" if observed_now is None
+        else f"{max(0, observed_now - state.config.opened_monotonic_ns) / 1_000_000_000:.3f}s"
+    )
+    latest_sources: dict[tuple[str, str], int] = {}
+    latest_frame = None
+    for record in records:
+        if record.kind is LivePaperRecordKind.RAW_SCORE_RECEIPT:
+            for observation in record.payload.body.observations:
+                latest_sources[(observation.provider_slot, observation.source_id)] = (
+                    observation.captured_monotonic_ns
+                )
+        elif record.kind is LivePaperRecordKind.RAW_L2_RECEIPT:
+            latest_frame = record.payload.body.frame
+    source_health_parts: list[str] = []
+    for provider in state.config.provider_authorities:
+        captured = latest_sources.get((provider.slot, provider.source_id))
+        health = "seen" if captured is not None else "missing"
+        source_health_parts.append(
+            f"{provider.slot}/{provider.source_id}:{health}"
+        )
+    source_health = ",".join(source_health_parts) or "none"
+    home_book = away_book = "--"
+    if latest_frame is not None:
+        home_book = (
+            f"bid:{_top_executable(latest_frame.home.yes_bids)}/"
+            f"ask:{_top_executable(latest_frame.home.yes_asks)}"
+        )
+        away_book = (
+            f"bid:{_top_executable(latest_frame.away.yes_bids)}/"
+            f"ask:{_top_executable(latest_frame.away.yes_asks)}"
+        )
+    pending_action = state.portfolio.pending_action
+    pending = (
+        "none" if pending_action is None
+        else f"{pending_action.kind.value}:{pending_action.ticker}x"
+        f"{format(pending_action.remaining_quantity, 'f')}"
+    )
+    last_decision = "none"
+    rejection_counts: dict[str, int] = {}
+    for record in records:
+        if record.kind in {
+            LivePaperRecordKind.REJECTION, LivePaperRecordKind.ABSTENTION,
+        }:
+            reason = str(getattr(record.payload.body, "reason", record.kind.value))
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            last_decision = f"{record.kind.value}:{reason}"
+        elif record.kind is LivePaperRecordKind.ACTION:
+            action = record.payload.body
+            last_decision = f"action:{action.kind.value}:{action.ticker}"
+    rejection_counts_text = (
+        ",".join(
+            f"{reason}:{rejection_counts[reason]}"
+            for reason in sorted(rejection_counts)
+        )
+        or "none"
+    )
     rejection = last_kind
-    for record in reversed(bridge.records):
+    for record in reversed(records):
         if record.kind in {LivePaperRecordKind.REJECTION, LivePaperRecordKind.ABSTENTION}:
             body = record.payload.body
             rejection = str(getattr(body, "reason", record.kind.value))
             break
     stream.write(
+        f"event={last_kind} elapsed={elapsed} source_health={source_health} "
         f"trust={trust} score={score} server={server} "
         f"model1_set={model_1_set} model1_match={model_1_match} "
         f"model2_set={model_2_set} model2_match={model_2_match} "
-        f"book_age={book_age} paper_position={position_text} pnl={pnl} "
+        f"home_book={home_book} away_book={away_book} book_age={book_age} "
+        f"pending={pending} last_decision={last_decision} "
+        f"rejection_counts={rejection_counts_text} "
+        f"paper_position={position_text} pnl={pnl} "
         f"top_rejection={rejection}\n"
     )
     stream.flush()
@@ -605,17 +822,18 @@ def _restore_or_open(
 def _rehydrate_committed_inputs(
     bridge: GrowingJsonlCaptureBridge,
     merged: list[tuple[int, int, str, dict[str, object]]],
-) -> int:
+) -> tuple[int, tuple[int, int] | None]:
     receipts = tuple(
         record.payload.body
         for record in bridge.records
         if record.kind in {
             LivePaperRecordKind.RAW_SCORE_RECEIPT,
+            LivePaperRecordKind.RAW_CAPTURE_RECEIPT,
             LivePaperRecordKind.RAW_L2_RECEIPT,
         }
     )
     if not receipts:
-        return 0
+        return 0, None
     receipt_index = 0
     for row_index, (_, _, source, row) in enumerate(merged):
         projected = bridge.rehydrate_envelope(source, row)
@@ -625,7 +843,10 @@ def _rehydrate_committed_inputs(
             _fail("growing_stream_committed_prefix_mismatch")
         receipt_index += 1
         if receipt_index == len(receipts):
-            return row_index + 1
+            return row_index + 1, (
+                int(row["captured_wall_ns"]),
+                int(row["captured_monotonic_ns"]),
+            )
     _fail("growing_stream_missing_committed_prefix")
 
 
@@ -646,33 +867,37 @@ def _terminal(
 
 def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: TextIO) -> int:
     assert args.score_stream is not None and args.kalshi_stream is not None
-    score_rows = _jsonl(args.score_stream, "score")
-    kalshi_rows = _jsonl(args.kalshi_stream, "kalshi")
-    merged = sorted(
-        score_rows + kalshi_rows,
-        key=lambda item: (item[0], 0 if item[2] == "score" else 1, item[1]),
+    assert args.checkpoint is not None
+    score_reader = _GrowingJsonlReader(args.score_stream, "score")
+    kalshi_reader = _GrowingJsonlReader(args.kalshi_stream, "kalshi")
+    score_rows = score_reader.poll()
+    kalshi_rows = kalshi_reader.poll()
+    if args.stop_at_eof:
+        score_reader.finish()
+        kalshi_reader.finish()
+    merged = _ordered_rows(score_rows + kalshi_rows)
+    _validate_clock_order(merged, None)
+    first_wall = (
+        int(merged[0][3]["captured_wall_ns"])
+        if merged else time.time_ns()
     )
-    first_wall = min((row[3]["captured_wall_ns"] for row in merged), default=time.time_ns())
-    first_mono = min((row[0] for row in merged), default=time.monotonic_ns())
+    first_mono = merged[0][0] if merged else time.monotonic_ns()
     static, dynamic, authority = _artifact_pair(args, manifest)
     bridge, existing = _restore_or_open(
         args, manifest, static, dynamic, authority,
         opened_wall_ns=max(0, int(first_wall) - 1),
         opened_monotonic_ns=max(0, first_mono - 1),
     )
-    if args.replay_only:
-        if not existing or not bridge.state.terminal:
-            _fail("replay_terminal_required")
-        _dashboard(stdout, bridge, "replay_verified")
-        return 0
+    _startup_disclosure(stdout, bridge, manifest, args.session_log.parent)
     if bridge.state.terminal:
         _fail("session_already_terminal")
-    committed_row_count = (
-        _rehydrate_committed_inputs(bridge, merged) if existing else 0
+    committed_row_count, clock_boundary = (
+        _rehydrate_committed_inputs(bridge, merged)
+        if existing else (0, None)
     )
     writer = _DurableSessionWriter(args.session_log, args.checkpoint, existing)
-    last_wall = int(first_wall)
-    last_mono = first_mono
+    last_wall = first_wall if clock_boundary is None else clock_boundary[0]
+    last_mono = first_mono if clock_boundary is None else clock_boundary[1]
     stop = False
 
     def request_stop(*_: object) -> None:
@@ -680,27 +905,26 @@ def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdou
         stop = True
 
     installed: list[tuple[int, object]] = []
-    score_seen = len(score_rows)
-    kalshi_seen = len(kalshi_rows)
-    known_score_rows = score_rows
-    known_kalshi_rows = kalshi_rows
     started_tail = time.monotonic_ns()
     next_heartbeat = started_tail + 60_000_000_000
 
     def process_rows(
         rows: list[tuple[int, int, str, dict[str, object]]]
     ) -> None:
-        nonlocal last_wall, last_mono
+        nonlocal last_wall, last_mono, clock_boundary
+        _validate_clock_order(rows, clock_boundary)
         for mono, _, source, row in rows:
             if stop:
                 break
-            last_wall = int(row["captured_wall_ns"])
-            last_mono = mono
+            wall = int(row["captured_wall_ns"])
             records = (
                 bridge.accept_score_envelope(row)
                 if source == "score"
                 else bridge.accept_kalshi_envelope(row)
             )
+            last_wall = wall
+            last_mono = mono
+            clock_boundary = (last_wall, last_mono)
             if records:
                 writer.commit(tuple(bridge.records), bridge.state)
                 _dashboard(
@@ -721,29 +945,9 @@ def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdou
             and time.monotonic_ns() - started_tail
             < args.duration_seconds * 1_000_000_000
         ):
-            current_score = _jsonl(args.score_stream, "score")
-            current_kalshi = _jsonl(args.kalshi_stream, "kalshi")
-            if (
-                current_score[:score_seen] != known_score_rows
-                or current_kalshi[:kalshi_seen] != known_kalshi_rows
-            ):
-                _fail("growing_stream_prefix_changed")
-            additions = current_score[score_seen:] + current_kalshi[kalshi_seen:]
+            additions = score_reader.poll() + kalshi_reader.poll()
             if additions:
-                process_rows(
-                    sorted(
-                        additions,
-                        key=lambda item: (
-                            item[0],
-                            0 if item[2] == "score" else 1,
-                            item[1],
-                        ),
-                    )
-                )
-                score_seen = len(current_score)
-                kalshi_seen = len(current_kalshi)
-                known_score_rows = current_score
-                known_kalshi_rows = current_kalshi
+                process_rows(_ordered_rows(additions))
             now = time.monotonic_ns()
             if now >= next_heartbeat:
                 wall = time.time_ns()
@@ -800,11 +1004,7 @@ def _run_live(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: 
         args, manifest, static, dynamic, authority,
         opened_wall_ns=time.time_ns(), opened_monotonic_ns=time.monotonic_ns(),
     )
-    if args.replay_only:
-        if not existing or not bridge.state.terminal:
-            _fail("replay_terminal_required")
-        _dashboard(stdout, bridge, "replay_verified")
-        return 0
+    _startup_disclosure(stdout, bridge, manifest, args.session_log.parent)
     if bridge.state.terminal:
         _fail("session_already_terminal")
     writer = _DurableSessionWriter(args.session_log, args.checkpoint, existing)
@@ -861,6 +1061,21 @@ def run(
     errors = sys.stderr if stderr is None else stderr
     try:
         args = parse_cli_arguments(argv)
+        output.write(BANNER + "\n")
+        output.flush()
+        if args.replay_only:
+            _absolute_regular(args.session_log, "session_log_path")
+            raw = _read_regular(
+                args.session_log, "session_log", 32 * 1024 * 1024
+            )
+            replay = replay_live_paper_records(raw, require_terminal=True)
+            output.write(
+                f"event=replay_verified records={len(replay.records)} "
+                "terminal=true NO REAL ORDERS\n"
+            )
+            output.flush()
+            return 0
+        assert args.manifest is not None and args.checkpoint is not None
         validate_cli_paths(
             manifest=args.manifest,
             score_stream=args.score_stream,
@@ -870,8 +1085,6 @@ def run(
             session_log=args.session_log,
             checkpoint=args.checkpoint,
         )
-        output.write(BANNER + "\n")
-        output.flush()
         manifest = load_live_paper_manifest(args.manifest)
         return (
             _run_live(args, manifest, output, errors)

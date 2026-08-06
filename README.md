@@ -142,9 +142,25 @@ python -m inci_tennis_runtime.live_two_model_paper_cli \
 Use `--stop-at-eof` for a bounded fixture/dry run. Without it, the command
 tails both files until the duration expires, emits a durable heartbeat at
 least every 60 seconds, and appends a typed terminal on duration, SIGINT, or
-SIGTERM. `--replay-only --stop-at-eof` authenticates an already-terminal log
-and checkpoint without credentials or network access and does not rewrite the
-session log.
+SIGTERM. Growing-file polling retains a bounded incomplete final JSONL row
+until its terminating newline arrives, authenticates the entire previously
+observed byte prefix on every poll, and rejects any prefix mutation. In
+`--stop-at-eof` mode, an incomplete final row is an error. Captured wall and
+monotonic clocks must both be session-wide nondecreasing, including across
+polls and resume.
+
+Replay is a separate log-only route:
+
+```bash
+python -m inci_tennis_runtime.live_two_model_paper_cli \
+  --replay-only \
+  --session-log /absolute/path/live-paper-session.jsonl
+```
+
+The replay path requires an absolute existing regular terminal session log,
+authenticates its hash chain, and recomputes every derived record. It does not
+accept or read a manifest, checkpoint, score/Kalshi stream, artifact, bootstrap
+prior, live option, or duration; it opens no writer or network transport.
 
 Live read-only mode delegates match discovery, chooser UI, Sportradar capture,
 and Kalshi WebSocket handling to the existing shadow collector:
@@ -220,9 +236,19 @@ The five-second score/book freshness, one-second decision latency, $50 debit
 cap, $5 entry/exit thresholds, 300-second maximum hold, and 60-second heartbeat
 are frozen code/session constants and have no CLI overrides.
 
-All inputs must already exist as absolute regular non-symlink files. The log
-and checkpoint must be absolute, distinct from every input and each other,
-and non-symlink paths. Evidence rows append with flush/fsync ordering; the
+Before live transport starts, the command prints the configured provider proof
+status and aggregate trust eligibility, artifact authority and digests,
+canonical match/start/format, exact HOME/AWAY ticker/UUID/YES orientation, all
+frozen policy constants, the paper state root, and `NO REAL ORDERS`. Dashboard
+rows include elapsed time, factual source `seen`/`missing` health, score trust,
+both models, executable HOME/AWAY top books and book age, pending and last
+decision, cumulative typed rejection counts, position, and paper P&L. Neither
+output includes credentials.
+
+For capture/resume mode, all inputs must already exist as absolute regular
+non-symlink files. The log and checkpoint must be absolute, distinct from every
+input and each other, and non-symlink paths. Evidence rows append with
+flush/fsync ordering; the
 checkpoint uses temp-write, fsync, atomic replace, and parent-directory fsync.
 An existing log/checkpoint is authenticated by the session replay APIs before
 resume and is never truncated or silently replaced. The session log is held by
