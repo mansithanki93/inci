@@ -216,6 +216,7 @@ class PaperAction:
     decision_receipt_sha256: str
     decision_capture_wall_ns: int
     decision_capture_monotonic_ns: int
+    conservative_fair_probability: Decimal | None = None
 
     def __post_init__(self) -> None:
         if type(self.kind) is not PaperActionKind or type(self.player_side) is not PlayerSide or type(self.canonical_match_id) is not str or not self.canonical_match_id or type(self.ticker) is not str or not self.ticker or type(self.market_id) is not str or _UUID.fullmatch(self.market_id) is None:
@@ -229,6 +230,12 @@ class PaperAction:
         _sha(self.decision_receipt_sha256, "decision_receipt_sha256")
         if self.due_wall_ns != self.decision_wall_ns + _ONE_SECOND_NS or self.due_monotonic_ns != self.decision_monotonic_ns + _ONE_SECOND_NS:
             _fail("action_due")
+        fair = self.conservative_fair_probability
+        if self.kind is PaperActionKind.BUY:
+            if type(fair) is not Decimal or not fair.is_finite() or not _ZERO < fair <= _ONE:
+                _fail("action_fair")
+        elif fair is not None:
+            _fail("action_fair")
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,8 +463,13 @@ def _fair_values(forecast: LiveTwoModelForecast) -> tuple[tuple[PlayerSide, Deci
     return ((PlayerSide.HOME, min(values[0], values[1])), (PlayerSide.AWAY, min(_ONE - values[2], _ONE - values[3])))  # type: ignore[arg-type]
 
 
-def _new_action(kind: PaperActionKind, side: PlayerSide, ticker: str, market_id: str, quantity: Decimal, book: LivePaperL2Frame, wall_ns: int, mono_ns: int) -> PaperAction:
-    return PaperAction(kind=kind, canonical_match_id=book.binding.canonical_match_id, player_side=side, ticker=ticker, market_id=market_id, quantity=quantity, remaining_quantity=quantity, decision_wall_ns=wall_ns, decision_monotonic_ns=mono_ns, due_wall_ns=wall_ns + _ONE_SECOND_NS, due_monotonic_ns=mono_ns + _ONE_SECOND_NS, decision_generation=book.physical_connection_generation, decision_subscription_id=book.subscription_id, decision_global_sequence=book.global_sequence, decision_receipt_sha256=book.raw_parent_receipt_sha256, decision_capture_wall_ns=book.captured_wall_ns, decision_capture_monotonic_ns=book.captured_monotonic_ns)
+def _new_action(kind: PaperActionKind, side: PlayerSide, ticker: str, market_id: str, quantity: Decimal, book: LivePaperL2Frame, wall_ns: int, mono_ns: int, *, conservative_fair_probability: Decimal | None = None) -> PaperAction:
+    return PaperAction(kind=kind, canonical_match_id=book.binding.canonical_match_id, player_side=side, ticker=ticker, market_id=market_id, quantity=quantity, remaining_quantity=quantity, decision_wall_ns=wall_ns, decision_monotonic_ns=mono_ns, due_wall_ns=wall_ns + _ONE_SECOND_NS, due_monotonic_ns=mono_ns + _ONE_SECOND_NS, decision_generation=book.physical_connection_generation, decision_subscription_id=book.subscription_id, decision_global_sequence=book.global_sequence, decision_receipt_sha256=book.raw_parent_receipt_sha256, decision_capture_wall_ns=book.captured_wall_ns, decision_capture_monotonic_ns=book.captured_monotonic_ns, conservative_fair_probability=conservative_fair_probability)
+
+
+def _settlement_value_profit(state: PaperPortfolioState, *, fair: Decimal, quantity: Decimal, debit: Decimal, entry_fees: Decimal, wall_ns: int) -> Decimal:
+    conservative_exit_fee = _fee(state, price=Decimal("0.5"), quantity=quantity, side=FillSide.SELL, wall_ns=wall_ns)
+    return quantity * fair - debit - entry_fees - conservative_exit_fee
 
 
 def evaluate_live_paper_entry(
@@ -510,8 +522,7 @@ def evaluate_live_paper_entry(
             break
         if largest is not None:
             quantity, debit, entry_fees = largest
-            conservative_exit_fee = _fee(state, price=Decimal("0.5"), quantity=quantity, side=FillSide.SELL, wall_ns=decision_wall_ns)
-            edge = quantity * fair - debit - entry_fees - conservative_exit_fee
+            edge = _settlement_value_profit(state, fair=fair, quantity=quantity, debit=debit, entry_fees=entry_fees, wall_ns=decision_wall_ns)
             if edge >= _EXIT_TRIGGER:
                 candidates.append((edge, side, fair, quantity, debit + entry_fees))
     if not had_depth:
@@ -522,7 +533,7 @@ def evaluate_live_paper_entry(
         return PaperDecision(PaperDecisionReason.EDGE_BELOW_MINIMUM, None, state)
     edge, side, fair, quantity, _ = max(candidates, key=lambda item: (item[0], item[3]))
     market = book.market_for(side)
-    action = _new_action(PaperActionKind.BUY, side, market.ticker, market.market_id, quantity, book, decision_wall_ns, decision_monotonic_ns)
+    action = _new_action(PaperActionKind.BUY, side, market.ticker, market.market_id, quantity, book, decision_wall_ns, decision_monotonic_ns, conservative_fair_probability=fair)
     return PaperDecision(PaperDecisionReason.ACCEPTED, action, replace(state, pending_action=action), side, fair, edge)
 
 
@@ -530,15 +541,47 @@ def _eligible(action: PaperAction, book: LivePaperL2Frame, observed_wall_ns: int
     return observed_wall_ns >= action.due_wall_ns and observed_monotonic_ns >= action.due_monotonic_ns and book.captured_wall_ns >= action.due_wall_ns and book.captured_monotonic_ns >= action.due_monotonic_ns and book.physical_connection_generation == action.decision_generation and book.subscription_id == action.decision_subscription_id and book.global_sequence > action.decision_global_sequence and book.raw_parent_receipt_sha256 != action.decision_receipt_sha256 and book.captured_wall_ns > action.decision_capture_wall_ns and book.captured_monotonic_ns > action.decision_capture_monotonic_ns
 
 
+def _arrival_buy_plan(state: PaperPortfolioState, action: PaperAction, book: LivePaperL2Frame) -> tuple[tuple[tuple[Decimal, Decimal], ...], Decimal, Decimal, Decimal] | None:
+    levels = book.market_for(action.player_side).yes_asks
+    _, available = _walk(levels, action.remaining_quantity, consumed=state.consumed_depth, receipt=book.raw_parent_receipt_sha256, ticker=action.ticker, kind=action.kind)
+    prior = state.position
+    prior_quantity = _ZERO if prior is None else prior.quantity
+    prior_debit = _ZERO if prior is None else prior.debit
+    prior_entry_fees = _ZERO if prior is None else prior.entry_fees
+    fair = action.conservative_fair_probability
+    if fair is None:
+        _fail("action_fair")
+    for integer_quantity in range(int(available), 0, -1):
+        requested = Decimal(integer_quantity)
+        pieces, quantity = _walk(levels, requested, consumed=state.consumed_depth, receipt=book.raw_parent_receipt_sha256, ticker=action.ticker, kind=action.kind)
+        if quantity != requested:
+            continue
+        debit = sum((price * amount for price, amount in pieces), _ZERO)
+        entry_fees = sum((_fee(state, price=price, quantity=amount, side=FillSide.BUY, wall_ns=book.captured_wall_ns) for price, amount in pieces), _ZERO)
+        cumulative_debit = prior_debit + debit
+        cumulative_entry_fees = prior_entry_fees + entry_fees
+        if cumulative_debit + cumulative_entry_fees > _MAX_DEBIT:
+            continue
+        cumulative_quantity = prior_quantity + quantity
+        edge = _settlement_value_profit(state, fair=fair, quantity=cumulative_quantity, debit=cumulative_debit, entry_fees=cumulative_entry_fees, wall_ns=book.captured_wall_ns)
+        if edge >= _EXIT_TRIGGER:
+            return pieces, quantity, debit, entry_fees
+    return None
+
+
 def _fill_action(state: PaperPortfolioState, action: PaperAction, book: LivePaperL2Frame) -> tuple[PaperPortfolioState, PaperEvent | None]:
     market = book.market_for(action.player_side)
-    levels = market.yes_asks if action.kind is PaperActionKind.BUY else market.yes_bids
-    pieces, quantity = _walk(levels, action.remaining_quantity, consumed=state.consumed_depth, receipt=book.raw_parent_receipt_sha256, ticker=action.ticker, kind=action.kind)
-    if quantity == _ZERO:
-        return state, None
-    gross = sum((price * amount for price, amount in pieces), _ZERO)
-    fee_side = FillSide.BUY if action.kind is PaperActionKind.BUY else FillSide.SELL
-    fees = sum((_fee(state, price=price, quantity=amount, side=fee_side, wall_ns=book.captured_wall_ns) for price, amount in pieces), _ZERO)
+    if action.kind is PaperActionKind.BUY:
+        plan = _arrival_buy_plan(state, action, book)
+        if plan is None:
+            return state, None
+        pieces, quantity, gross, fees = plan
+    else:
+        pieces, quantity = _walk(market.yes_bids, action.remaining_quantity, consumed=state.consumed_depth, receipt=book.raw_parent_receipt_sha256, ticker=action.ticker, kind=action.kind)
+        if quantity == _ZERO:
+            return state, None
+        gross = sum((price * amount for price, amount in pieces), _ZERO)
+        fees = sum((_fee(state, price=price, quantity=amount, side=FillSide.SELL, wall_ns=book.captured_wall_ns) for price, amount in pieces), _ZERO)
     consumed = state.consumed_depth + tuple(_ConsumedDepth(book.raw_parent_receipt_sha256, action.ticker, action.kind, price, amount) for price, amount in pieces)
     residual = action.remaining_quantity - quantity
     updated_action = replace(action, remaining_quantity=residual) if residual > _ZERO else None

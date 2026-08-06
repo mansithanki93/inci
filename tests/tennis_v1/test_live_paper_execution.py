@@ -82,6 +82,21 @@ def _raw_book_with_home_bid(sequence: int, price: Decimal) -> UnqualifiedTwoTick
     return replace(original, markets=(home, original.markets[1]))
 
 
+def _raw_book_with_home_ask(
+    sequence: int,
+    price: Decimal,
+    quantity: Decimal = Decimal("100"),
+) -> UnqualifiedTwoTickerL2State:
+    original = _raw_book(sequence)
+    home = replace(
+        original.markets[0],
+        yes_levels=(),
+        no_levels=((Decimal("1") - price, quantity),),
+    )
+    away = replace(original.markets[1], yes_levels=(), no_levels=())
+    return replace(original, markets=(home, away))
+
+
 def _forecast() -> LiveTwoModelForecast:
     estimate = PilotOutcomeEstimate(
         model_version="model-v1", supported=True,
@@ -121,6 +136,202 @@ def _state() -> PaperPortfolioState:
 
 
 class LivePaperExecutionTests(unittest.TestCase):
+    def test_arrival_reprices_adverse_buy_to_largest_quantity_under_cumulative_cap(self) -> None:
+        """Catches filling the decision quantity after the arrival ask worsens."""
+        binding = _binding()
+        decision_book = project_paper_l2(
+            _raw_book_with_home_ask(1, Decimal("0.10")), binding=binding,
+            raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), decision_book, _state(),
+            decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        self.assertEqual(decision.action.quantity, Decimal("100"))
+
+        arrival_raw = _raw_book_with_home_ask(2, Decimal("0.40"), Decimal("50"))
+        arrival_home = replace(
+            arrival_raw.markets[0],
+            no_levels=(
+                (Decimal("0.60"), Decimal("50")),
+                (Decimal("0.20"), Decimal("50")),
+            ),
+        )
+        arrival = project_paper_l2(
+            replace(arrival_raw, markets=(arrival_home, arrival_raw.markets[1])),
+            binding=binding,
+            raw_parent_receipt_sha256="4" * 64,
+            captured_wall_ns=2_000_000_000,
+            captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        filled, events = reduce_paper_book(
+            decision.state, arrival, observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertEqual(events[0].fill.quantity, Decimal("87"))
+        self.assertEqual(events[0].fill.debit_or_credit, Decimal("49.60"))
+        self.assertEqual(filled.position.debit + filled.position.entry_fees, Decimal("49.60"))
+        self.assertEqual(filled.pending_action.remaining_quantity, Decimal("13"))
+
+    def test_arrival_buy_cap_includes_fee_at_exact_fifty_dollar_boundary(self) -> None:
+        """Catches accepting quantity 81 when quantity 80 costs exactly $50 with fees."""
+        binding = _binding()
+        costly = replace(
+            _state(),
+            fee_schedule=replace(_state().fee_schedule, taker_rate=Decimal("0.5")),
+        )
+        decision_book = project_paper_l2(
+            _raw_book_with_home_ask(1, Decimal("0.10")), binding=binding,
+            raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), decision_book, costly,
+            decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        self.assertEqual(decision.action.quantity, Decimal("100"))
+
+        arrival = project_paper_l2(
+            _raw_book_with_home_ask(2, Decimal("0.50")), binding=binding,
+            raw_parent_receipt_sha256="4" * 64,
+            captured_wall_ns=2_000_000_000,
+            captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        filled, events = reduce_paper_book(
+            decision.state, arrival, observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertEqual(events[0].fill.quantity, Decimal("80"))
+        self.assertEqual(events[0].fill.debit_or_credit, Decimal("40.00"))
+        self.assertEqual(events[0].fill.fees, Decimal("10.0000"))
+        self.assertEqual(filled.position.debit + filled.position.entry_fees, Decimal("50.0000"))
+
+    def test_arrival_buy_cap_and_edge_account_for_prior_partial_debit_and_fees(self) -> None:
+        """Catches sizing a later partial fill without the earlier fill's cost and edge."""
+        binding = _binding()
+        costly = replace(
+            _state(),
+            fee_schedule=replace(_state().fee_schedule, taker_rate=Decimal("0.5")),
+        )
+        decision_book = project_paper_l2(
+            _raw_book_with_home_ask(1, Decimal("0.10")), binding=binding,
+            raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), decision_book, costly,
+            decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        first_arrival = project_paper_l2(
+            _raw_book_with_home_ask(2, Decimal("0.30"), Decimal("20")),
+            binding=binding, raw_parent_receipt_sha256="4" * 64,
+            captured_wall_ns=2_000_000_000,
+            captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        partial, first_events = reduce_paper_book(
+            decision.state, first_arrival, observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertEqual(first_events[0].fill.quantity, Decimal("20"))
+
+        budget_arrival = project_paper_l2(
+            _raw_book_with_home_ask(3, Decimal("0.60")), binding=binding,
+            raw_parent_receipt_sha256="6" * 64,
+            captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        budgeted, budget_events = reduce_paper_book(
+            partial, budget_arrival, observed_wall_ns=3_000_000_000,
+            observed_monotonic_ns=3_000_000_000,
+        )
+        self.assertEqual(budget_events[0].fill.quantity, Decimal("58"))
+        self.assertEqual(
+            budgeted.position.debit + budgeted.position.entry_fees,
+            Decimal("49.8600"),
+        )
+
+        second_arrival = project_paper_l2(
+            _raw_book_with_home_ask(3, Decimal("0.80")), binding=binding,
+            raw_parent_receipt_sha256="5" * 64,
+            captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        filled, second_events = reduce_paper_book(
+            partial, second_arrival, observed_wall_ns=3_000_000_000,
+            observed_monotonic_ns=3_000_000_000,
+        )
+        self.assertEqual(second_events[0].fill.quantity, Decimal("22"))
+        self.assertEqual(filled.position.quantity, Decimal("42"))
+        self.assertEqual(filled.position.debit, Decimal("23.60"))
+        self.assertEqual(filled.position.entry_fees, Decimal("3.8600"))
+        self.assertEqual(filled.pending_action.remaining_quantity, Decimal("58"))
+
+    def test_worse_arrival_zero_fill_retains_action_for_strictly_later_frame(self) -> None:
+        """Catches losing causality or the pending action after an adverse zero fill."""
+        binding = _binding()
+        decision_book = project_paper_l2(
+            _raw_book_with_home_ask(1, Decimal("0.10")), binding=binding,
+            raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), decision_book, _state(),
+            decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        unchanged, events = reduce_paper_book(
+            decision.state, decision_book, observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertFalse(events)
+        self.assertEqual(unchanged.pending_action, decision.action)
+
+        adverse = project_paper_l2(
+            _raw_book_with_home_ask(2, Decimal("0.90")), binding=binding,
+            raw_parent_receipt_sha256="4" * 64,
+            captured_wall_ns=2_000_000_000,
+            captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        retained, events = reduce_paper_book(
+            unchanged, adverse, observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertFalse(events)
+        self.assertEqual(retained.pending_action, decision.action)
+        self.assertIsNone(retained.position)
+
+        favorable = project_paper_l2(
+            _raw_book_with_home_ask(3, Decimal("0.40")), binding=binding,
+            raw_parent_receipt_sha256="5" * 64,
+            captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        filled, events = reduce_paper_book(
+            retained, favorable, observed_wall_ns=3_000_000_000,
+            observed_monotonic_ns=3_000_000_000,
+        )
+        self.assertEqual(events[0].fill.quantity, Decimal("100"))
+        self.assertIsNone(filled.pending_action)
+
     def test_binding_rejects_non_uuid_and_wrapper_market_identity_drift(self) -> None:
         """Catches a caller relabelling a different market as the frozen match."""
         with self.assertRaises(LivePaperContractError):
@@ -266,7 +477,7 @@ class LivePaperExecutionTests(unittest.TestCase):
         )
         self.assertEqual(decision.action.quantity, Decimal("98"))
 
-        partial_home = replace(home, no_levels=((Decimal("0.70"), Decimal("3")),))
+        partial_home = replace(home, no_levels=((Decimal("0.70"), Decimal("36")),))
         partial = project_paper_l2(
             replace(raw, markets=(partial_home, away), global_sequence=2), binding=binding,
             raw_parent_receipt_sha256="4" * 64, captured_wall_ns=2_000_000_000,
@@ -277,14 +488,14 @@ class LivePaperExecutionTests(unittest.TestCase):
             decision.state, partial, observed_wall_ns=2_000_000_000,
             observed_monotonic_ns=2_000_000_000,
         )
-        self.assertEqual(events[0].fill.quantity, Decimal("3"))
-        self.assertEqual(reduced.pending_action.remaining_quantity, Decimal("95"))
+        self.assertEqual(events[0].fill.quantity, Decimal("36"))
+        self.assertEqual(reduced.pending_action.remaining_quantity, Decimal("62"))
         reused, events = reduce_paper_book(
             reduced, partial, observed_wall_ns=2_000_000_001,
             observed_monotonic_ns=2_000_000_001,
         )
         self.assertFalse(events)
-        self.assertEqual(reused.pending_action.remaining_quantity, Decimal("95"))
+        self.assertEqual(reused.pending_action.remaining_quantity, Decimal("62"))
 
     def test_invalid_reducer_transport_numbers_fail_before_projection(self) -> None:
         """Catches incomplete or non-positive reducer transport identity reaching policy."""
