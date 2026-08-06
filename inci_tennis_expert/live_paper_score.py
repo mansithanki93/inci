@@ -251,7 +251,7 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
     return next_state, _decision(LivePaperScoreDecisionKind.POINT_ACCEPTED, trust=trust, anchor=anchor, transition=transition, reason="exact_point_successor")
 
 
-def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveScoreCaptureContext, normalized: NormalizedLiveScore, local_revision: int, independence_proof_sha256: str | None) -> LivePaperSourceObservation:
+def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveScoreCaptureContext, normalized: NormalizedLiveScore, local_revision: int, independence_proof_sha256: str | None = None) -> LivePaperSourceObservation:
     """Project parser facts into the separate, locally-revisioned paper domain."""
     if type(canonical_match_id) is not str or not canonical_match_id:
         raise ValueError("canonical_match_id")

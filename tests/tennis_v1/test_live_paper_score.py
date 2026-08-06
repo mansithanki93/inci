@@ -344,6 +344,11 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
                 normalized=unproven_normalized, local_revision=7,
                 independence_proof_sha256=SHA_C,
             )
+        unproven_observation = score.observation_from_live_score_facts(
+            canonical_match_id="match-1", context=unproven_context,
+            normalized=unproven_normalized, local_revision=7,
+        )
+        self.assertIsNone(unproven_observation.independence_proof_sha256)
 
         observation = score.observation_from_live_score_facts(
             canonical_match_id="match-1", context=context, normalized=normalized,

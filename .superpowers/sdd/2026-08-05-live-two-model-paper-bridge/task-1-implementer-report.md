@@ -151,3 +151,28 @@ projection requires it whenever the manifest-bound context claims proof. Each
 consensus support record carries the proof digest into its enclosing anchor or
 transition digest. This round references, but deliberately does not validate,
 the proof content against a manifest; that is deferred to Task 5.
+
+## Fix round 3 (2026-08-05)
+
+### RED
+
+```text
+$ /Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_facts_projection_binds_canonical_match_and_uses_paper_local_revision_identity -v
+Ran 1 test in 0.016s
+FAILED (errors=1)
+```
+
+The unproven projection failed with `TypeError` because
+`independence_proof_sha256` was still required as a keyword-only parameter.
+
+### GREEN
+
+```text
+$ /Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest tests.tennis_v1.test_live_paper_score -v
+Ran 13 tests in 0.021s
+OK
+```
+
+The parameter now defaults to `None`; the existing true-with-proof and
+false/unknown-without-proof validation is unchanged. `git diff --check`
+completed successfully.
