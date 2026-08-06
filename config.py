@@ -42,9 +42,13 @@ class Config:
 
     # --- Strategy (cents). Defaults sized so TP clears fees near 50c (fix #4):
     # net_take_profit(50, 5) ~= +1.2c; a 2c TP would be net-negative there.
+    # take_profit is the ARM floor (minimum favorable move). With
+    # tp_trail_cents > 0, exit waits for a pullback from the post-arm peak so
+    # a set-driven spike can run past the floor before we sell.
     dip_threshold: int = 7
     lookback_seconds: int = 45
     take_profit: int = 5
+    tp_trail_cents: int = 2           # 0 = fixed TP at arm; >0 = trail giveback
     stop_loss: int = 6
     max_hold_seconds: int = 300       # also the analyzer's signal cooldown
     close_buffer_seconds: int = 60    # no new entry this long before close
@@ -162,7 +166,8 @@ class Config:
                      "stale_data_s", "reconcile_every_s",
                      "close_buffer_seconds"):
             number(name, positive=True)
-        for name in ("sim_latency_s", "sim_slippage_cents", "max_spread"):
+        for name in ("sim_latency_s", "sim_slippage_cents", "max_spread",
+                     "tp_trail_cents"):
             number(name, nonnegative=True)
         for name in ("max_open_positions", "max_monitored_markets",
                      "flatten_retries", "max_consec_errors"):
@@ -181,7 +186,7 @@ class Config:
         if maximum + take_profit > Decimal(100):
             raise ValueError("max_price + take_profit cannot exceed 100")
         for name in ("dip_threshold", "take_profit", "stop_loss",
-                     "max_spread"):
+                     "max_spread", "tp_trail_cents"):
             if number(name, nonnegative=True) > Decimal(100):
                 raise ValueError(f"{name} cannot exceed 100 cents")
         contracts = number("contracts_per_trade", positive=True)
@@ -220,6 +225,7 @@ class Config:
                     "state identity or derived safety paths changed after "
                     "construction; create a new Config")
         for name in ("dip_threshold", "take_profit", "stop_loss",
+                     "tp_trail_cents",
                      "contracts_per_trade", "max_daily_loss_usd",
                      "min_price", "max_price", "max_spread",
                      "sim_slippage_cents"):

@@ -2593,7 +2593,7 @@ def test_analyzer_replays_shared_portfolio_exactly_once():
         group = f"PORTFOLIO-{candidate}"
         groups.setdefault(analyzer.split_bucket(group), group)
         candidate += 1
-    cfg = Config(max_open_positions=1)
+    cfg = Config(max_open_positions=1, tp_trail_cents=0)
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
@@ -2813,7 +2813,7 @@ def test_time_exit_upgrades_working_take_profit():
             return self.book
 
     now = [299.0]
-    cfg = Config(); cfg.sim_latency_s = 5.0; cfg.max_hold_seconds = 300
+    cfg = Config(tp_trail_cents=0); cfg.sim_latency_s = 5.0; cfg.max_hold_seconds = 300
     feed = Feed()
     ex = Executor(cfg, None, feed, clock=lambda: now[0], sleep=lambda _: None)
     strat = ScalpStrategy(cfg)
@@ -2889,6 +2889,45 @@ def test_entry_edge_uses_executable_ask_depth():
     print("PASS entry sizes and edges against executable ask depth")
 
 
+def test_trailing_tp_lets_runners_extend_past_arm():
+    """Arm at take_profit, hold through a spike, sell on trail giveback."""
+    cfg = Config(tp_trail_cents=2)
+    strat = ScalpStrategy(cfg)
+    strat.record_fill(
+        "T", "BUY", Decimal(50), Decimal(20), fee_usd(50, 20), now=0.0)
+    # Arm floor (+5) alone does not exit while trail > 0.
+    assert strat.check_exit("T", Decimal(55), now=1.0) is None
+    assert strat.positions["T"].peak_bid == Decimal(55)
+    # Set-driven spike: peak runs to +12, still no sell.
+    assert strat.check_exit("T", Decimal(62), now=2.0) is None
+    assert strat.positions["T"].peak_bid == Decimal(62)
+    # Giveback of trail (2c) while still above the arm floor → variable TP.
+    sig = strat.check_exit("T", Decimal(60), now=3.0)
+    assert sig is not None
+    assert sig["reason"].startswith("take-profit trail")
+    assert "peak +12c" in sig["reason"]
+    assert "giveback 2c" in sig["reason"]
+    # Hard stop still wins immediately on a dump.
+    strat2 = ScalpStrategy(cfg)
+    strat2.record_fill(
+        "T", "BUY", Decimal(50), Decimal(20), fee_usd(50, 20), now=0.0)
+    strat2.check_exit("T", Decimal(60), now=1.0)  # build peak
+    assert strat2.check_exit("T", Decimal(40), now=2.0)["reason"].startswith(
+        "stop-loss")
+    print("PASS trailing TP holds runners and sells on giveback")
+
+
+def test_trailing_tp_zero_keeps_fixed_arm_exit():
+    cfg = Config(tp_trail_cents=0)
+    strat = ScalpStrategy(cfg)
+    strat.record_fill(
+        "T", "BUY", Decimal(50), Decimal(20), fee_usd(50, 20), now=0.0)
+    sig = strat.check_exit("T", Decimal(55), now=1.0)
+    assert sig is not None
+    assert sig["reason"].startswith("take-profit,")
+    print("PASS tp_trail_cents=0 preserves fixed take-profit at arm")
+
+
 def test_pricefeed_uses_installed_event_identity():
     from market_data import PriceFeed
 
@@ -2962,7 +3001,7 @@ def test_market_envelope_to_research_log_preserves_event_identity():
 def test_replay_exact_paper_path_and_residual():
     import csv as _csv
     from replay import replay
-    cfg = Config(sports=["Tennis"])
+    cfg = Config(sports=["Tennis"], tp_trail_cents=0)
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
@@ -3014,7 +3053,7 @@ def test_pending_paper_order_uses_first_observed_due_quote():
             return self.book.get(ticker, (None, None, None, None))
 
     now = [0.0]
-    cfg = Config(); cfg.sim_latency_s = 1.0
+    cfg = Config(tp_trail_cents=0); cfg.sim_latency_s = 1.0
     feed = MutableFeed()
     for ts in range(-20, 0):
         feed.history["T"].append((float(ts), Decimal(60)))
@@ -3071,7 +3110,7 @@ def test_quote_timestamp_is_causal_at_latency_boundary():
             return self.book
 
     wall_clock = [0.0]
-    cfg = Config(); cfg.sim_latency_s = 1.0
+    cfg = Config(tp_trail_cents=0); cfg.sim_latency_s = 1.0
     feed = Feed()
     ex = Executor(cfg, None, feed, clock=lambda: wall_clock[0],
                   sleep=lambda _: None)
@@ -3106,7 +3145,7 @@ def test_pending_entries_count_toward_position_limit():
         def top_of_book(self, ticker):
             return self.books[ticker]
 
-    cfg = Config(); cfg.max_open_positions = 1
+    cfg = Config(tp_trail_cents=0); cfg.max_open_positions = 1
     feed = Feed()
     for ticker in ("A", "B"):
         feed.history[ticker] = [(-1.0, Decimal(60)),
@@ -3147,7 +3186,7 @@ def test_replay_empty_ticker_selection_processes_nothing():
 def test_replay_eof_never_fabricates_flatten_fills():
     import csv as _csv
     from replay import replay
-    cfg = Config(sports=["Tennis"])
+    cfg = Config(sports=["Tennis"], tp_trail_cents=0)
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
@@ -3195,7 +3234,7 @@ def test_pricefeed_and_replayfeed_produce_identical_paper_fills():
     ]
 
     def drive(feed, clock, apply):
-        cfg = Config(); cfg.sim_latency_s = 1.0
+        cfg = Config(tp_trail_cents=0); cfg.sim_latency_s = 1.0
         strat = ScalpStrategy(cfg)
         ex = Executor(cfg, None, feed, clock=clock.time, sleep=clock.sleep)
         ctx = Context(cfg, feed, strat, ex, log=None, safety=Safety(cfg),
@@ -3236,7 +3275,7 @@ def test_pricefeed_and_replayfeed_produce_identical_paper_fills():
 
     real_clock = VirtualClock()
     client = StreamClient()
-    price_feed = PriceFeed(Config(), client, clock=real_clock.time)
+    price_feed = PriceFeed(Config(tp_trail_cents=0), client, clock=real_clock.time)
     price_feed.install_discovery(_task4_discovery(
         _task4_contract(ticker="T", event_ticker="EVENT-T")))
 
@@ -3272,7 +3311,7 @@ def test_actual_runtime_driver_matches_replay():
         (25.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
     ]
-    cfg = Config(sports=["Tennis"]); cfg.sim_latency_s = 1.0
+    cfg = Config(sports=["Tennis"], tp_trail_cents=0); cfg.sim_latency_s = 1.0
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
@@ -4396,7 +4435,7 @@ def test_replay_reports_halt_and_resets_daily_risk_at_utc_midnight():
         (after + 23, 40, 39, 41, 20, 100),
         (after + 24, 40, 39, 41, 20, 100),
     ]
-    cfg = Config(max_daily_loss_usd=1)
+    cfg = Config(max_daily_loss_usd=1, tp_trail_cents=0)
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
@@ -4467,7 +4506,7 @@ def test_replay_honors_logged_same_day_starting_loss():
     import csv as _csv
     from replay import replay
 
-    cfg = Config(max_daily_loss_usd=30)
+    cfg = Config(max_daily_loss_usd=30, tp_trail_cents=0)
     path = tempfile.mktemp(suffix=".csv")
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
@@ -4496,7 +4535,7 @@ def test_replay_uses_log_creation_day_when_first_quote_is_after_midnight():
     after = datetime(2026, 1, 2, 0, 0, 1,
                      tzinfo=timezone.utc).timestamp()
     now = [before]
-    cfg = Config(max_daily_loss_usd=30, sports=["Tennis"])
+    cfg = Config(max_daily_loss_usd=30, sports=["Tennis"], tp_trail_cents=0)
     log = ResearchLog(
         tempfile.mkdtemp(), clock=lambda: now[0],
         session_id="DELAYED-FIRST", starting_pnl=-31, config=cfg,
@@ -4667,7 +4706,7 @@ def test_close_horizon_and_live_requote_block_unsafe_entries():
             return parse_market(current_market(
                 close_time="1970-01-01T00:03:20Z"))
 
-    cfg = Config(max_hold_seconds=300, close_buffer_seconds=60)
+    cfg = Config(max_hold_seconds=300, close_buffer_seconds=60, tp_trail_cents=0)
     feed = PriceFeed(cfg, MarketClient(), clock=lambda: 100.0)
     feed.install_discovery(_task4_discovery(_task4_contract()))
     feed.subscribe(["T"])
@@ -4681,7 +4720,7 @@ def test_close_horizon_and_live_requote_block_unsafe_entries():
     assert not ctx.executor.pending_paper
     assert ctx.entry_status["T"] == "blocked:close_horizon"
 
-    nonpaper_cfg = Config(max_hold_seconds=300, close_buffer_seconds=60)
+    nonpaper_cfg = Config(max_hold_seconds=300, close_buffer_seconds=60, tp_trail_cents=0)
     nonpaper_cfg.paper_trading = False
     nonpaper_ctx = Context(
         nonpaper_cfg, feed, ScalpStrategy(nonpaper_cfg), object(),
@@ -4704,7 +4743,7 @@ def test_close_horizon_and_live_requote_block_unsafe_entries():
             return False
 
     client = FakeClient()
-    executor, journal = make_exec(Config(), client, UnsafeRequote())
+    executor, journal = make_exec(Config(tp_trail_cents=0), client, UnsafeRequote())
     try:
         executor.execute("T", "BUY", 20,
                          expected_pre_position=Decimal(0),
@@ -4737,7 +4776,7 @@ def test_paper_early_close_risk_is_visible_but_does_not_block_entry():
         def early_close_risk(self, ticker):
             return True
 
-    cfg = Config()
+    cfg = Config(tp_trail_cents=0)
     feed = Feed()
     executor = Executor(cfg, None, feed)
     ctx = Context(cfg, feed, ScalpStrategy(cfg), executor, None, Safety(cfg),
@@ -4833,7 +4872,7 @@ def test_live_fill_risk_uses_executor_requote_immediately():
             }
             return Decimal(52), Decimal(20), Decimal(0)
 
-    cfg = Config(max_daily_loss_usd=2)
+    cfg = Config(max_daily_loss_usd=2, tp_trail_cents=0)
     cfg.paper_trading = False
     feed = Feed()
     for ts in range(1, 21):
@@ -4854,7 +4893,7 @@ def test_replay_enforces_logged_market_lifecycle():
     import csv as _csv
     from replay import replay
 
-    cfg = Config(max_hold_seconds=300, close_buffer_seconds=60)
+    cfg = Config(max_hold_seconds=300, close_buffer_seconds=60, tp_trail_cents=0)
     results = {}
     for name, close_ts, early in (
             ("near-close", 350.0, "false"),
@@ -7091,7 +7130,7 @@ def test_runtime_v6_log_replays_same_fills_and_pnl():
         (25.0, Decimal(61), Decimal(60), Decimal(62),
          Decimal(6), Decimal(100)),
     ]
-    cfg = Config(sports=["Tennis"])
+    cfg = Config(sports=["Tennis"], tp_trail_cents=0)
     cfg.sim_latency_s = 1.0
     clock = VirtualClock()
     feed = ReplayFeed(clock)
@@ -7618,6 +7657,8 @@ if __name__ == "__main__":
     test_time_exit_upgrades_working_take_profit()
     test_ioc_ask_cap_miss_cancels_entry()
     test_entry_edge_uses_executable_ask_depth()
+    test_trailing_tp_lets_runners_extend_past_arm()
+    test_trailing_tp_zero_keeps_fixed_arm_exit()
     test_subcent_sell_fill_is_never_improved()
     test_pricefeed_uses_installed_event_identity()
     test_market_envelope_to_research_log_preserves_event_identity()
@@ -7664,4 +7705,4 @@ if __name__ == "__main__":
     test_replay_enforces_logged_market_lifecycle()
     test_termination_signals_route_through_interrupt()
     test_live_and_demo_disabled()
-    print("\nALL TESTS PASS (206 tests)")
+    print("\nALL TESTS PASS (208 tests)")
