@@ -122,6 +122,7 @@ def _observation(
     lineage_sha256: str = SHA_A,
     independent: bool | None = True,
     captured_monotonic_ns: int = 1_000,
+    captured_wall_ns: int | None = None,
     canonical_match_id: str = "match-1",
     raw_receipt_sha256: str = SHA_D,
     independence_proof_sha256: str | None = SHA_B,
@@ -136,7 +137,9 @@ def _observation(
         independence_proven=independent,
         state=state,
         raw_receipt_sha256=raw_receipt_sha256,
-        captured_wall_ns=captured_monotonic_ns,
+        captured_wall_ns=(
+            captured_monotonic_ns if captured_wall_ns is None else captured_wall_ns
+        ),
         captured_monotonic_ns=captured_monotonic_ns,
         independence_proof_sha256=(
             independence_proof_sha256 if independent is True else None
@@ -144,10 +147,21 @@ def _observation(
     )
 
 
-def _reduce(api: object, state: object, observations: tuple[object, ...], now: int = 1_000) -> tuple[object, object]:
+def _reduce(
+    api: object,
+    state: object,
+    observations: tuple[object, ...],
+    now: int = 1_000,
+    *,
+    now_wall_ns: int | None = None,
+    now_monotonic_ns: int | None = None,
+) -> tuple[object, object]:
     _, score = api
     return score.reduce_live_paper_scores(
-        state, observations, now_wall_ns=now, now_monotonic_ns=now
+        state,
+        observations,
+        now_wall_ns=now if now_wall_ns is None else now_wall_ns,
+        now_monotonic_ns=now if now_monotonic_ns is None else now_monotonic_ns,
     )
 
 
@@ -266,6 +280,96 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
 
         self.assertIs(missing.kind, contracts.LivePaperScoreDecisionKind.ABSTAINED)
         self.assertIs(stale.kind, contracts.LivePaperScoreDecisionKind.ABSTAINED)
+
+    def test_wall_stale_monotonic_fresh_source_abstains(self) -> None:
+        api = _api()
+        contracts, score = api
+        initial = score.initial_live_paper_score_coordinator_state("match-1")
+        now_wall_ns = 1_000 + FRESHNESS_NS + 1
+        now_monotonic_ns = 20_000_000_000
+
+        _, decision = _reduce(
+            api,
+            initial,
+            (
+                _observation(
+                    api,
+                    _state(),
+                    captured_wall_ns=1_000,
+                    captured_monotonic_ns=now_monotonic_ns,
+                ),
+            ),
+            now_wall_ns=now_wall_ns,
+            now_monotonic_ns=now_monotonic_ns,
+        )
+
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.ABSTAINED)
+
+    def test_clock_uncertainty_pushing_effective_age_over_five_seconds_abstains(self) -> None:
+        api = _api()
+        contracts, score = api
+        initial = score.initial_live_paper_score_coordinator_state("match-1")
+
+        _, decision = _reduce(
+            api,
+            initial,
+            (
+                _observation(
+                    api,
+                    _state(last_clock_uncertainty_ns=1),
+                    captured_wall_ns=1_000,
+                    captured_monotonic_ns=1_000,
+                ),
+            ),
+            now=1_000 + FRESHNESS_NS,
+        )
+
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.ABSTAINED)
+
+    def test_future_wall_clock_abstains_even_when_monotonic_clock_is_current(self) -> None:
+        api = _api()
+        contracts, score = api
+        initial = score.initial_live_paper_score_coordinator_state("match-1")
+
+        _, decision = _reduce(
+            api,
+            initial,
+            (
+                _observation(
+                    api,
+                    _state(),
+                    captured_wall_ns=1_001,
+                    captured_monotonic_ns=1_000,
+                ),
+            ),
+            now_wall_ns=1_000,
+            now_monotonic_ns=1_000,
+        )
+
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.ABSTAINED)
+
+    def test_effective_age_at_exact_five_second_boundary_is_fresh(self) -> None:
+        api = _api()
+        contracts, score = api
+        uncertainty_ns = 200
+        initial = score.initial_live_paper_score_coordinator_state("match-1")
+
+        _, decision = _reduce(
+            api,
+            initial,
+            (
+                _observation(
+                    api,
+                    _state(last_clock_uncertainty_ns=uncertainty_ns),
+                    captured_wall_ns=1_000,
+                    captured_monotonic_ns=2_000,
+                ),
+            ),
+            now_wall_ns=1_000 + FRESHNESS_NS - uncertainty_ns,
+            now_monotonic_ns=2_123,
+        )
+
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.ANCHORED)
 
     def test_unchanged_or_duplicate_capture_does_not_update_point_ordinal(self) -> None:
         api = _api()
@@ -437,6 +541,62 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
         self.assertIs(rebased.kind, contracts.LivePaperScoreDecisionKind.REBASED)
         self.assertEqual(rebased_state.rebase_epoch, 1)
         self.assertEqual(rebased_state.local_point_ordinal, 0)
+
+    def test_wall_stale_disagreement_cannot_block_stable_rebase(self) -> None:
+        api = _api()
+        contracts, score = api
+        before = _state()
+        initial, _ = _reduce(
+            api,
+            score.initial_live_paper_score_coordinator_state("match-1"),
+            (_observation(api, before),),
+        )
+        gap = _after_one_point(
+            _after_one_point(before, PlayerSide.HOME),
+            PlayerSide.AWAY,
+        )
+        quarantined, _ = _reduce(
+            api,
+            initial,
+            (_observation(api, gap, captured_monotonic_ns=2_000),),
+            now=2_000,
+        )
+        pending, _ = _reduce(
+            api,
+            quarantined,
+            (_observation(api, gap, captured_monotonic_ns=2_001),),
+            now=2_001,
+        )
+        rebase_now = 2_001 + FRESHNESS_NS
+
+        rebased_state, decision = _reduce(
+            api,
+            pending,
+            (
+                _observation(
+                    api,
+                    gap,
+                    captured_wall_ns=rebase_now,
+                    captured_monotonic_ns=rebase_now,
+                ),
+                _observation(
+                    api,
+                    before,
+                    source_id="source-b",
+                    lineage_id="lineage-b",
+                    lineage_sha256=SHA_B,
+                    raw_receipt_sha256=SHA_C,
+                    captured_wall_ns=1,
+                    captured_monotonic_ns=rebase_now,
+                    independence_proof_sha256=SHA_D,
+                ),
+            ),
+            now_wall_ns=rebase_now,
+            now_monotonic_ns=rebase_now,
+        )
+
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.REBASED)
+        self.assertEqual(rebased_state.rebase_epoch, 1)
 
 
 if __name__ == "__main__":

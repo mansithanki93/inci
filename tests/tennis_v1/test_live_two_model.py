@@ -14,6 +14,7 @@ from inci_tennis_expert.contracts import (
     TerminationKind,
 )
 from inci_tennis_expert.live_paper_contracts import (
+    LivePaperContractError,
     LivePaperScoreAnchor,
     LivePaperPointTransition,
     LivePaperSupport,
@@ -425,7 +426,7 @@ class LiveTwoModelTests(unittest.TestCase):
             serve_artifact=static, dynamic_artifact=dynamic
         ).belief)
 
-    def test_transition_rejects_player_or_provider_match_drift_before_posterior_mutation(self) -> None:
+    def test_exact_cross_provider_transition_continues_both_forecasts(self) -> None:
         api = _api()
         static, dynamic = api.build_operator_bootstrap_artifacts(
             canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
@@ -437,17 +438,85 @@ class LiveTwoModelTests(unittest.TestCase):
             artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
         )
         accepted = _transition(state.current_state, ordinal=1)
-        for field_name, value in (("home_player_id", "other-home"), ("provider_match_id", "other-match")):
-            with self.subTest(field_name=field_name):
-                drifted = _remake_transition(
-                    accepted,
-                    after_state=replace(accepted.after_state, **{field_name: value}),
-                )
-                with self.assertRaisesRegex(api.LiveTwoModelError, "match_binding"):
-                    api.apply_live_paper_transition(state, drifted)
-                self.assertEqual(state.dynamic_model.belief, DynamicPointModel.initialize(
-                    serve_artifact=static, dynamic_artifact=dynamic
-                ).belief)
+        provider_b_after = replace(
+            accepted.after_state,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+            last_provider_event_id="provider-b-capture-1",
+            correction_lineage_sha256=SHA_D,
+        )
+        cross_provider = _remake_transition(
+            accepted,
+            after_state=provider_b_after,
+        )
+
+        next_state, forecast = api.apply_live_paper_transition(state, cross_provider)
+        continued, continued_forecast = api.apply_live_paper_transition(
+            next_state,
+            _transition(next_state.current_state, ordinal=2),
+        )
+
+        self.assertEqual(next_state.current_state.provider_match_id, "provider-b-match")
+        self.assertEqual(next_state.current_state.home_player_id, "provider-b-home")
+        self.assertEqual(next_state.current_state.away_player_id, "provider-b-away")
+        self.assertNotEqual(next_state.dynamic_model.belief, state.dynamic_model.belief)
+        self.assertTrue(forecast.model_1.supported)
+        self.assertTrue(forecast.model_2.supported)
+        self.assertEqual(continued.local_point_ordinal, 2)
+        self.assertTrue(continued_forecast.model_1.supported)
+        self.assertTrue(continued_forecast.model_2.supported)
+
+    def test_transition_rejects_format_and_canonical_target_discontinuity(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        state, _ = api.open_live_two_model(
+            static_artifact=static, dynamic_artifact=dynamic, anchor=_anchor(_state()),
+            artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
+        )
+        accepted = _transition(state.current_state, ordinal=1)
+        format_drifted = _remake_transition(
+            accepted,
+            before_state=replace(
+                accepted.before_state,
+                match_format=MatchFormat.STANDARD_ADVANTAGE_BO5_TB7_ALL_SETS,
+            ),
+            after_state=replace(
+                accepted.after_state,
+                match_format=MatchFormat.STANDARD_ADVANTAGE_BO5_TB7_ALL_SETS,
+            ),
+        )
+        canonical_drifted = _remake_transition(
+            accepted,
+            canonical_match_id="match-2",
+        )
+
+        with self.assertRaisesRegex(api.LiveTwoModelError, "match_binding"):
+            api.apply_live_paper_transition(state, format_drifted)
+        with self.assertRaises(api.LiveTwoModelError):
+            api.apply_live_paper_transition(state, canonical_drifted)
+        self.assertEqual(state.dynamic_model.belief, DynamicPointModel.initialize(
+            serve_artifact=static, dynamic_artifact=dynamic
+        ).belief)
+
+    def test_paper_transition_contract_rejects_provable_home_away_flip(self) -> None:
+        api = _api()
+        accepted = _transition(_state(), ordinal=1, winner=PlayerSide.HOME)
+        flipped = replace(
+            accepted.after_state,
+            points_home=ScoreValue.LOVE,
+            points_away=ScoreValue.FIFTEEN,
+        )
+
+        with self.assertRaisesRegex(LivePaperContractError, "point_transition"):
+            _remake_transition(accepted, after_state=flipped)
 
     def test_exact_transition_updates_only_the_server_belief_and_uses_after_state(self) -> None:
         api = _api()
@@ -500,3 +569,42 @@ class LiveTwoModelTests(unittest.TestCase):
         self.assertEqual(rebased.dynamic_model.belief.home_weights, dynamic.selected.home_initial_weights)
         self.assertEqual(forecast.forecast_label, "REBASED_PAPER")
         self.assertEqual(forecast.rebase_state, "REBASED_PAPER")
+
+    def test_rebase_switches_provider_transport_but_rejects_format_drift(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        initial, _ = api.open_live_two_model(
+            static_artifact=static, dynamic_artifact=dynamic, anchor=_anchor(_state()),
+            artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
+        )
+        provider_b = replace(
+            initial.current_state,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+            last_provider_event_id="provider-b-rebase",
+            correction_lineage_sha256=SHA_D,
+        )
+        provider_b_anchor = _anchor(provider_b, rebase_epoch=1)
+
+        rebased, forecast = api.rebase_live_two_model(initial, provider_b_anchor)
+
+        self.assertEqual(rebased.current_state.provider_match_id, "provider-b-match")
+        self.assertTrue(forecast.model_1.supported)
+        self.assertTrue(forecast.model_2.supported)
+        format_drifted_anchor = _anchor(
+            replace(
+                provider_b,
+                match_format=MatchFormat.STANDARD_ADVANTAGE_BO5_TB7_ALL_SETS,
+            ),
+            rebase_epoch=1,
+        )
+        with self.assertRaisesRegex(api.LiveTwoModelError, "rebase"):
+            api.rebase_live_two_model(initial, format_drifted_anchor)

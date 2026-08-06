@@ -247,9 +247,6 @@ def _match_binding(state: TennisState) -> tuple[object, ...]:
     return (
         state.scheduled_start_wall_ns,
         state.match_format,
-        state.provider_match_id,
-        state.home_player_id,
-        state.away_player_id,
     )
 
 
@@ -318,7 +315,7 @@ class LiveTwoModelState:
             or type(self.dynamic_artifact) is not DynamicPointArtifact
             or type(self.current_state) is not TennisState
             or type(self.dynamic_model) is not DynamicPointModel
-            or type(self.match_binding) is not tuple or len(self.match_binding) != 5
+            or type(self.match_binding) is not tuple or len(self.match_binding) != 2
             or type(self.local_point_ordinal) is not int or self.local_point_ordinal < 0
             or any(type(epoch) is not int or epoch < 0 for epoch in (
                 self.consensus_epoch, self.correction_epoch, self.rebase_epoch,
@@ -641,6 +638,7 @@ def rebase_live_two_model(
         or anchor.canonical_match_id != state.canonical_match_id
         or anchor.rebase_epoch != state.rebase_epoch + 1
         or not _artifact_bound_to_anchor(state.static_artifact, state.dynamic_artifact, anchor)
+        or not _matches_binding(anchor.state, state.match_binding)
     ):
         _fail("rebase")
     model = DynamicPointModel.initialize(
@@ -656,7 +654,7 @@ def rebase_live_two_model(
             parent_receipt_sha256s=anchor.parent_receipt_sha256s,
         ),
         anchor_sha256=anchor.anchor_sha256, transition_sha256=None,
-        match_binding=_match_binding(anchor.state),
+        match_binding=state.match_binding,
         authority=state.artifact_authority,
     )
     return next_state, _forecast(

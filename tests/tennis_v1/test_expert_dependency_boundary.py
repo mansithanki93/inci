@@ -212,13 +212,13 @@ LIVE_PAPER_MODULE_AST_SHA256 = {
         "e0ab250383818b2d243e2d86e495fb96a88b969b2c1d4167f17c1542485702a9"
     ),
     "live_paper_score.py": (
-        "6fefcc8627ae6fa64cf50865699b31077c221bb8f95e105cf52300b010f346b0"
+        "69d1b3cf66332ab1e1ee5c5fe374f7a13aa91dc196d16b846a5d6f879a6aad3c"
     ),
     "live_paper_session.py": (
         "5a647013e1ba2b6bf99019f0e068758637716aff5bd5d98d5bd140bb755b06cf"
     ),
     "live_two_model.py": (
-        "f4728f2b2aa03bcf955cfe061ea840da45eb8bd3fc20b569d881e053e3afef92"
+        "4a7c98caab1f61c8cdbc395f0e2bf69534a7317e3ff54761ce91604638f33695"
     ),
 }
 

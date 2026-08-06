@@ -48,12 +48,16 @@ def initial_live_paper_score_coordinator_state(canonical_match_id: str) -> LiveP
     )
 
 
-def _fresh(observation: LivePaperSourceObservation, now_monotonic_ns: int) -> bool:
-    return observation.captured_monotonic_ns <= now_monotonic_ns and now_monotonic_ns - observation.captured_monotonic_ns <= _FRESHNESS_NS
+def _fresh(observation: LivePaperSourceObservation, now_wall_ns: int, now_monotonic_ns: int) -> bool:
+    if observation.captured_wall_ns > now_wall_ns or observation.captured_monotonic_ns > now_monotonic_ns:
+        return False
+    wall_age_ns = now_wall_ns - observation.captured_wall_ns
+    monotonic_age_ns = now_monotonic_ns - observation.captured_monotonic_ns
+    return max(wall_age_ns, monotonic_age_ns) + observation.state.last_clock_uncertainty_ns <= _FRESHNESS_NS
 
 
-def _selection(observations: tuple[LivePaperSourceObservation, ...], now_monotonic_ns: int) -> tuple[TennisState, PaperScoreTrust, tuple[str, ...], tuple[str, ...], int, int, tuple[str, ...], tuple[str, ...], tuple[LivePaperSupport, ...]] | None:
-    fresh = tuple(item for item in observations if _fresh(item, now_monotonic_ns))
+def _selection(observations: tuple[LivePaperSourceObservation, ...], now_wall_ns: int, now_monotonic_ns: int) -> tuple[TennisState, PaperScoreTrust, tuple[str, ...], tuple[str, ...], int, int, tuple[str, ...], tuple[str, ...], tuple[LivePaperSupport, ...]] | None:
+    fresh = tuple(item for item in observations if _fresh(item, now_wall_ns, now_monotonic_ns))
     if not fresh:
         return None
     coordinates = {score_coordinates(item.state) for item in fresh}
@@ -101,8 +105,8 @@ def _selection(observations: tuple[LivePaperSourceObservation, ...], now_monoton
     )
 
 
-def _fresh_disagreement(observations: tuple[LivePaperSourceObservation, ...], now_monotonic_ns: int) -> bool:
-    fresh = tuple(item for item in observations if _fresh(item, now_monotonic_ns))
+def _fresh_disagreement(observations: tuple[LivePaperSourceObservation, ...], now_wall_ns: int, now_monotonic_ns: int) -> bool:
+    fresh = tuple(item for item in observations if _fresh(item, now_wall_ns, now_monotonic_ns))
     return len({score_coordinates(item.state) for item in fresh}) > 1
 
 
@@ -183,10 +187,10 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
         raise ValueError("canonical_match_id")
     if type(now_wall_ns) is not int or now_wall_ns < 0 or type(now_monotonic_ns) is not int or now_monotonic_ns < 0:
         raise ValueError("now")
-    selected = _selection(observations, now_monotonic_ns)
+    selected = _selection(observations, now_wall_ns, now_monotonic_ns)
     if state.quarantined:
         if selected is None:
-            next_state = replace(state, rebase_candidate=None) if _fresh_disagreement(observations, now_monotonic_ns) else state
+            next_state = replace(state, rebase_candidate=None) if _fresh_disagreement(observations, now_wall_ns, now_monotonic_ns) else state
             return next_state, _decision(LivePaperScoreDecisionKind.ABSTAINED, reason="rebase_source_unstable")
         accepted, trust, _, _, _, captured_monotonic, independent_lineage_ids, _, _ = selected
         if captured_monotonic <= state.quarantine_barrier_monotonic_ns:  # type: ignore[operator]
