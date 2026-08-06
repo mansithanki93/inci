@@ -237,13 +237,23 @@ cap, $5 entry/exit thresholds, 300-second maximum hold, and 60-second heartbeat
 are frozen code/session constants and have no CLI overrides.
 
 Before live transport starts, the command prints the configured provider proof
-status and aggregate trust eligibility, artifact authority and digests,
-canonical match/start/format, exact HOME/AWAY ticker/UUID/YES orientation, all
-frozen policy constants, the paper state root, and `NO REAL ORDERS`. Dashboard
-rows include elapsed time, factual source `seen`/`missing` health, score trust,
-both models, executable HOME/AWAY top books and book age, pending and last
-decision, cumulative typed rejection counts, position, and paper P&L. Neither
-output includes credentials.
+status, explicit score-input mode and eligible provider slots, aggregate trust
+eligibility, artifact authority and digests, canonical match/start/format,
+exact HOME/AWAY ticker/UUID/YES orientation, all frozen policy constants, the
+paper state root, and `NO REAL ORDERS`. Live read-only mode currently has an
+active score transport only for the `sportradar` slot; growing-file mode can
+accept every configured slot. `CONSENSUS_PAPER` eligibility requires at least
+two proven independent lineage IDs and at least two distinct proven lineage
+digests among those transport-eligible slots.
+
+Dashboard rows include elapsed time, factual source `seen`/`missing` health,
+current actionable score trust, both models, executable HOME/AWAY top books and
+book age, pending and last decision, cumulative typed rejection counts,
+position, and paper P&L. A retained historical anchor is reported as
+`ABSTAINED` whenever the current score is not actionable. Rejection counter
+keys are lexically ordered `<record_kind>.<stage>.<fixed_reason>:<count>` values;
+each fixed-code component is lowercase ASCII and at most 64 characters, with at
+most 64 distinct keys. Neither output includes credentials.
 
 For capture/resume mode, all inputs must already exist as absolute regular
 non-symlink files. The log and checkpoint must be absolute, distinct from every

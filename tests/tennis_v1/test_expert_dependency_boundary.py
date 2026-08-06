@@ -248,7 +248,7 @@ LIVE_PAPER_RUNTIME_MODULE_AST_SHA256 = {
         "6e96a0294039ad81fc01dbd95ee6b7b8e0fb802b39a0e70d87799a34adcaceff"
     ),
     "live_two_model_paper_cli.py": (
-        "7b6e06bca82e862cf891cc6c22b5671716972abe5e1e803e0e444e40e24f9f67"
+        "1509ecc666215110bb77652699417d414a5c008f80b4a610084ffbfd30c37776"
     ),
     "two_model_pilot_cli.py": (
         "96b9f5ca67ce55a8fa26309ad495f7492c6d5dfe9d088ab7d89faceba23aba59"

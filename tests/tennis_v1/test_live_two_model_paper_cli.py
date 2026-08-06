@@ -80,6 +80,28 @@ def _manifest() -> dict[str, object]:
     }
 
 
+def _append_proven_provider(
+    document: dict[str, object],
+    *,
+    lineage_sha256: str,
+) -> None:
+    primary = document["providers"][0]  # type: ignore[index]
+    secondary = dict(primary)
+    secondary.update({
+        "slot": "goalserve",
+        "source_id": "goalserve-secondary",
+        "provider_match_id": "goalserve-101",
+        "home_player_id": "goalserve-home",
+        "away_player_id": "goalserve-away",
+        "independent_lineage_id": "goalserve-lineage",
+        "source_lineage_sha256": lineage_sha256,
+        "independence_proof_sha256": sha256(
+            b"independent-goalserve-lineage"
+        ).hexdigest(),
+    })
+    document["providers"].append(secondary)  # type: ignore[union-attr]
+
+
 def _score_payload(*, points: str = "0 - 0", sets: list[dict[str, object]] | None = None) -> bytes:
     return json.dumps(
         {
@@ -1010,6 +1032,20 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(output.getvalue().splitlines()[0], "LIVE MODELS 1+2 / PAPER ONLY / NO REAL ORDERS")
             self.assertRegex(output.getvalue(), r"pnl=-?[0-9]")
+            quarantined_dashboard = next(
+                line
+                for line in output.getvalue().splitlines()
+                if "top_rejection=unproved_score_transition" in line
+            )
+            self.assertIn("trust=ABSTAINED", quarantined_dashboard)
+            self.assertIn(
+                "abstention.score.unproved_score_transition:1",
+                output.getvalue(),
+            )
+            self.assertIn(
+                "rejection.entry.before_completed_set:1",
+                output.getvalue(),
+            )
             first = session.read_bytes()
             replay = replay_live_paper_records(first, require_terminal=True)
             self.assertTrue(replay.state.terminal)
@@ -1268,6 +1304,8 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             )
             for expected in (
                 "sources=sportradar/sportradar-primary:independence_proven=true",
+                "score_input_mode=live_readonly",
+                "eligible_score_slots=sportradar",
                 "trust_eligibility=SINGLE_SOURCE_PAPER",
                 "artifact_authority=OPERATOR_BOOTSTRAP",
                 "static_sha256=",
@@ -1284,6 +1322,7 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                 "maximum_hold=300s",
                 "decision_latency=1s",
                 "freshness=5s",
+                "heartbeat=60s",
                 f"state_root={root}",
                 "NO REAL ORDERS",
             ):
@@ -1296,6 +1335,219 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                 "paper_position=", "pnl=",
             ):
                 self.assertIn(field, dashboard)
+
+    def test_dashboard_counters_retain_kind_and_stage_without_count_collisions(self) -> None:
+        from inci_tennis_runtime.live_paper_capture_bridge import (
+            GrowingJsonlCaptureBridge,
+            manifest_from_document,
+        )
+        from inci_tennis_runtime.live_two_model_paper_cli import _dashboard
+
+        bridge = GrowingJsonlCaptureBridge.bootstrap(
+            manifest_from_document(_manifest()),
+            home_serve_probability=Decimal("0.80"),
+            away_serve_probability=Decimal("0.20"),
+            opened_wall_ns=900_000_000,
+            opened_monotonic_ns=900_000_000,
+        )
+
+        def record(kind: LivePaperRecordKind, stage: str) -> object:
+            return SimpleNamespace(
+                kind=kind,
+                payload=SimpleNamespace(
+                    body=SimpleNamespace(source=stage, reason="same_reason")
+                ),
+            )
+
+        bridge.records.extend((
+            record(LivePaperRecordKind.REJECTION, "entry"),
+            record(LivePaperRecordKind.ABSTENTION, "score"),
+            record(LivePaperRecordKind.REJECTION, "entry"),
+        ))
+        output = io.StringIO()
+        _dashboard(
+            output,
+            bridge,
+            LivePaperRecordKind.REJECTION.value,
+            now_monotonic_ns=1_000_000_000,
+        )
+
+        self.assertIn(
+            "rejection_counts="
+            "abstention.score.same_reason:1,"
+            "rejection.entry.same_reason:2 ",
+            output.getvalue(),
+        )
+
+    def test_dashboard_counter_keys_reject_delimiters_and_fixed_bound_overflow(self) -> None:
+        from inci_tennis_runtime.live_paper_capture_bridge import (
+            GrowingJsonlCaptureBridge,
+            manifest_from_document,
+        )
+        from inci_tennis_runtime.live_two_model_paper_cli import (
+            LivePaperCliError,
+            _dashboard,
+            _dashboard_counter_key,
+        )
+
+        def record(reason: str) -> object:
+            return SimpleNamespace(
+                kind=LivePaperRecordKind.REJECTION,
+                payload=SimpleNamespace(
+                    body=SimpleNamespace(source="entry", reason=reason)
+                ),
+            )
+
+        exact = "r" * 64
+        self.assertEqual(
+            _dashboard_counter_key(record(exact)),
+            f"rejection.entry.{exact}",
+        )
+        for invalid in ("r" * 65, "reason.with.delimiter"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    LivePaperCliError, "dashboard_counter_key"
+                ):
+                    _dashboard_counter_key(record(invalid))
+
+        def bridge_with(count: int) -> object:
+            bridge = GrowingJsonlCaptureBridge.bootstrap(
+                manifest_from_document(_manifest()),
+                home_serve_probability=Decimal("0.80"),
+                away_serve_probability=Decimal("0.20"),
+                opened_wall_ns=900_000_000,
+                opened_monotonic_ns=900_000_000,
+            )
+            bridge.records.extend(
+                record(f"reason_{index:02d}") for index in range(count)
+            )
+            return bridge
+
+        _dashboard(
+            io.StringIO(),
+            bridge_with(64),  # type: ignore[arg-type]
+            LivePaperRecordKind.REJECTION.value,
+            now_monotonic_ns=1_000_000_000,
+        )
+        with self.assertRaisesRegex(
+            LivePaperCliError, "dashboard_counter_keys"
+        ):
+            _dashboard(
+                io.StringIO(),
+                bridge_with(65),  # type: ignore[arg-type]
+                LivePaperRecordKind.REJECTION.value,
+                now_monotonic_ns=1_000_000_000,
+            )
+
+    def test_startup_consensus_eligibility_requires_distinct_proven_lineage_digests(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import run
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            scores = root / "scores.jsonl"
+            books = root / "books.jsonl"
+            session = root / "session.jsonl"
+            checkpoint = root / "checkpoint.json"
+            document = _manifest()
+            _append_proven_provider(document, lineage_sha256=LINEAGE)
+            manifest.write_text(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                encoding="ascii",
+            )
+            scores.write_bytes(b"")
+            books.write_bytes(b"")
+
+            output = io.StringIO()
+            self.assertEqual(run([
+                "--manifest", str(manifest),
+                "--score-stream", str(scores),
+                "--kalshi-stream", str(books),
+                "--session-log", str(session),
+                "--checkpoint", str(checkpoint),
+                "--bootstrap-home-serve", "0.80",
+                "--bootstrap-away-serve", "0.20",
+                "--stop-at-eof",
+            ], stdout=output), 0)
+
+            startup = output.getvalue().splitlines()[1]
+            self.assertIn("score_input_mode=growing_file", startup)
+            self.assertIn("eligible_score_slots=api_tennis,goalserve", startup)
+            self.assertIn("trust_eligibility=SINGLE_SOURCE_PAPER", startup)
+            self.assertNotIn("trust_eligibility=CONSENSUS_PAPER", startup)
+
+    def test_growing_startup_consensus_includes_all_distinct_proven_configured_sources(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import run
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            scores = root / "scores.jsonl"
+            books = root / "books.jsonl"
+            session = root / "session.jsonl"
+            checkpoint = root / "checkpoint.json"
+            document = _manifest()
+            _append_proven_provider(document, lineage_sha256="c" * 64)
+            manifest.write_text(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                encoding="ascii",
+            )
+            scores.write_bytes(b"")
+            books.write_bytes(b"")
+
+            output = io.StringIO()
+            self.assertEqual(run([
+                "--manifest", str(manifest),
+                "--score-stream", str(scores),
+                "--kalshi-stream", str(books),
+                "--session-log", str(session),
+                "--checkpoint", str(checkpoint),
+                "--bootstrap-home-serve", "0.80",
+                "--bootstrap-away-serve", "0.20",
+                "--stop-at-eof",
+            ], stdout=output), 0)
+
+            startup = output.getvalue().splitlines()[1]
+            self.assertIn("score_input_mode=growing_file", startup)
+            self.assertIn("eligible_score_slots=api_tennis,goalserve", startup)
+            self.assertIn("trust_eligibility=CONSENSUS_PAPER", startup)
+
+    def test_live_startup_consensus_ignores_configured_sources_without_live_transport(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import run
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            session = root / "session.jsonl"
+            checkpoint = root / "checkpoint.json"
+            document = _manifest()
+            primary = document["providers"][0]  # type: ignore[index]
+            primary["slot"] = "sportradar"
+            primary["source_id"] = "sportradar-primary"
+            _append_proven_provider(document, lineage_sha256="c" * 64)
+            manifest.write_text(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                encoding="ascii",
+            )
+
+            import inci_tennis_runtime.live_shadow_cli as live_shadow_cli
+
+            output = io.StringIO()
+            with mock.patch.object(live_shadow_cli, "run_cli", return_value=1):
+                self.assertEqual(run([
+                    "--live-readonly", "--manifest", str(manifest),
+                    "--session-log", str(session),
+                    "--checkpoint", str(checkpoint),
+                    "--bootstrap-home-serve", "0.80",
+                    "--bootstrap-away-serve", "0.20",
+                    "--duration-seconds", "10",
+                ], stdout=output), 1)
+
+            startup = output.getvalue().splitlines()[1]
+            self.assertIn("score_input_mode=live_readonly", startup)
+            self.assertIn("eligible_score_slots=sportradar", startup)
+            self.assertIn("trust_eligibility=SINGLE_SOURCE_PAPER", startup)
+            self.assertNotIn("trust_eligibility=CONSENSUS_PAPER", startup)
 
     def test_live_nonzero_collector_status_writes_halted_terminal(self) -> None:
         from inci_tennis_runtime.live_two_model_paper_cli import run

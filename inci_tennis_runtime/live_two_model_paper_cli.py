@@ -51,6 +51,8 @@ from inci_tennis_runtime.live_paper_capture_bridge import (
 BANNER = "LIVE MODELS 1+2 / PAPER ONLY / NO REAL ORDERS"
 _MAX_STREAM_BYTES = 32 * 1024 * 1024
 _MAX_LINE_BYTES = 1 * 1024 * 1024
+_MAX_DASHBOARD_COUNTER_KEYS = 64
+_MAX_DASHBOARD_COUNTER_CODE_LENGTH = 64
 
 
 class LivePaperCliError(ValueError):
@@ -560,8 +562,21 @@ def _startup_disclosure(
     bridge: GrowingJsonlCaptureBridge,
     manifest: LivePaperManifest,
     state_root: Path,
+    *,
+    score_input_mode: str,
+    eligible_score_slots: frozenset[str],
 ) -> None:
     config = bridge.state.config
+    if (
+        score_input_mode not in {"growing_file", "live_readonly"}
+        or type(eligible_score_slots) is not frozenset
+        or not eligible_score_slots
+        or any(
+            type(slot) is not str or not slot
+            for slot in eligible_score_slots
+        )
+    ):
+        _fail("score_input_mode")
     sources = ",".join(
         f"{provider.slot}/{provider.source_id}:"
         + "independence_proven="
@@ -572,22 +587,37 @@ def _startup_disclosure(
         )
         for provider in config.provider_authorities
     )
-    proven_lineages = {
-        provider.independent_lineage_id
+    eligible_providers = tuple(
+        provider
         for provider in config.provider_authorities
+        if provider.slot in eligible_score_slots
+    )
+    proven_lineage_ids = {
+        provider.independent_lineage_id
+        for provider in eligible_providers
+        if provider.independence_proven is True
+    }
+    proven_lineage_digests = {
+        provider.source_lineage_sha256
+        for provider in eligible_providers
         if provider.independence_proven is True
     }
     trust_eligibility = (
         "CONSENSUS_PAPER"
-        if len(proven_lineages) >= 2
+        if (
+            len(proven_lineage_ids) >= 2
+            and len(proven_lineage_digests) >= 2
+        )
         else "SINGLE_SOURCE_PAPER"
-        if config.provider_authorities
+        if eligible_providers
         else "ABSTAINED"
     )
     binding = config.market_binding
     stream.write(
         "startup "
-        f"sources={sources} trust_eligibility={trust_eligibility} "
+        f"sources={sources} score_input_mode={score_input_mode} "
+        f"eligible_score_slots={','.join(sorted(eligible_score_slots))} "
+        f"trust_eligibility={trust_eligibility} "
         f"artifact_authority={config.artifact_authority.value} "
         f"static_sha256={config.static_artifact.artifact_sha256} "
         f"dynamic_sha256={config.dynamic_artifact.artifact_sha256} "
@@ -605,6 +635,7 @@ def _startup_disclosure(
         f"freshness={config.score_freshness_ns // 1_000_000_000}s "
         f"score_freshness={config.score_freshness_ns // 1_000_000_000}s "
         f"book_freshness={config.book_freshness_ns // 1_000_000_000}s "
+        f"heartbeat={config.heartbeat_interval_ns // 1_000_000_000}s "
         f"state_root={state_root} NO REAL ORDERS\n"
     )
     stream.flush()
@@ -617,6 +648,27 @@ def _top_executable(levels: object) -> str:
     return "--"
 
 
+def _dashboard_counter_key(record: LivePaperRecord) -> str:
+    body = record.payload.body
+    codes = (
+        record.kind.value,
+        getattr(body, "source", None),
+        getattr(body, "reason", None),
+    )
+    if any(
+        type(code) is not str
+        or not 1 <= len(code) <= _MAX_DASHBOARD_COUNTER_CODE_LENGTH
+        or not code.isascii()
+        or any(
+            not (character.islower() or character.isdigit() or character == "_")
+            for character in code
+        )
+        for code in codes
+    ):
+        _fail("dashboard_counter_key")
+    return ".".join(codes)  # type: ignore[arg-type]
+
+
 def _dashboard(
     stream: TextIO,
     bridge: GrowingJsonlCaptureBridge,
@@ -627,7 +679,11 @@ def _dashboard(
     state = bridge.state
     records = bridge.records
     anchor = state.score_coordinator.anchor
-    trust = "ABSTAINED" if anchor is None else anchor.trust.value
+    trust = (
+        "ABSTAINED"
+        if anchor is None or not state.score_actionable
+        else anchor.trust.value
+    )
     forecast = state.latest_forecast
     model_1_match = "--" if forecast is None or forecast.model_1_match_probability is None else format(forecast.model_1_match_probability, "f")
     model_2_match = "--" if forecast is None or forecast.model_2_match_probability is None else format(forecast.model_2_match_probability, "f")
@@ -731,15 +787,23 @@ def _dashboard(
             LivePaperRecordKind.REJECTION, LivePaperRecordKind.ABSTENTION,
         }:
             reason = str(getattr(record.payload.body, "reason", record.kind.value))
-            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            counter_key = _dashboard_counter_key(record)
+            if (
+                counter_key not in rejection_counts
+                and len(rejection_counts) >= _MAX_DASHBOARD_COUNTER_KEYS
+            ):
+                _fail("dashboard_counter_keys")
+            rejection_counts[counter_key] = (
+                rejection_counts.get(counter_key, 0) + 1
+            )
             last_decision = f"{record.kind.value}:{reason}"
         elif record.kind is LivePaperRecordKind.ACTION:
             action = record.payload.body
             last_decision = f"action:{action.kind.value}:{action.ticker}"
     rejection_counts_text = (
         ",".join(
-            f"{reason}:{rejection_counts[reason]}"
-            for reason in sorted(rejection_counts)
+            f"{counter_key}:{rejection_counts[counter_key]}"
+            for counter_key in sorted(rejection_counts)
         )
         or "none"
     )
@@ -888,7 +952,16 @@ def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdou
         opened_wall_ns=max(0, int(first_wall) - 1),
         opened_monotonic_ns=max(0, first_mono - 1),
     )
-    _startup_disclosure(stdout, bridge, manifest, args.session_log.parent)
+    _startup_disclosure(
+        stdout,
+        bridge,
+        manifest,
+        args.session_log.parent,
+        score_input_mode="growing_file",
+        eligible_score_slots=frozenset(
+            provider.slot for provider in manifest.providers
+        ),
+    )
     if bridge.state.terminal:
         _fail("session_already_terminal")
     committed_row_count, clock_boundary = (
@@ -1004,7 +1077,14 @@ def _run_live(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: 
         args, manifest, static, dynamic, authority,
         opened_wall_ns=time.time_ns(), opened_monotonic_ns=time.monotonic_ns(),
     )
-    _startup_disclosure(stdout, bridge, manifest, args.session_log.parent)
+    _startup_disclosure(
+        stdout,
+        bridge,
+        manifest,
+        args.session_log.parent,
+        score_input_mode="live_readonly",
+        eligible_score_slots=frozenset({"sportradar"}),
+    )
     if bridge.state.terminal:
         _fail("session_already_terminal")
     writer = _DurableSessionWriter(args.session_log, args.checkpoint, existing)
