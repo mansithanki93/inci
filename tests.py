@@ -7705,4 +7705,14 @@ if __name__ == "__main__":
     test_replay_enforces_logged_market_lifecycle()
     test_termination_signals_route_through_interrupt()
     test_live_and_demo_disabled()
-    print("\nALL TESTS PASS (208 tests)")
+    from test_espn_prob_gate import (
+        test_names_match_surname,
+        test_neutral_model_rejects_match_already_lost,
+        test_parse_espn_competition_live,
+        test_gate_blocks_unbound_and_allows_edge,
+    )
+    test_names_match_surname()
+    test_neutral_model_rejects_match_already_lost()
+    test_parse_espn_competition_live()
+    test_gate_blocks_unbound_and_allows_edge()
+    print("\nALL TESTS PASS (212 tests)")

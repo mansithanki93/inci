@@ -76,6 +76,15 @@ class Config:
     cancel_timeout_s: float = 5.0     # poll-until-terminal after a cancel
     reconcile_timeout_s: float = 5.0  # wait for order/fill/position agreement
     flatten_retries: int = 3          # attempts per position when flattening
+    # --- ESPN score + win-prob entry gate (research) ---
+    # When the runtime attaches EspnProbGate, entries require a live ESPN
+    # ATP/WTA bind and a score-model edge. Unbound ITF markets fail closed.
+    espn_gate_enabled: bool = True
+    espn_leagues: tuple = ("atp", "wta")
+    espn_cache_s: float = 15.0
+    espn_min_model_prob: float = 0.35   # reject collapsing sides
+    espn_min_edge: float = 0.03         # model_prob - ask/100
+
     # Official Create V2 enums. Paper matches this: one delayed attempt, then
     # cancel remainder — never retain a stale working order.
     time_in_force: str = "immediate_or_cancel"
@@ -167,8 +176,20 @@ class Config:
                      "close_buffer_seconds"):
             number(name, positive=True)
         for name in ("sim_latency_s", "sim_slippage_cents", "max_spread",
-                     "tp_trail_cents"):
+                     "tp_trail_cents", "espn_cache_s", "espn_min_model_prob",
+                     "espn_min_edge"):
             number(name, nonnegative=True)
+        if number("espn_min_model_prob", nonnegative=True) > Decimal(1):
+            raise ValueError("espn_min_model_prob must be <= 1")
+        if number("espn_min_edge", nonnegative=True) > Decimal(1):
+            raise ValueError("espn_min_edge must be <= 1")
+        leagues = self.espn_leagues
+        if (not isinstance(leagues, tuple)
+                or not leagues
+                or any(not isinstance(x, str) or not x for x in leagues)):
+            raise ValueError("espn_leagues must be a nonempty tuple of strings")
+        if not isinstance(self.espn_gate_enabled, bool):
+            raise ValueError("espn_gate_enabled must be a bool")
         for name in ("max_open_positions", "max_monitored_markets",
                      "flatten_retries", "max_consec_errors"):
             positive_int(name)
@@ -234,6 +255,8 @@ class Config:
                      "sim_latency_s", "poll_interval", "fill_timeout_s",
                      "cancel_timeout_s", "reconcile_timeout_s",
                      "stale_data_s", "reconcile_every_s",
-                     "close_buffer_seconds"):
+                     "close_buffer_seconds", "espn_cache_s",
+                     "espn_min_model_prob", "espn_min_edge"):
             setattr(self, name, float(getattr(self, name)))
+        self.espn_leagues = tuple(self.espn_leagues)
         return self
