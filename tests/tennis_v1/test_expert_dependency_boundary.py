@@ -214,6 +214,9 @@ LIVE_PAPER_MODULE_AST_SHA256 = {
     "live_paper_score.py": (
         "6fefcc8627ae6fa64cf50865699b31077c221bb8f95e105cf52300b010f346b0"
     ),
+    "live_paper_session.py": (
+        "5c3df1ec7ececbc6507a9702ab9ed54298e65a072ad993eb79be0eee8eea796f"
+    ),
     "live_two_model.py": (
         "f4728f2b2aa03bcf955cfe061ea840da45eb8bd3fc20b569d881e053e3afef92"
     ),
