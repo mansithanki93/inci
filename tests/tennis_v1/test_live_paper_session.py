@@ -189,6 +189,18 @@ def _l2_input(api: object, sequence: int, now: int, receipt: str) -> object:
     return api.LivePaperL2Input(frame, now, now)
 
 
+def _captured_l2_input(api: object, sequence: int, captured: int, observed: int, receipt: str) -> object:
+    item = _l2_input(api, sequence, observed, receipt)
+    return replace(
+        item,
+        frame=replace(
+            item.frame,
+            captured_wall_ns=captured,
+            captured_monotonic_ns=captured,
+        ),
+    )
+
+
 def _complete_session(api: object) -> tuple[object, tuple[object, ...]]:
     state = api.open_live_paper_session(_config(api))
     records: tuple[object, ...] = ()
@@ -350,6 +362,82 @@ class LivePaperSessionTests(unittest.TestCase):
         self.assertNotIn("action", tuple(record.kind.value for record in rows))
         self.assertEqual(rows[-1].payload.body.reason, "score_stale")
 
+    def test_stale_score_invalidates_pending_buy_before_later_book_can_fill(self) -> None:
+        """Catches a delayed BUY filling after its score authority has expired."""
+        api = _api()
+        state = api.open_live_paper_session(_config(api))
+        state, score_rows = api.reduce_live_paper_input(state, _score_input(api))
+        state, action_rows = api.reduce_live_paper_input(
+            state, _l2_input(api, 1, 3_000_000_000, "1" * 64)
+        )
+        self.assertIsNotNone(state.portfolio.pending_action)
+        state, stale_rows = api.reduce_live_paper_input(
+            state, _l2_input(api, 2, 9_000_000_000, "2" * 64)
+        )
+        self.assertIsNone(state.portfolio.pending_action)
+        self.assertIsNone(state.portfolio.position)
+        self.assertNotIn("fill", tuple(record.kind.value for record in stale_rows))
+        self.assertEqual(stale_rows[-1].kind.value, "rejection")
+        self.assertEqual(stale_rows[-1].payload.body.reason, "score_stale")
+        raw = api.encode_live_paper_records(score_rows + action_rows + stale_rows)
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
+    def test_book_capture_must_follow_score_even_when_observed_later(self) -> None:
+        """Catches an old decision frame being relabelled as causal by a later observation clock."""
+        api = _api()
+        state = api.open_live_paper_session(_config(api))
+        state, score_rows = api.reduce_live_paper_input(state, _score_input(api))
+        state, rejected = api.reduce_live_paper_input(
+            state,
+            _captured_l2_input(api, 1, 1_500_000_000, 3_000_000_000, "1" * 64),
+        )
+        self.assertIsNone(state.portfolio.pending_action)
+        self.assertEqual(rejected[-1].payload.body.reason, "book_precedes_score")
+        state, accepted = api.reduce_live_paper_input(
+            state,
+            _captured_l2_input(api, 2, 2_100_000_000, 3_100_000_000, "2" * 64),
+        )
+        self.assertIsNotNone(state.portfolio.pending_action)
+        self.assertIn("action", tuple(record.kind.value for record in accepted))
+        raw = api.encode_live_paper_records(score_rows + rejected + accepted)
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
+    def test_unchanged_score_clock_ignores_future_observation_rejected_by_coordinator(self) -> None:
+        """Catches an ignored capture poisoning the causal score clock and invalidating entry."""
+        api = _api()
+        state = api.open_live_paper_session(_config(api))
+        state, anchor_rows = api.reduce_live_paper_input(state, _score_input(api))
+        original = _score_input(api).observations[0]
+        fresh = replace(
+            original,
+            raw_receipt_sha256="5" * 64,
+            captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000,
+        )
+        ignored_future = replace(
+            original,
+            source_id="ignored-future",
+            raw_receipt_sha256="6" * 64,
+            captured_wall_ns=99_000_000_000,
+            captured_monotonic_ns=99_000_000_000,
+        )
+        state, unchanged_rows = api.reduce_live_paper_input(
+            state,
+            api.LivePaperScoreBatchInput(
+                (fresh, ignored_future),
+                3_000_000_000,
+                3_000_000_000,
+            ),
+        )
+        self.assertEqual(state.last_score_monotonic_ns, 3_000_000_000)
+        state, book_rows = api.reduce_live_paper_input(
+            state,
+            _captured_l2_input(api, 1, 3_100_000_000, 3_100_000_000, "7" * 64),
+        )
+        self.assertIn("action", tuple(record.kind.value for record in book_rows))
+        raw = api.encode_live_paper_records(anchor_rows + unchanged_rows + book_rows)
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
     def test_integrity_rejections_cover_shape_chain_terminal_and_truncation(self) -> None:
         """Catches permissive parsing of ambiguous, altered, or incomplete evidence."""
         api = _api()
@@ -378,6 +466,92 @@ class LivePaperSessionTests(unittest.TestCase):
             api.replay_live_paper_records(api.encode_live_paper_records(records[:-1]), require_terminal=True)
         with self.assertRaises(api.LivePaperSessionError):
             api.reduce_live_paper_input(state, api.LivePaperHeartbeatInput(123_000_000_000, 123_000_000_000))
+
+    def test_v1_codec_registry_does_not_auto_enroll_unrelated_module_types(self) -> None:
+        """Catches a newly imported dataclass silently becoming replay-deserializable."""
+        api = _api()
+        state = _score_state()
+        unrelated = ProviderPoint(
+            provider_source_id=state.provider_source_id,
+            revision_domain_id=state.revision_domain_id,
+            source_lineage_sha256=state.source_lineage_sha256,
+            provider_event_id="unrelated",
+            provider_match_id=state.provider_match_id,
+            home_player_id=state.home_player_id,
+            away_player_id=state.away_player_id,
+            scheduled_start_wall_ns=state.scheduled_start_wall_ns,
+            match_format=state.match_format,
+            correction_epoch=0,
+            revision=2,
+            point_winner=PlayerSide.HOME,
+            server_before_point=PlayerSide.HOME,
+            source_wall_ns=2_000_000_001,
+            source_generated_wall_ns=2_000_000_001,
+            received_monotonic_ns=2_000_000_001,
+            clock_uncertainty_ns=0,
+        )
+        with self.assertRaisesRegex(api.LivePaperSessionError, "unknown_type"):
+            api._unproject(api._project(unrelated))
+
+    def test_untrusted_json_is_bounded_and_parser_failures_are_normalized(self) -> None:
+        """Catches replay allocating or recursing without fixed codec limits."""
+        api = _api()
+        with self.assertRaisesRegex(api.LivePaperSessionError, "log_too_large"):
+            api.replay_live_paper_records(b" " * (32 * 1024 * 1024 + 1) + b"\n")
+        with self.assertRaisesRegex(api.LivePaperSessionError, "json_depth"):
+            api._parse_json(b"[" * 2_000 + b"0" + b"]" * 2_000)
+        oversized_collection = json.dumps(list(range(10_001)), separators=(",", ":")).encode("ascii")
+        with self.assertRaisesRegex(api.LivePaperSessionError, "json_collection"):
+            api._parse_json(oversized_collection)
+        oversized_key = b'{"' + b"a" * 4_097 + b'":0}'
+        with self.assertRaisesRegex(api.LivePaperSessionError, "json_key"):
+            api._parse_json(oversized_key)
+
+    def test_replay_rejects_rehashed_forged_derived_rows(self) -> None:
+        """Catches a valid hash chain substituting persisted output for causal recomputation."""
+        api = _api()
+        _, records = _complete_session(api)
+        mutations = {
+            "forecast": lambda body: replace(body, forecast_label="FORGED"),
+            "action": lambda body: replace(body, decision_global_sequence=body.decision_global_sequence + 10),
+            "fill": lambda body: replace(
+                body,
+                fill=replace(body.fill, debit_or_credit=body.fill.debit_or_credit + Decimal(".01")),
+            ),
+            "mark": lambda body: replace(body, gross_credit=body.gross_credit + Decimal(".01")),
+        }
+        for kind, mutate in mutations.items():
+            target = next(index for index, record in enumerate(records) if record.kind.value == kind)
+            previous = "0" * 64
+            forged_records = []
+            for index, original in enumerate(records):
+                payload = original.payload
+                if index == target:
+                    payload = type(payload)(payload.config, mutate(payload.body))
+                projection = api._project(payload)
+                payload_sha = api._digest(api._canonical_json(projection))
+                record_sha = api._record_digest(
+                    record_ordinal=index + 1,
+                    previous_record_sha256=previous,
+                    kind=original.kind,
+                    payload_projection=projection,
+                    payload_sha256=payload_sha,
+                )
+                forged = api.LivePaperRecord(
+                    original.schema,
+                    original.version,
+                    index + 1,
+                    previous,
+                    original.kind,
+                    payload,
+                    payload_sha,
+                    record_sha,
+                )
+                forged_records.append(forged)
+                previous = record_sha
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(api.LivePaperSessionError, "replay_mismatch"):
+                    api.replay_live_paper_records(api.encode_live_paper_records(tuple(forged_records)))
 
     def test_heartbeat_advances_only_by_complete_sixty_second_intervals(self) -> None:
         """Catches early heartbeat output or schedule drift after a late tick."""

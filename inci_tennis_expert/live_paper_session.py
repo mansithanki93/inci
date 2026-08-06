@@ -13,19 +13,13 @@ from enum import Enum
 from hashlib import sha256
 import json
 from re import ASCII, compile as pattern_compile
-from types import ModuleType
+from types import MappingProxyType
 from typing import Final, TypeAlias
 
-from inci_tennis_expert import (
-    contracts as _contracts,
-    fee_schedule as _fee_schedule,
-    live_paper_contracts as _paper_contracts,
-    live_paper_execution as _paper_execution,
-    live_two_model as _two_model,
-    pilot_contracts as _pilot_contracts,
-    pilot_dynamic_model as _dynamic_model,
+from inci_tennis_expert.contracts import (
+    MatchFormat, MatchStatus, PlayerSide, ScoreValue, SetScore, TennisState,
+    TennisTransitionReason, TerminationKind,
 )
-from inci_tennis_expert.contracts import MatchStatus
 from inci_tennis_expert.fee_schedule import (
     FillSide,
     FrozenFeeSchedule,
@@ -34,19 +28,31 @@ from inci_tennis_expert.fee_schedule import (
 )
 from inci_tennis_expert.live_paper_contracts import (
     LivePaperMarketBinding,
+    LivePaperPointTransition,
+    LivePaperRebaseCandidate,
+    LivePaperScoreAnchor,
     LivePaperScoreCoordinatorState,
     LivePaperScoreDecision,
     LivePaperScoreDecisionKind,
     LivePaperSourceObservation,
+    LivePaperSupport,
+    PaperScoreTrust,
+    score_coordinates,
 )
 from inci_tennis_expert.live_paper_execution import (
     LivePaperL2Frame,
+    LivePaperL2Level,
+    LivePaperL2Market,
     PaperAction,
     PaperActionKind,
     PaperDecision,
     PaperDecisionReason,
     PaperEvent,
+    PaperFill,
     PaperPortfolioState,
+    PaperPosition,
+    PaperProfitClaim,
+    _ConsumedDepth,
     evaluate_live_paper_entry,
     reduce_paper_book,
 )
@@ -56,14 +62,20 @@ from inci_tennis_expert.live_paper_score import (
 )
 from inci_tennis_expert.live_two_model import (
     LiveArtifactAuthority,
+    LiveEdgeClaim,
     LiveTwoModelForecast,
     LiveTwoModelState,
     apply_live_paper_transition,
     open_live_two_model,
     rebase_live_two_model,
 )
-from inci_tennis_expert.pilot_contracts import ServeStrengthArtifact
-from inci_tennis_expert.pilot_dynamic_model import DynamicPointArtifact
+from inci_tennis_expert.pilot_contracts import (
+    DynamicBeliefSnapshot, PilotOutcomeEstimate, PilotSupportReason,
+    ServeStrengthArtifact,
+)
+from inci_tennis_expert.pilot_dynamic_model import (
+    DynamicParameterCandidate, DynamicPointArtifact, DynamicPointModel,
+)
 
 
 __all__ = (
@@ -97,6 +109,16 @@ _HEARTBEAT_NS: Final[int] = 60_000_000_000
 _DECIMAL_RE = pattern_compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z", ASCII)
 _SHA_RE = pattern_compile(r"[0-9a-f]{64}\Z", ASCII)
 _INTEGER_LIMIT = 10**256
+_MAX_LOG_BYTES: Final[int] = 32 * 1024 * 1024
+_MAX_CHECKPOINT_BYTES: Final[int] = 16 * 1024 * 1024
+_MAX_RECORD_LINE_BYTES: Final[int] = 8 * 1024 * 1024
+_MAX_RECORDS: Final[int] = 100_000
+_MAX_JSON_DEPTH: Final[int] = 128
+_MAX_JSON_NODES: Final[int] = 200_000
+_MAX_JSON_COLLECTION: Final[int] = 10_000
+_MAX_JSON_KEY_BYTES: Final[int] = 4_096
+_MAX_JSON_STRING_BYTES: Final[int] = 1 * 1024 * 1024
+_MAX_JSON_TOTAL_STRING_BYTES: Final[int] = 8 * 1024 * 1024
 
 
 class LivePaperSessionError(ValueError):
@@ -383,7 +405,7 @@ def _is_sha(value: object) -> bool:
 def _canonical_json(value: object) -> bytes:
     try:
         return json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
-    except (TypeError, ValueError, UnicodeError) as error:
+    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError, MemoryError) as error:
         raise LivePaperSessionError("canonical_json") from error
 
 
@@ -422,38 +444,32 @@ def _project(value: object) -> object:
     _fail("unsupported_type")
 
 
-def _known_types() -> dict[str, type[object]]:
-    modules: tuple[ModuleType, ...] = (
-        _contracts,
-        _fee_schedule,
-        _paper_contracts,
-        _paper_execution,
-        _two_model,
-        _pilot_contracts,
-        _dynamic_model,
-    )
-    result: dict[str, type[object]] = {}
-    for module in modules:
-        for candidate in vars(module).values():
-            if isinstance(candidate, type) and candidate.__module__ == module.__name__ and (is_dataclass(candidate) or issubclass(candidate, Enum)):
-                result[_type_name(candidate)] = candidate
-    for candidate in (
-        LivePaperRecordKind,
-        LivePaperSessionConfig,
-        LivePaperScoreBatchInput,
-        LivePaperL2Input,
-        LivePaperHeartbeatInput,
-        LivePaperTerminalInput,
-        _LivePaperPayload,
-        _LivePaperRejection,
-        LivePaperPositionMark,
-        _LivePaperCheckpointProjection,
-        LivePaperRecord,
-        LivePaperSessionState,
-        LivePaperReplayResult,
-    ):
-        result[_type_name(candidate)] = candidate
-    return result
+_V1_TYPES: Final[tuple[type[object], ...]] = (
+    MatchFormat, MatchStatus, PlayerSide, ScoreValue, TennisTransitionReason,
+    TerminationKind, SetScore, TennisState,
+    FrozenFeeSchedule,
+    PaperScoreTrust, LivePaperScoreDecisionKind, LivePaperMarketBinding,
+    LivePaperSourceObservation, LivePaperSupport, LivePaperScoreAnchor,
+    LivePaperPointTransition, LivePaperScoreDecision, LivePaperRebaseCandidate,
+    LivePaperScoreCoordinatorState,
+    LivePaperL2Level, LivePaperL2Market, LivePaperL2Frame,
+    PaperDecisionReason, PaperActionKind, PaperProfitClaim, PaperAction,
+    PaperFill, PaperEvent, PaperPosition, _ConsumedDepth, PaperPortfolioState,
+    PaperDecision,
+    LiveArtifactAuthority, LiveEdgeClaim, LiveTwoModelState,
+    LiveTwoModelForecast,
+    PilotSupportReason, ServeStrengthArtifact, PilotOutcomeEstimate,
+    DynamicBeliefSnapshot, DynamicParameterCandidate, DynamicPointArtifact,
+    DynamicPointModel,
+    LivePaperRecordKind, LivePaperSessionConfig, LivePaperScoreBatchInput,
+    LivePaperL2Input, LivePaperHeartbeatInput, LivePaperTerminalInput,
+    _LivePaperPayload, _LivePaperRejection, LivePaperPositionMark,
+    _LivePaperCheckpointProjection, LivePaperSessionState,
+)
+_V1_TYPE_NAMES: Final[tuple[str, ...]] = tuple(_type_name(item) for item in _V1_TYPES)
+if len(set(_V1_TYPE_NAMES)) != len(_V1_TYPE_NAMES):
+    raise RuntimeError("duplicate_live_paper_v1_type")
+_V1_TYPE_REGISTRY: Final = MappingProxyType(dict(zip(_V1_TYPE_NAMES, _V1_TYPES, strict=True)))
 
 
 def _unproject(value: object) -> object:
@@ -489,12 +505,11 @@ def _unproject(value: object) -> object:
         if type(mapping) is not dict:
             _fail("mapping")
         return {key: _unproject(item) for key, item in mapping.items()}
-    registry = _known_types()
     if keys == {"$enum", "value"}:
         encoded_type = value["$enum"]
         if type(encoded_type) is not str:
             _fail("unknown_type")
-        enum_type = registry.get(encoded_type)
+        enum_type = _V1_TYPE_REGISTRY.get(encoded_type)
         if enum_type is None or not issubclass(enum_type, Enum):
             _fail("unknown_type")
         try:
@@ -505,7 +520,7 @@ def _unproject(value: object) -> object:
         encoded_type = value["$type"]
         if type(encoded_type) is not str:
             _fail("unknown_type")
-        data_type = registry.get(encoded_type)
+        data_type = _V1_TYPE_REGISTRY.get(encoded_type)
         raw_fields = value["$fields"]
         if data_type is None or not is_dataclass(data_type):
             _fail("unknown_type")
@@ -530,16 +545,57 @@ def _pairs_no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _parse_json(raw: bytes) -> object:
+def _validate_json_limits(value: object) -> None:
+    nodes = 0
+    string_bytes = 0
+    stack: list[tuple[object, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_JSON_NODES:
+            _fail("json_nodes")
+        if depth > _MAX_JSON_DEPTH:
+            _fail("json_depth")
+        if type(item) is str:
+            size = len(item.encode("utf-8"))
+            if size > _MAX_JSON_STRING_BYTES:
+                _fail("json_string")
+            string_bytes += size
+        elif type(item) is list:
+            if len(item) > _MAX_JSON_COLLECTION:
+                _fail("json_collection")
+            stack.extend((child, depth + 1) for child in item)
+        elif type(item) is dict:
+            if len(item) > _MAX_JSON_COLLECTION:
+                _fail("json_collection")
+            for key, child in item.items():
+                key_size = len(key.encode("utf-8"))
+                if key_size > _MAX_JSON_KEY_BYTES:
+                    _fail("json_key")
+                string_bytes += key_size
+                stack.append((child, depth + 1))
+        if string_bytes > _MAX_JSON_TOTAL_STRING_BYTES:
+            _fail("json_strings")
+
+
+def _parse_json(raw: bytes, *, maximum_bytes: int = _MAX_CHECKPOINT_BYTES) -> object:
+    if type(raw) is not bytes or len(raw) > maximum_bytes:
+        _fail("json_too_large")
     try:
         text = raw.decode("ascii")
-        return json.loads(
+        decoded = json.loads(
             text,
             object_pairs_hook=_pairs_no_duplicates,
             parse_constant=lambda _: _fail("non_finite_number"),
         )
+        _validate_json_limits(decoded)
+        return decoded
     except LivePaperSessionError:
         raise
+    except RecursionError as error:
+        raise LivePaperSessionError("json_depth") from error
+    except (OverflowError, MemoryError) as error:
+        raise LivePaperSessionError("json_resource") from error
     except (UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise LivePaperSessionError("json") from error
 
@@ -658,10 +714,30 @@ def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) 
     }
     invalidated_action: PaperAction | None = None
     if decision.kind in actionable_kinds:
+        clock_actionable = True
         if decision.kind is LivePaperScoreDecisionKind.UNCHANGED:
-            wall_ns = max(observation.captured_wall_ns for observation in item.observations)
-            monotonic_ns = max(observation.captured_monotonic_ns for observation in item.observations)
-            uncertainty_ns = max(observation.state.last_clock_uncertainty_ns for observation in item.observations)
+            if decision.anchor is None:
+                _fail("score_anchor")
+            eligible = tuple(
+                observation
+                for observation in item.observations
+                if observation.captured_monotonic_ns <= item.observed_monotonic_ns
+                and item.observed_monotonic_ns - observation.captured_monotonic_ns
+                <= state.config.score_freshness_ns
+                and observation.captured_wall_ns <= item.observed_wall_ns
+                and score_coordinates(observation.state)
+                == score_coordinates(decision.anchor.state)
+            )
+            if not eligible:
+                state = replace(state, score_actionable=False)
+                clock_actionable = False
+                wall_ns = state.last_score_wall_ns
+                monotonic_ns = state.last_score_monotonic_ns
+                uncertainty_ns = state.last_score_clock_uncertainty_ns
+            else:
+                wall_ns = max(observation.captured_wall_ns for observation in eligible)
+                monotonic_ns = max(observation.captured_monotonic_ns for observation in eligible)
+                uncertainty_ns = max(observation.state.last_clock_uncertainty_ns for observation in eligible)
         else:
             if decision.anchor is None:
                 _fail("score_anchor")
@@ -673,13 +749,14 @@ def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) 
                 for observation in item.observations
                 if observation.raw_receipt_sha256 in parent_receipts
             )
-        state = replace(
-            state,
-            score_actionable=True,
-            last_score_wall_ns=wall_ns,
-            last_score_monotonic_ns=monotonic_ns,
-            last_score_clock_uncertainty_ns=uncertainty_ns,
-        )
+        if clock_actionable and wall_ns is not None and monotonic_ns is not None and uncertainty_ns is not None:
+            state = replace(
+                state,
+                score_actionable=True,
+                last_score_wall_ns=wall_ns,
+                last_score_monotonic_ns=monotonic_ns,
+                last_score_clock_uncertainty_ns=uncertainty_ns,
+            )
     else:
         pending = state.portfolio.pending_action
         if pending is not None and pending.kind is PaperActionKind.BUY:
@@ -843,11 +920,52 @@ def _position_mark(state: LivePaperSessionState, item: LivePaperL2Input, portfol
     )
 
 
+def _score_gate_reason(state: LivePaperSessionState, item: LivePaperL2Input) -> str | None:
+    if state.score_coordinator.quarantined or not state.score_actionable:
+        return "score_untrusted"
+    score_wall = state.last_score_wall_ns
+    score_monotonic = state.last_score_monotonic_ns
+    score_uncertainty = state.last_score_clock_uncertainty_ns
+    if score_wall is None or score_monotonic is None or score_uncertainty is None:
+        _fail("score_clock")
+    if (
+        item.observed_wall_ns < score_wall
+        or item.observed_monotonic_ns < score_monotonic
+        or max(
+            item.observed_wall_ns - score_wall,
+            item.observed_monotonic_ns - score_monotonic,
+        ) + score_uncertainty > state.config.score_freshness_ns
+    ):
+        return "score_stale"
+    if (
+        item.frame.captured_monotonic_ns <= score_monotonic
+        or item.frame.captured_wall_ns < score_wall
+    ):
+        return "book_precedes_score"
+    return None
+
+
 def _reduce_l2(state: LivePaperSessionState, item: LivePaperL2Input) -> tuple[LivePaperSessionState, tuple[LivePaperRecord, ...]]:
     if item.frame.binding != state.config.market_binding:
         _fail("market_binding")
     records: list[LivePaperRecord] = []
     state = _emit(state, records, LivePaperRecordKind.RAW_L2_RECEIPT, item)
+    blocked_buy = False
+    pending = state.portfolio.pending_action
+    if pending is not None and pending.kind is PaperActionKind.BUY:
+        reason = _score_gate_reason(state, item)
+        if reason is not None:
+            blocked_buy = True
+            state = replace(
+                state,
+                portfolio=replace(state.portfolio, pending_action=None),
+            )
+            state = _emit(
+                state,
+                records,
+                LivePaperRecordKind.REJECTION,
+                _LivePaperRejection("paper_action", reason, pending),
+            )
     before = state.portfolio
     portfolio, events = reduce_paper_book(
         before,
@@ -869,22 +987,11 @@ def _reduce_l2(state: LivePaperSessionState, item: LivePaperL2Input) -> tuple[Li
         )
     if events or portfolio.pending_action is not None or portfolio.position is not None:
         return state, tuple(records)
-    if state.score_coordinator.quarantined or not state.score_actionable:
-        state = _emit(state, records, LivePaperRecordKind.REJECTION, _LivePaperRejection("entry", "score_untrusted", item.frame.raw_parent_receipt_sha256))
+    if blocked_buy:
         return state, tuple(records)
-    score_wall = state.last_score_wall_ns
-    score_monotonic = state.last_score_monotonic_ns
-    score_uncertainty = state.last_score_clock_uncertainty_ns
-    if score_wall is None or score_monotonic is None or score_uncertainty is None:
-        _fail("score_clock")
-    if (
-        item.observed_wall_ns < score_wall
-        or item.observed_monotonic_ns < score_monotonic
-        or max(item.observed_wall_ns - score_wall, item.observed_monotonic_ns - score_monotonic)
-        + score_uncertainty
-        > state.config.score_freshness_ns
-    ):
-        state = _emit(state, records, LivePaperRecordKind.REJECTION, _LivePaperRejection("entry", "score_stale", item.frame.raw_parent_receipt_sha256))
+    reason = _score_gate_reason(state, item)
+    if reason is not None:
+        state = _emit(state, records, LivePaperRecordKind.REJECTION, _LivePaperRejection("entry", reason, item.frame.raw_parent_receipt_sha256))
         return state, tuple(records)
     if state.latest_forecast is None:
         state = _emit(state, records, LivePaperRecordKind.REJECTION, _LivePaperRejection("entry", "forecast_unavailable", item.frame.raw_parent_receipt_sha256))
@@ -963,12 +1070,20 @@ def encode_live_paper_records(records: tuple[LivePaperRecord, ...]) -> bytes:
 
 
 def _decode_records(raw: bytes) -> tuple[LivePaperRecord, ...]:
-    if type(raw) is not bytes or not raw or not raw.endswith(b"\n"):
+    if type(raw) is not bytes:
+        _fail("records")
+    if len(raw) > _MAX_LOG_BYTES:
+        _fail("log_too_large")
+    if not raw or not raw.endswith(b"\n"):
         _fail("truncated_log")
+    if raw.count(b"\n") > _MAX_RECORDS:
+        _fail("record_count")
     records: list[LivePaperRecord] = []
     previous = _ZERO_SHA256
     for ordinal, line in enumerate(raw.splitlines(), 1):
-        decoded = _parse_json(line)
+        if len(line) > _MAX_RECORD_LINE_BYTES:
+            _fail("record_too_large")
+        decoded = _parse_json(line, maximum_bytes=_MAX_RECORD_LINE_BYTES)
         if type(decoded) is not dict or set(decoded) != {
             "schema", "version", "record_ordinal", "previous_record_sha256", "kind",
             "payload", "payload_sha256", "record_sha256",
@@ -1068,7 +1183,9 @@ def encode_live_paper_checkpoint(state: LivePaperSessionState) -> bytes:
 def decode_live_paper_checkpoint(raw: bytes) -> LivePaperSessionState:
     if type(raw) is not bytes or not raw:
         _fail("checkpoint")
-    decoded = _parse_json(raw)
+    if len(raw) > _MAX_CHECKPOINT_BYTES:
+        _fail("checkpoint_too_large")
+    decoded = _parse_json(raw, maximum_bytes=_MAX_CHECKPOINT_BYTES)
     if type(decoded) is not dict or set(decoded) != {"schema", "version", "payload", "payload_sha256", "checkpoint_sha256"}:
         _fail("checkpoint_fields")
     if (

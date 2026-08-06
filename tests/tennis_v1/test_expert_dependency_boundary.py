@@ -215,7 +215,7 @@ LIVE_PAPER_MODULE_AST_SHA256 = {
         "6fefcc8627ae6fa64cf50865699b31077c221bb8f95e105cf52300b010f346b0"
     ),
     "live_paper_session.py": (
-        "5c3df1ec7ececbc6507a9702ab9ed54298e65a072ad993eb79be0eee8eea796f"
+        "cf3dafdb14c912c47851467ee08bad33476c0d9918cdbaf5223ff67f4081b676"
     ),
     "live_two_model.py": (
         "f4728f2b2aa03bcf955cfe061ea840da45eb8bd3fc20b569d881e053e3afef92"
