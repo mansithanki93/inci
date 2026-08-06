@@ -58,8 +58,10 @@ class Config:
     max_spread: int = 3
 
     # --- Paper-mode realism (fix #7) ---
+    # Paper is delayed IOC / taker-at-touch (not maker GTC). Latency delays
+    # the single fill attempt; stop-loss applies adverse slippage.
     sim_latency_s: float = 1.0        # delay between signal and simulated fill
-    sim_slippage_cents: int = 1       # adverse price adjustment on every fill
+    sim_slippage_cents: int = 1       # adverse adjustment on stop-loss fills
     # Kalshi balance target: ordinary/non-direct accounts use $0.01; direct
     # members use $0.0001. Paper fees include the corresponding rounding fee.
     balance_precision_usd: str = "0.01"
@@ -70,8 +72,8 @@ class Config:
     cancel_timeout_s: float = 5.0     # poll-until-terminal after a cancel
     reconcile_timeout_s: float = 5.0  # wait for order/fill/position agreement
     flatten_retries: int = 3          # attempts per position when flattening
-    # Official Create V2 enums. IOC prevents a scalp order from becoming a
-    # stale resting order; an unfilled remainder is canceled by the exchange.
+    # Official Create V2 enums. Paper matches this: one delayed attempt, then
+    # cancel remainder — never retain a stale working order.
     time_in_force: str = "immediate_or_cancel"
     self_trade_prevention_type: str = "taker_at_cross"
     stale_data_s: float = 30.0        # halt if a market's quotes go stale

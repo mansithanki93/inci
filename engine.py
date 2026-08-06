@@ -9,6 +9,15 @@ from fees import fee_usd
 from safety import ExposureError
 
 
+def _exit_priority(reason):
+    """Higher wins. Stop preempts time; time preempts take-profit."""
+    if "stop-loss" in reason:
+        return 2
+    if reason.startswith("time exit"):
+        return 1
+    return 0
+
+
 class Context:
     def __init__(self, cfg, feed, strategy, executor, log, safety,
                  clock=_time.time):
@@ -84,9 +93,9 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
     check_loss_limit(ctx)
     if ctx.safety.tripped:
         return
-    # A pending resting BUY (awaiting entry) blocks further action on this
-    # ticker. A working resting SELL does NOT block the exit re-check, so a
-    # stop-loss can still preempt an unfilled take-profit.
+    # A pending delayed-IOC BUY (awaiting entry) blocks further action on this
+    # ticker. A working SELL does NOT block the exit re-check, so a higher-
+    # priority exit (time over TP, stop over either) can upgrade once.
     if ctx.cfg.paper_trading and ctx.executor.has_pending(ticker, side="BUY"):
         return
 
@@ -94,26 +103,21 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
     if exit_sig:
         pos = ctx.strategy.positions[ticker]
         if ctx.cfg.paper_trading:
-            is_stop = "stop-loss" in exit_sig["reason"]
-            working_sell = ctx.executor.has_pending(ticker, side="SELL")
-            if is_stop:
-                # Stop-loss crosses immediately; replace any working maker
-                # exit so risk is not left resting.
-                print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
-                if working_sell:
+            reason = exit_sig["reason"]
+            working = ctx.executor.get_pending(ticker, side="SELL")
+            if working is not None:
+                # Never refresh due_at on an equal/higher-priority pending
+                # exit (stop deadline sliding). Only upgrade once.
+                if _exit_priority(reason) > _exit_priority(working.reason):
+                    print(f"[signal] SELL {ticker}: {reason}")
                     ctx.executor.cancel_pending_paper(
                         ticker=ticker, side="SELL")
-                ctx.executor.submit_paper(
-                    ticker, "SELL", pos.contracts, exit_sig["reason"],
-                    now=now, resting=False)
-            elif not working_sell:
-                # Rest a take-profit/time exit at the bid so it can fill on the
-                # next due quote without needing another climb through the
-                # spread; a stop-loss can still preempt it.
-                print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
-                ctx.executor.submit_paper(
-                    ticker, "SELL", pos.contracts, exit_sig["reason"],
-                    now=now, resting=True)
+                    ctx.executor.submit_paper(
+                        ticker, "SELL", pos.contracts, reason, now=now)
+                return
+            print(f"[signal] SELL {ticker}: {reason}")
+            ctx.executor.submit_paper(
+                ticker, "SELL", pos.contracts, reason, now=now)
             return
         print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
         result = ctx.executor.execute(ticker, "SELL", pos.contracts,
@@ -133,7 +137,7 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
         check_loss_limit(ctx)
         return
 
-    # Holding a position with a working resting exit: nothing to enter here.
+    # Holding a position with a working delayed-IOC exit: nothing to enter.
     if ctx.cfg.paper_trading and ctx.executor.has_pending(ticker, side="SELL"):
         return
 
@@ -167,17 +171,18 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
             "entry remains enabled")
     else:
         set_entry_status(ctx, ticker, "eligible")
+    _, _, _, ask_qty = ctx.feed.top_of_book(ticker)
     entry_sig = ctx.strategy.check_entry(ticker, hist, now,
-                                         mid, bid, ask)
+                                         mid, bid, ask, ask_qty=ask_qty)
     if entry_sig:
         print(f"[signal] BUY {ticker}: {entry_sig['reason']}")
+        size = entry_sig.get("contracts", ctx.cfg.contracts_per_trade)
         if ctx.cfg.paper_trading:
             ctx.executor.submit_paper(
-                ticker, "BUY", ctx.cfg.contracts_per_trade,
-                entry_sig["reason"], now=now)
+                ticker, "BUY", size, entry_sig["reason"], now=now)
             return
         result = ctx.executor.execute(
-            ticker, "BUY", ctx.cfg.contracts_per_trade,
+            ticker, "BUY", size,
             expected_pre_position=Decimal(0), max_entry_price=ask)
         sync_execution_observation(ctx, ticker)
         if result:

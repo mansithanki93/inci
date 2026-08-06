@@ -1,9 +1,11 @@
 # Inci — Kalshi Sports Scalping Research Bot
 
 Inci is a **paper-research build** for studying short-term price retracement in
-Kalshi Sports markets. It simulates latency, spread, depth, slippage, fees,
-position limits, and shutdown behavior. Research evidence does not prove live
-profitability.
+Kalshi Sports markets. Paper execution is delayed IOC / taker-at-touch (aligned
+with `time_in_force=immediate_or_cancel`): one fill attempt after simulated
+latency, depth-capped, remainder canceled — not maker GTC. It also models
+spread, stop-loss slippage, fees, position limits, and shutdown behavior.
+Research evidence does not prove live profitability.
 
 The bot does not submit orders; demo/live remain disabled in `bot.py`, and
 real-order mutation is independently locked off inside `Executor`. No flag,

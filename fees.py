@@ -65,11 +65,12 @@ def projected_scalp_pnl_usd(ask_cents, tp_cents, contracts,
                             balance_precision_usd=Decimal("0.01")):
     """Net paper P&L at the configured take-profit exit.
 
-    Matches the resting paper path: BUY fills at the ask (no adverse slippage)
-    and a take-profit SELL fills at the bid that printed entry+TP (also no
-    adverse slippage). ``slippage_cents`` is retained for call-site compatibility
-    (marketable stop-loss exits still use it in the executor) but does not
-    affect this take-profit projection.
+    Matches the delayed-IOC paper path: BUY lifts the ask and a take-profit
+    SELL hits the bid that printed entry+TP (no adverse slippage on either
+    leg). ``slippage_cents`` is retained for call-site compatibility
+    (stop-loss exits still use it in the executor) but does not affect this
+    take-profit projection. Size should be the executable ask depth, not a
+    hoped-for full clip when the book is thinner.
     Fees are rounded once per aggregate execution, matching the paper executor.
     """
     _ = slippage_cents
