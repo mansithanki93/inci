@@ -122,16 +122,19 @@ def _observation(
     lineage_sha256: str = SHA_A,
     independent: bool | None = True,
     captured_monotonic_ns: int = 1_000,
+    canonical_match_id: str = "match-1",
+    raw_receipt_sha256: str = SHA_D,
 ) -> object:
     contracts, _ = api
     return contracts.LivePaperSourceObservation(
+        canonical_match_id=canonical_match_id,
         provider_slot="fixture",
         source_id=source_id,
         independent_lineage_id=lineage_id,
         lineage_sha256=lineage_sha256,
         independence_proven=independent,
         state=state,
-        raw_receipt_sha256=SHA_D,
+        raw_receipt_sha256=raw_receipt_sha256,
         captured_wall_ns=captured_monotonic_ns,
         captured_monotonic_ns=captured_monotonic_ns,
     )
@@ -177,7 +180,7 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
             score.initial_live_paper_score_coordinator_state("match-1"),
             (
                 _observation(api, before),
-                _observation(api, twin, source_id="source-b", lineage_id="lineage-b", lineage_sha256=SHA_B),
+                _observation(api, twin, source_id="source-b", lineage_id="lineage-b", lineage_sha256=SHA_B, raw_receipt_sha256=SHA_C),
             ),
         )
 
@@ -264,7 +267,87 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
 
         self.assertIs(unchanged.kind, contracts.LivePaperScoreDecisionKind.UNCHANGED)
         self.assertIs(duplicate.kind, contracts.LivePaperScoreDecisionKind.UNCHANGED)
+        self.assertIs(next_state, initial)
+        self.assertIs(duplicate_state, initial)
         self.assertEqual(duplicate_state.local_point_ordinal, 0)
+
+    def test_rejects_observation_bound_to_other_canonical_match(self) -> None:
+        api = _api()
+        _, score = api
+
+        with self.assertRaisesRegex(ValueError, "^canonical_match_id$"):
+            _reduce(
+                api,
+                score.initial_live_paper_score_coordinator_state("match-1"),
+                (_observation(api, _state(), canonical_match_id="match-2"),),
+            )
+
+    def test_facts_projection_binds_canonical_match_and_uses_paper_local_revision_identity(self) -> None:
+        from inci_tennis_adapters.live_score_candidates import (
+            LiveScoreCaptureContext,
+            LiveScoreFacts,
+            NormalizedLiveScore,
+            ProviderSlot,
+        )
+
+        api = _api()
+        _, score = api
+        context = LiveScoreCaptureContext(
+            provider_source_id="provider-a",
+            revision_domain_id="provider-revisions",
+            source_lineage_sha256=SHA_A,
+            provider_match_id="provider-a-match",
+            home_player_id="home",
+            away_player_id="away",
+            scheduled_start_wall_ns=10,
+            match_format=MatchFormat.STANDARD_ADVANTAGE_BO3_TB7_ALL_SETS,
+            local_capture_wall_ns=1_000,
+            local_capture_monotonic_ns=1_000,
+            local_clock_uncertainty_ns=0,
+            raw_capture_id="capture-a",
+            lineage_independence_proven=True,
+        )
+        facts = LiveScoreFacts(
+            "provider-a-match", "home", "away", MatchStatus.LIVE,
+            TerminationKind.NONE, None, (), 0, 0, ScoreValue.LOVE,
+            ScoreValue.LOVE, False, PlayerSide.HOME, None, (),
+        )
+        normalized = NormalizedLiveScore(
+            ProviderSlot.API_TENNIS, "provider-a", SHA_A, "capture-a",
+            SHA_D, "fixture", facts, None, None, (), True,
+        )
+
+        observation = score.observation_from_live_score_facts(
+            canonical_match_id="match-1", context=context, normalized=normalized,
+            local_revision=7,
+        )
+
+        self.assertEqual(observation.canonical_match_id, "match-1")
+        self.assertEqual(observation.state.revision_domain_id, "paper-local-revisions-v1")
+        self.assertEqual(observation.state.revision, 7)
+        self.assertEqual(observation.state.last_provider_event_id, "paper-local-capture-a")
+
+    def test_consensus_contract_requires_auditable_proven_support_mapping(self) -> None:
+        api = _api()
+        contracts, _ = api
+        support_a = contracts.LivePaperSupport(SHA_A, SHA_B, "lineage-a", False)
+        support_b = contracts.LivePaperSupport(SHA_C, SHA_D, "lineage-b", True)
+
+        with self.assertRaisesRegex(contracts.LivePaperContractError, "^consensus_support$"):
+            contracts.make_live_paper_anchor(
+                canonical_match_id="match-1",
+                state=_state(),
+                trust=contracts.PaperScoreTrust.CONSENSUS_PAPER,
+                supporting_lineage_sha256s=(SHA_B, SHA_D),
+                parent_receipt_sha256s=(SHA_A, SHA_C),
+                consensus_epoch=1,
+                correction_epoch=0,
+                rebase_epoch=0,
+                accepted_wall_ns=1_000,
+                accepted_monotonic_ns=1_000,
+                supporting_independent_lineage_ids=("lineage-a", "lineage-b"),
+                supporting_sources=(support_a, support_b),
+            )
 
     def test_exact_successor_emits_exact_winner_server_and_one_ordinal(self) -> None:
         api = _api()

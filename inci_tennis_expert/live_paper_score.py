@@ -15,6 +15,7 @@ from inci_tennis_expert.live_paper_contracts import (
     LivePaperScoreDecision,
     LivePaperScoreDecisionKind,
     LivePaperSourceObservation,
+    LivePaperSupport,
     PaperScoreTrust,
     make_live_paper_anchor,
     make_live_paper_transition,
@@ -51,7 +52,7 @@ def _fresh(observation: LivePaperSourceObservation, now_monotonic_ns: int) -> bo
     return observation.captured_monotonic_ns <= now_monotonic_ns and now_monotonic_ns - observation.captured_monotonic_ns <= _FRESHNESS_NS
 
 
-def _selection(observations: tuple[LivePaperSourceObservation, ...], now_monotonic_ns: int) -> tuple[TennisState, PaperScoreTrust, tuple[str, ...], tuple[str, ...], int, int, tuple[str, ...], tuple[str, ...]] | None:
+def _selection(observations: tuple[LivePaperSourceObservation, ...], now_monotonic_ns: int) -> tuple[TennisState, PaperScoreTrust, tuple[str, ...], tuple[str, ...], int, int, tuple[str, ...], tuple[str, ...], tuple[LivePaperSupport, ...]] | None:
     fresh = tuple(item for item in observations if _fresh(item, now_monotonic_ns))
     if not fresh:
         return None
@@ -68,15 +69,34 @@ def _selection(observations: tuple[LivePaperSourceObservation, ...], now_monoton
         trust = PaperScoreTrust.SINGLE_SOURCE_PAPER
     else:
         return None
+    supporting = (
+        tuple(item for item in ordered if item.independence_proven is True)
+        if trust is PaperScoreTrust.CONSENSUS_PAPER
+        else ordered
+    )
+    supports_by_receipt: dict[str, LivePaperSupport] = {}
+    for item in supporting:
+        support = LivePaperSupport(
+            item.raw_receipt_sha256,
+            item.lineage_sha256,
+            item.independent_lineage_id,
+            item.independence_proven is True,
+        )
+        existing = supports_by_receipt.get(support.raw_receipt_sha256)
+        if existing is not None and existing != support:
+            return None
+        supports_by_receipt[support.raw_receipt_sha256] = support
+    supports = tuple(sorted(supports_by_receipt.values(), key=lambda support: support.raw_receipt_sha256))
     return (
         ordered[0].state,
         trust,
-        tuple(sorted({item.lineage_sha256 for item in ordered})),
-        tuple(sorted({item.raw_receipt_sha256 for item in ordered})),
+        tuple(sorted({support.lineage_sha256 for support in supports})),
+        tuple(support.raw_receipt_sha256 for support in supports),
         max(item.captured_wall_ns for item in ordered),
         max(item.captured_monotonic_ns for item in ordered),
         independent_ids,
         proven_ids,
+        supports,
     )
 
 
@@ -89,8 +109,8 @@ def _decision(kind: LivePaperScoreDecisionKind, *, trust: PaperScoreTrust = Pape
     return LivePaperScoreDecision(kind, trust, anchor, transition, reason)  # type: ignore[arg-type]
 
 
-def _anchor(state: LivePaperScoreCoordinatorState, selected: tuple[TennisState, PaperScoreTrust, tuple[str, ...], tuple[str, ...], int, int, tuple[str, ...], tuple[str, ...]], *, rebase_epoch: int | None = None, consensus_epoch: int | None = None) -> LivePaperScoreAnchor:
-    accepted, trust, lineages, receipts, wall, monotonic, _, proven_ids = selected
+def _anchor(state: LivePaperScoreCoordinatorState, selected: tuple[TennisState, PaperScoreTrust, tuple[str, ...], tuple[str, ...], int, int, tuple[str, ...], tuple[str, ...], tuple[LivePaperSupport, ...]], *, rebase_epoch: int | None = None, consensus_epoch: int | None = None) -> LivePaperScoreAnchor:
+    accepted, trust, lineages, receipts, wall, monotonic, _, proven_ids, supports = selected
     epoch = state.consensus_epoch if consensus_epoch is None else consensus_epoch
     return make_live_paper_anchor(
         canonical_match_id=state.canonical_match_id,
@@ -104,6 +124,7 @@ def _anchor(state: LivePaperScoreCoordinatorState, selected: tuple[TennisState, 
         accepted_wall_ns=wall,
         accepted_monotonic_ns=monotonic,
         supporting_independent_lineage_ids=proven_ids,
+        supporting_sources=supports,
     )
 
 
@@ -157,6 +178,8 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
         raise TypeError("state")
     if type(observations) is not tuple or any(type(item) is not LivePaperSourceObservation for item in observations):
         raise TypeError("observations")
+    if any(item.canonical_match_id != state.canonical_match_id for item in observations):
+        raise ValueError("canonical_match_id")
     if type(now_wall_ns) is not int or now_wall_ns < 0 or type(now_monotonic_ns) is not int or now_monotonic_ns < 0:
         raise ValueError("now")
     selected = _selection(observations, now_monotonic_ns)
@@ -164,7 +187,7 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
         if selected is None:
             next_state = replace(state, rebase_candidate=None) if _fresh_disagreement(observations, now_monotonic_ns) else state
             return next_state, _decision(LivePaperScoreDecisionKind.ABSTAINED, reason="rebase_source_unstable")
-        accepted, trust, _, _, _, captured_monotonic, independent_lineage_ids, _ = selected
+        accepted, trust, _, _, _, captured_monotonic, independent_lineage_ids, _, _ = selected
         if captured_monotonic <= state.quarantine_barrier_monotonic_ns:  # type: ignore[operator]
             return state, _decision(LivePaperScoreDecisionKind.ABSTAINED, reason="rebase_before_barrier")
         if trust is PaperScoreTrust.CONSENSUS_PAPER:
@@ -187,17 +210,19 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
         return next_state, _decision(LivePaperScoreDecisionKind.REBASED, trust=trust, anchor=anchor, reason="stable_single_source_rebase")
     if selected is None:
         return state, _decision(LivePaperScoreDecisionKind.ABSTAINED, reason="fresh_complete_score_unavailable")
-    accepted, trust, _, _, _, _, _, _ = selected
+    accepted, trust, _, _, _, _, _, _, _ = selected
     if state.anchor is None:
         epoch = state.consensus_epoch + (1 if trust is PaperScoreTrust.CONSENSUS_PAPER else 0)
         anchor = _anchor(state, selected, consensus_epoch=epoch)
         next_state = replace(state, anchor=anchor, consensus_epoch=epoch)
         return next_state, _decision(LivePaperScoreDecisionKind.ANCHORED, trust=trust, anchor=anchor, reason="initial_anchor")
     if score_coordinates(accepted) == score_coordinates(state.anchor.state):
-        epoch = state.consensus_epoch + (1 if trust is PaperScoreTrust.CONSENSUS_PAPER and state.anchor.trust is not PaperScoreTrust.CONSENSUS_PAPER else 0)
-        anchor = _anchor(state, selected, consensus_epoch=epoch)
-        next_state = replace(state, anchor=anchor, consensus_epoch=epoch)
-        return next_state, _decision(LivePaperScoreDecisionKind.UNCHANGED, trust=trust, anchor=anchor, reason="score_unchanged")
+        return state, _decision(
+            LivePaperScoreDecisionKind.UNCHANGED,
+            trust=state.anchor.trust,
+            anchor=state.anchor,
+            reason="score_unchanged",
+        )
     resolved = _successor(state.anchor.state, accepted)
     if resolved is None:
         return _quarantine(state, now_monotonic_ns=now_monotonic_ns, reason="unproved_score_transition")
@@ -219,6 +244,7 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
         accepted_wall_ns=anchor.accepted_wall_ns,
         accepted_monotonic_ns=anchor.accepted_monotonic_ns,
         supporting_independent_lineage_ids=anchor.supporting_independent_lineage_ids,
+        supporting_sources=anchor.supporting_sources,
     )
     next_state = replace(state, anchor=anchor, local_point_ordinal=transition.local_point_ordinal)
     return next_state, _decision(LivePaperScoreDecisionKind.POINT_ACCEPTED, trust=trust, anchor=anchor, transition=transition, reason="exact_point_successor")
@@ -242,7 +268,7 @@ def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveS
     source_wall_ns = facts.source_generated_wall_ns if facts.source_generated_wall_ns is not None else context.local_capture_wall_ns
     state = TennisState(
         provider_source_id=context.provider_source_id,
-        revision_domain_id=context.revision_domain_id,
+        revision_domain_id="paper-local-revisions-v1",
         source_lineage_sha256=context.source_lineage_sha256,
         provider_match_id=context.provider_match_id,
         home_player_id=context.home_player_id,
@@ -266,7 +292,7 @@ def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveS
         correction_epoch=0,
         revision=local_revision,
         snapshot_complete=True,
-        last_provider_event_id=context.raw_capture_id,
+        last_provider_event_id="paper-local-" + context.raw_capture_id,
         last_event_semantic_sha256=normalized.raw_sha256,
         correction_lineage_sha256=sha256(b"INCI-LIVE-PAPER-LOCAL-REVISION-V1\0" + normalized.raw_sha256.encode("ascii")).hexdigest(),
         last_source_wall_ns=source_wall_ns,
@@ -280,6 +306,7 @@ def observation_from_live_score_facts(*, canonical_match_id: str, context: LiveS
         blocked_received_monotonic_ns=None,
     )
     return LivePaperSourceObservation(
+        canonical_match_id=canonical_match_id,
         provider_slot=normalized.provider_slot.value,
         source_id=context.provider_source_id,
         independent_lineage_id=context.source_lineage_sha256,

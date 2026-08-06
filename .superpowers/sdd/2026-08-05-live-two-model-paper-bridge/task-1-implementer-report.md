@@ -74,3 +74,45 @@ OK
 The repository's default `python` is 3.9.25, incompatible with this project's
 declared Python 3.14.5 requirement; validation used `/opt/homebrew/bin/python3`
 (3.14.5). No product or implementation concern remains.
+
+## Fix round 1 (2026-08-05)
+
+### Root cause
+
+- The unchanged branch rebuilt the anchor and could advance consensus state.
+- Canonical match identity was only a projection argument, not an observation
+  binding checked by the reducer.
+- Projected states inherited the provider revision domain/event identity.
+- Consensus evidence was represented as unrelated receipt, digest, and
+  lineage-ID tuples rather than receipt-level support records.
+
+### RED
+
+```text
+$ /Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest \
+  tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_unchanged_or_duplicate_capture_does_not_update_point_ordinal \
+  tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_rejects_observation_bound_to_other_canonical_match \
+  tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_facts_projection_binds_canonical_match_and_uses_paper_local_revision_identity \
+  tests.tennis_v1.test_live_paper_score.LivePaperScoreCoordinatorTests.test_consensus_contract_requires_auditable_proven_support_mapping -v
+Ran 4 tests in 0.023s
+FAILED (errors=4)
+```
+
+The failures showed the missing `canonical_match_id` constructor/attribute,
+missing `LivePaperSupport`, and the old unchanged branch rebuilding state.
+
+### GREEN
+
+```text
+$ /Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest tests.tennis_v1.test_live_paper_score -v
+Ran 12 tests in 0.024s
+OK
+
+$ /Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest tests.tennis_v1.test_tennis_score tests.tennis_v1.test_pilot_contracts -v
+Ran 38 tests in 0.021s
+OK
+```
+
+`git diff --check` completed successfully. The fix adds immutable
+`LivePaperSupport` entries that bind every accepted receipt to its lineage,
+independence ID, and proof flag; consensus requires two proven support records.

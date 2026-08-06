@@ -21,6 +21,7 @@ __all__ = (
     "PaperScoreTrust",
     "LivePaperScoreDecisionKind",
     "LivePaperSourceObservation",
+    "LivePaperSupport",
     "LivePaperScoreAnchor",
     "LivePaperPointTransition",
     "LivePaperScoreDecision",
@@ -201,6 +202,7 @@ def _canonical_bytes(value: object) -> bytes:
 
 @dataclass(frozen=True, slots=True)
 class LivePaperSourceObservation:
+    canonical_match_id: str
     provider_slot: str
     source_id: str
     independent_lineage_id: str
@@ -213,6 +215,7 @@ class LivePaperSourceObservation:
     authority_label: str = _PAPER_LOCAL_REVISION_AUTHORITY
 
     def __post_init__(self) -> None:
+        _id(self.canonical_match_id, "canonical_match_id")
         _id(self.provider_slot, "provider_slot")
         _id(self.source_id, "source_id")
         _id(self.independent_lineage_id, "independent_lineage_id")
@@ -225,6 +228,49 @@ class LivePaperSourceObservation:
         _integer(self.captured_monotonic_ns, "captured_monotonic_ns")
         if self.authority_label != _PAPER_LOCAL_REVISION_AUTHORITY:
             _fail("authority_label")
+
+
+@dataclass(frozen=True, slots=True)
+class LivePaperSupport:
+    raw_receipt_sha256: str
+    lineage_sha256: str
+    independent_lineage_id: str
+    independence_proven: bool
+
+    def __post_init__(self) -> None:
+        _digest(self.raw_receipt_sha256, "raw_receipt_sha256")
+        _digest(self.lineage_sha256, "lineage_sha256")
+        _id(self.independent_lineage_id, "independent_lineage_id")
+        if type(self.independence_proven) is not bool:
+            _fail("independence_proven")
+
+
+def _supporting_sources(
+    sources: object,
+    *,
+    lineages: tuple[str, ...],
+    receipts: tuple[str, ...],
+    proven_ids: tuple[str, ...],
+    trust: PaperScoreTrust,
+) -> None:
+    if type(sources) is not tuple or not sources or any(type(source) is not LivePaperSupport for source in sources):
+        _fail("supporting_sources")
+    if tuple(sorted(sources, key=lambda source: source.raw_receipt_sha256)) != sources or len({source.raw_receipt_sha256 for source in sources}) != len(sources):
+        _fail("supporting_sources")
+    if lineages != tuple(sorted({source.lineage_sha256 for source in sources})) or receipts != tuple(source.raw_receipt_sha256 for source in sources):
+        _fail("supporting_sources")
+    actual_proven_ids = tuple(sorted({source.independent_lineage_id for source in sources if source.independence_proven}))
+    all_ids = {source.independent_lineage_id for source in sources}
+    if trust is PaperScoreTrust.CONSENSUS_PAPER and (
+        len(actual_proven_ids) < 2
+        or len({source.lineage_sha256 for source in sources if source.independence_proven}) < 2
+        or any(not source.independence_proven for source in sources)
+    ):
+        _fail("consensus_support")
+    if proven_ids != actual_proven_ids:
+        _fail("supporting_sources")
+    if trust is PaperScoreTrust.SINGLE_SOURCE_PAPER and len(all_ids) != 1:
+        _fail("supporting_sources")
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +287,7 @@ class LivePaperScoreAnchor:
     accepted_monotonic_ns: int
     anchor_sha256: str
     supporting_independent_lineage_ids: tuple[str, ...] = ()
+    supporting_sources: tuple[LivePaperSupport, ...] = ()
 
     def __post_init__(self) -> None:
         _id(self.canonical_match_id, "canonical_match_id")
@@ -258,6 +305,13 @@ class LivePaperScoreAnchor:
             _fail("supporting_lineage_sha256s")
         if self.trust is PaperScoreTrust.SINGLE_SOURCE_PAPER and len(independent_ids) > 1:
             _fail("supporting_independent_lineage_ids")
+        _supporting_sources(
+            self.supporting_sources,
+            lineages=self.supporting_lineage_sha256s,
+            receipts=self.parent_receipt_sha256s,
+            proven_ids=independent_ids,
+            trust=self.trust,
+        )
         _integer(self.consensus_epoch, "consensus_epoch")
         _integer(self.correction_epoch, "correction_epoch")
         _integer(self.rebase_epoch, "rebase_epoch")
@@ -288,6 +342,7 @@ class LivePaperPointTransition:
     accepted_monotonic_ns: int
     transition_sha256: str
     supporting_independent_lineage_ids: tuple[str, ...] = ()
+    supporting_sources: tuple[LivePaperSupport, ...] = ()
 
     def __post_init__(self) -> None:
         _id(self.canonical_match_id, "canonical_match_id")
@@ -309,6 +364,13 @@ class LivePaperPointTransition:
             _fail("supporting_lineage_sha256s")
         if self.trust is PaperScoreTrust.SINGLE_SOURCE_PAPER and len(independent_ids) > 1:
             _fail("supporting_independent_lineage_ids")
+        _supporting_sources(
+            self.supporting_sources,
+            lineages=self.supporting_lineage_sha256s,
+            receipts=self.parent_receipt_sha256s,
+            proven_ids=independent_ids,
+            trust=self.trust,
+        )
         _integer(self.consensus_epoch, "consensus_epoch")
         _integer(self.correction_epoch, "correction_epoch")
         _integer(self.rebase_epoch, "rebase_epoch")
@@ -404,6 +466,7 @@ def _anchor_digest(anchor: LivePaperScoreAnchor) -> str:
             "consensus_epoch", "correction_epoch", "rebase_epoch",
             "accepted_wall_ns", "accepted_monotonic_ns",
             "supporting_independent_lineage_ids",
+            "supporting_sources",
         )
     })
 
@@ -422,6 +485,7 @@ def _transition_digest(transition: LivePaperPointTransition) -> str:
             "consensus_epoch", "correction_epoch", "rebase_epoch",
             "accepted_wall_ns", "accepted_monotonic_ns",
             "supporting_independent_lineage_ids",
+            "supporting_sources",
         )
     })
 
