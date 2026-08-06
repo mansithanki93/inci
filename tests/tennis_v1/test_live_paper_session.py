@@ -83,8 +83,25 @@ def _config(api: object) -> object:
         effective_from_wall_ns=1,
         effective_until_wall_ns=None,
     )
+    authority = api.LivePaperProviderAuthority(
+        slot="fixture",
+        source_id="source-a",
+        provider_match_id="provider-match",
+        home_player_id="home",
+        away_player_id="away",
+        independent_lineage_id="lineage-a",
+        source_lineage_sha256=SHA_A,
+        independence_proven=True,
+        independence_proof_sha256=SHA_B,
+    )
+    authorities = (authority,)
     return api.LivePaperSessionConfig(
         canonical_match_id="match-1",
+        manifest_sha256="9" * 64,
+        provider_authorities=authorities,
+        provider_authority_sha256=(
+            api.compute_live_paper_provider_authority_sha256(authorities)
+        ),
         static_artifact=static,
         dynamic_artifact=dynamic,
         artifact_authority=LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
@@ -251,6 +268,40 @@ def _advanced_observation(api: object, count: int) -> object:
 
 
 class LivePaperSessionTests(unittest.TestCase):
+    def test_manifest_and_provider_authority_are_authenticated_by_log_and_checkpoint(self) -> None:
+        """Catches resume accepting a different provider/proof authority set."""
+        api = _api()
+        authority = api.LivePaperProviderAuthority(
+            slot="api_tennis",
+            source_id="source-a",
+            provider_match_id="provider-match",
+            home_player_id="home",
+            away_player_id="away",
+            independent_lineage_id="lineage-a",
+            source_lineage_sha256=SHA_A,
+            independence_proven=True,
+            independence_proof_sha256=SHA_B,
+        )
+        authority_digest = api.compute_live_paper_provider_authority_sha256(
+            (authority,)
+        )
+        config = replace(
+            _config(api),
+            manifest_sha256="9" * 64,
+            provider_authorities=(authority,),
+            provider_authority_sha256=authority_digest,
+        )
+        state = api.open_live_paper_session(config)
+        state, records = api.reduce_live_paper_input(state, _score_input(api))
+        replay = api.replay_live_paper_records(api.encode_live_paper_records(records))
+        checkpoint = api.decode_live_paper_checkpoint(
+            api.encode_live_paper_checkpoint(state)
+        )
+        self.assertEqual(replay.state.config, config)
+        self.assertEqual(checkpoint.config, config)
+        with self.assertRaises(api.LivePaperSessionError):
+            replace(config, provider_authority_sha256="7" * 64)
+
     def test_exact_point_transition_updates_model_and_replays_without_inventing_a_gap(self) -> None:
         """Catches a session dropping or fabricating the one-point causal model update."""
         api = _api()

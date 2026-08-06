@@ -401,6 +401,56 @@ class _PriceCollector:
 
 
 class LiveShadowCliTests(unittest.TestCase):
+    def test_capture_observer_rejects_price_only_before_kalshi_io(self) -> None:
+        """Paper capture authority never admits an unverified chooser row."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            LiveShadowCliDependencies,
+            run_cli,
+        )
+
+        material = SimpleNamespace(
+            kalshi_api_key_id="identifier",
+            kalshi_private_key_path=Path("/private/tmp/key.pem"),
+        )
+        forbidden: list[str] = []
+        errors = io.StringIO()
+        code = run_cli(
+            ["--choose", "--duration-seconds", "10"],
+            environ={},
+            stdin=io.StringIO("1\n"),
+            stdout=io.StringIO(),
+            stderr=errors,
+            dependencies=LiveShadowCliDependencies(
+                kalshi_only_credential_loader=lambda _: material,
+                catalog_transport_factory=_HybridCatalog,
+                evidence_store_factory=lambda: forbidden.append("evidence"),
+                kalshi_transport_factory=lambda *_: forbidden.append("kalshi"),
+                price_only_collector_factory=lambda **_: forbidden.append(
+                    "price"
+                ),
+                capture_observer=object(),
+                wall_ns=lambda: GENERATED_NS + 6_000_000_000,
+                monotonic_ns=lambda: 10_000_000_000,
+            ),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(forbidden, [])
+        self.assertIn(
+            "shadow_live_paper_verified_provider_required", errors.getvalue()
+        )
+
+    def test_capture_observer_disables_verified_to_price_only_failover(self) -> None:
+        """A verified paper run may halt, but cannot downgrade authority."""
+
+        from inci_tennis_runtime.live_shadow_cli import (
+            _paper_observer_allows_price_only,
+        )
+
+        self.assertTrue(_paper_observer_allows_price_only(None))
+        self.assertFalse(_paper_observer_allows_price_only(object()))
+
     def test_no_sportradar_key_still_lists_and_collects_price_only(self) -> None:
         """Catches chooser startup requiring or constructing score-feed state."""
 

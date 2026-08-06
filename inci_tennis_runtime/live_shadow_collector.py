@@ -1157,6 +1157,7 @@ class LiveShadowCollector:
             self._projector.snapshot_requested(receipt)
         if self._score is not None:
             await self._append_observation(projection.reason)
+        await self._emit_timeout_heartbeat_if_due()
 
     async def _emit_timeout_heartbeat_if_due(self) -> None:
         next_heartbeat = self._next_heartbeat_monotonic_ns
@@ -1174,6 +1175,7 @@ class LiveShadowCollector:
                 self._render,
                 self._waiting_dashboard("kalshi_receive_timeout_heartbeat", now),
             )
+            return
         else:
             await self._append_observation("kalshi_receive_timeout_heartbeat")
         callback = (

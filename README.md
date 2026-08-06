@@ -170,6 +170,16 @@ scope set `{"read"}`; `{"read","write"}`, `{"write"}`, empty, unknown, and
 malformed scope sets halt before the WebSocket opens. No write/order transport
 is imported by this command.
 
+Live observer mode admits only a `VERIFIED` Sportradar chooser row and requires
+at least a ten-second duration. It never starts a `PRICE_ONLY` row and never
+fails over from a verified provider halt to price-only collection. Each paper
+RAW record authenticates the concrete collector receipt, raw reference,
+capture identity, digest, clocks, and (for Kalshi) connection generation that
+were durably committed before the observer callback.
+Natural 7–6 completed sets are accepted only when the raw period score includes
+exact home/away tiebreak points proving a legal TB7 result; otherwise the score
+fails closed rather than synthesizing missing tiebreak evidence.
+
 Current live network score coverage is exactly Sportradar through the existing
 trial capture transport. API-Tennis, GoalServe, and Live Tennis API have strict
 raw parsers but no live network transport in this command; any of those
@@ -215,7 +225,11 @@ and checkpoint must be absolute, distinct from every input and each other,
 and non-symlink paths. Evidence rows append with flush/fsync ordering; the
 checkpoint uses temp-write, fsync, atomic replace, and parent-directory fsync.
 An existing log/checkpoint is authenticated by the session replay APIs before
-resume and is never truncated or silently replaced.
+resume and is never truncated or silently replaced. The session log is held by
+a nonblocking exclusive process lock, and each append re-authenticates the
+size, full committed prefix, and inode on the same no-follow append descriptor.
+The authenticated session configuration freezes the exact manifest digest and
+the complete ordered provider identity/proof authority set.
 
 Authority labels are intentionally narrow: provider score revisions are
 `PAPER_LOCAL_REVISION_TRANSPORT_ONLY`; score trust is `SINGLE_SOURCE_PAPER`,

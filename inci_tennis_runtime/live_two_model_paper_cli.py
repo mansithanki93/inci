@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from inci_tennis_expert.live_paper_session import (
     LivePaperRecord,
     LivePaperRecordKind,
     LivePaperTerminalInput,
+    compute_live_paper_provider_authority_sha256,
     encode_live_paper_checkpoint,
     encode_live_paper_records,
     load_live_paper_checkpoint,
@@ -40,6 +42,7 @@ from inci_tennis_runtime.live_paper_capture_bridge import (
     LivePaperBridgeError,
     LivePaperCaptureObserver,
     LivePaperManifest,
+    live_paper_provider_authorities,
     load_live_paper_manifest,
 )
 
@@ -126,7 +129,11 @@ def parse_cli_arguments(argv: list[str] | None) -> LivePaperCliArguments:
     bootstrap_mode = all(item is None for item in artifacts) and all(item is not None for item in priors)
     if not (artifact_mode ^ bootstrap_mode):
         _fail("artifact_bootstrap_xor")
-    if type(value.duration_seconds) is not int or not 1 <= value.duration_seconds <= 3_600:
+    minimum_duration = 10 if value.live_readonly else 1
+    if (
+        type(value.duration_seconds) is not int
+        or not minimum_duration <= value.duration_seconds <= 3_600
+    ):
         _fail("duration_seconds")
     if value.replay_only and not value.stop_at_eof and not value.live_readonly:
         # Replay consumes the durable session only; this guard avoids implying
@@ -279,35 +286,97 @@ class _DurableSessionWriter:
     def __init__(self, log_path: Path, checkpoint_path: Path, existing: bytes) -> None:
         self.log_path = log_path
         self.checkpoint_path = checkpoint_path
-        flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
-        if existing:
-            descriptor = os.open(log_path, flags)
-            current = _read_regular(log_path, "session_log", 32 * 1024 * 1024)
-            if current != existing:
-                os.close(descriptor)
-                _fail("session_log_changed")
-        else:
-            created = False
-            try:
-                descriptor = os.open(log_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-                created = True
-            except FileExistsError:
+        flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        created = False
+        try:
+            if existing:
                 descriptor = os.open(log_path, flags)
-                if os.fstat(descriptor).st_size != 0:
-                    os.close(descriptor)
-                    _fail("session_log_exists")
-            if created:
-                parent = os.open(log_path.parent, os.O_RDONLY)
+            else:
                 try:
-                    os.fsync(parent)
-                finally:
-                    os.close(parent)
-        os.fchmod(descriptor, 0o600)
+                    descriptor = os.open(
+                        log_path,
+                        flags | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                    created = True
+                except FileExistsError:
+                    descriptor = os.open(log_path, flags)
+            try:
+                fcntl.flock(
+                    descriptor,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except OSError:
+                os.close(descriptor)
+                _fail("session_log_locked")
+            descriptor_stat = os.fstat(descriptor)
+            path_stat = os.lstat(log_path)
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or not stat.S_ISREG(path_stat.st_mode)
+                or (descriptor_stat.st_dev, descriptor_stat.st_ino)
+                != (path_stat.st_dev, path_stat.st_ino)
+            ):
+                _fail("session_log_changed")
+            if descriptor_stat.st_size > 32 * 1024 * 1024:
+                _fail("session_log_changed")
+            current = self._pread_exact(descriptor, descriptor_stat.st_size)
+            if current != existing:
+                _fail(
+                    "session_log_changed"
+                    if existing
+                    else "session_log_exists"
+                )
+            os.fchmod(descriptor, 0o600)
+        except BaseException:
+            if "descriptor" in locals():
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise
+        if created:
+            parent = os.open(log_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
         self.descriptor = descriptor
+        self.device_inode = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+        self.encoded = existing
         self.length = len(existing)
+        self.closed = False
 
     def close(self) -> None:
-        os.close(self.descriptor)
+        if not self.closed:
+            self.closed = True
+            os.close(self.descriptor)
+
+    @staticmethod
+    def _pread_exact(descriptor: int, size: int) -> bytes:
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < size:
+            chunk = os.pread(descriptor, size - offset, offset)
+            if not chunk:
+                _fail("session_log_changed")
+            chunks.append(chunk)
+            offset += len(chunk)
+        return b"".join(chunks)
+
+    def _authenticate_append_descriptor(self) -> None:
+        descriptor_stat = os.fstat(self.descriptor)
+        path_stat = os.lstat(self.log_path)
+        if (
+            not stat.S_ISREG(descriptor_stat.st_mode)
+            or not stat.S_ISREG(path_stat.st_mode)
+            or (descriptor_stat.st_dev, descriptor_stat.st_ino)
+            != self.device_inode
+            or (path_stat.st_dev, path_stat.st_ino) != self.device_inode
+            or descriptor_stat.st_size != self.length
+            or self._pread_exact(self.descriptor, self.length) != self.encoded
+        ):
+            _fail("session_log_changed")
 
     @staticmethod
     def _write_all(descriptor: int, data: bytes) -> None:
@@ -321,13 +390,18 @@ class _DurableSessionWriter:
     def commit(self, records: tuple[LivePaperRecord, ...], state: object) -> None:
         if records:
             encoded = encode_live_paper_records(records)
-            if self.length > len(encoded):
+            if (
+                self.length > len(encoded)
+                or encoded[: self.length] != self.encoded
+            ):
                 _fail("session_log_length")
             suffix = encoded[self.length:]
             if not suffix:
                 _fail("session_log_append")
+            self._authenticate_append_descriptor()
             self._write_all(self.descriptor, suffix)
             os.fsync(self.descriptor)
+            self.encoded = encoded
             self.length = len(encoded)
         checkpoint = encode_live_paper_checkpoint(state)  # type: ignore[arg-type]
         temporary_descriptor: int | None = None
@@ -405,13 +479,24 @@ def _dashboard(
     model_2_set = "--" if forecast is None or forecast.model_2_current_set_probability is None else format(forecast.model_2_current_set_probability, "f")
     position = state.portfolio.position
     position_text = "flat" if position is None else f"{position.ticker} x {position.quantity}"
-    pnl = "0" if position is None else "--"
+    cash = Decimal("0")
+    for record in bridge.records:
+        if record.kind is not LivePaperRecordKind.FILL:
+            continue
+        fill = record.payload.body.fill
+        amount = fill.debit_or_credit
+        cash += (
+            amount - fill.fees
+            if fill.action_kind.value == "SELL"
+            else -amount - fill.fees
+        )
+    pnl = format(cash, "f") if position is None else "--"
     if position is not None:
         for record in reversed(bridge.records):
             if record.kind is LivePaperRecordKind.MARK:
-                unrealized = getattr(record.payload.body, "unrealized_pnl", None)
-                if unrealized is not None:
-                    pnl = format(unrealized, "f")
+                mark = record.payload.body
+                if mark.ticker == position.ticker and mark.fully_priced:
+                    pnl = format(cash + mark.net_liquidation_value, "f")
                 break
     score = "--"
     server = "--"
@@ -426,7 +511,24 @@ def _dashboard(
             else anchor.state.server_for_next_point.value
         )
     latest_book = bridge.last_book_monotonic_ns
-    observed_now = latest_book if now_monotonic_ns is None else now_monotonic_ns
+    observed_now = now_monotonic_ns
+    if observed_now is None:
+        observed_now = max(
+            (
+                value
+                for record in bridge.records
+                for value in (
+                    getattr(record.payload.body, "observed_monotonic_ns", None),
+                    getattr(
+                        getattr(record.payload.body, "frame", None),
+                        "captured_monotonic_ns",
+                        None,
+                    ),
+                )
+                if type(value) is int
+            ),
+            default=None,
+        )
     book_age = "--" if latest_book is None or observed_now is None else f"{max(0, observed_now - latest_book) / 1_000_000_000:.3f}s"
     rejection = last_kind
     for record in reversed(bridge.records):
@@ -464,8 +566,15 @@ def _restore_or_open(
         )
         replay = load_live_paper_checkpoint(checkpoint_raw, raw)
         config = replay.state.config
+        provider_authorities = live_paper_provider_authorities(manifest)
         if (
             config.canonical_match_id != manifest.canonical_match_id
+            or config.manifest_sha256 != manifest.manifest_sha256
+            or config.provider_authorities != provider_authorities
+            or config.provider_authority_sha256
+            != compute_live_paper_provider_authority_sha256(
+                provider_authorities
+            )
             or config.market_binding != manifest.binding
             or config.static_artifact != static
             or config.dynamic_artifact != dynamic
@@ -475,7 +584,10 @@ def _restore_or_open(
         ):
             _fail("resume_config_mismatch")
         bridge = GrowingJsonlCaptureBridge(manifest, replay.state)
-        bridge.restore_records(replay.records)
+        bridge.restore_records(
+            replay.records,
+            reconstruct_live_adapter=args.live_readonly,
+        )
         return bridge, raw
     if args.checkpoint.exists():
         _fail("checkpoint_without_log")
@@ -693,6 +805,8 @@ def _run_live(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: 
             _fail("replay_terminal_required")
         _dashboard(stdout, bridge, "replay_verified")
         return 0
+    if bridge.state.terminal:
+        _fail("session_already_terminal")
     writer = _DurableSessionWriter(args.session_log, args.checkpoint, existing)
 
     def validate(match_id: str, tickers: tuple[str, str]) -> None:
@@ -718,9 +832,16 @@ def _run_live(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: 
             stdout=stdout, stderr=stderr, dependencies=dependencies,
         )
         if not bridge.state.terminal:
+            terminal_reason = (
+                "operator_interrupt"
+                if status == 130
+                else "collector_terminal"
+                if status == 0
+                else "halted"
+            )
             records = _terminal(
                 bridge,
-                "operator_interrupt" if status == 130 else "collector_terminal",
+                terminal_reason,
                 time.time_ns(), time.monotonic_ns(),
             )
             writer.commit(tuple(bridge.records), bridge.state)

@@ -215,7 +215,7 @@ LIVE_PAPER_MODULE_AST_SHA256 = {
         "6fefcc8627ae6fa64cf50865699b31077c221bb8f95e105cf52300b010f346b0"
     ),
     "live_paper_session.py": (
-        "afdaf8dd5e383998be79b6946bebaa61f0c1ed09fc40bb972157756111f5ce40"
+        "5a647013e1ba2b6bf99019f0e068758637716aff5bd5d98d5bd140bb755b06cf"
     ),
     "live_two_model.py": (
         "f4728f2b2aa03bcf955cfe061ea840da45eb8bd3fc20b569d881e053e3afef92"
@@ -245,10 +245,10 @@ PILOT_EXTENSION_MODULE_AST_SHA256 = {
 
 LIVE_PAPER_RUNTIME_MODULE_AST_SHA256 = {
     "live_paper_capture_bridge.py": (
-        "c79b673b6a829a547490330fdeb3ee6e43ec36910f8ca4545af6c05068f04ec9"
+        "fe9e697cff5209c1321d351ec47a3b629db5fbb1eef04452b6e3e23da0fcfbda"
     ),
     "live_two_model_paper_cli.py": (
-        "568f876ec036f7bf794a482ee58ba72c4afd5280ae52f75254da78604397939f"
+        "7b6e06bca82e862cf891cc6c22b5671716972abe5e1e803e0e444e40e24f9f67"
     ),
     "two_model_pilot_cli.py": (
         "96b9f5ca67ce55a8fa26309ad495f7492c6d5dfe9d088ab7d89faceba23aba59"
@@ -3336,10 +3336,10 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "live_paper_capture_bridge.py": {
                 "__future__", "base64", "binascii", "dataclasses", "decimal",
                 "hashlib", "inci_tennis_adapters", "inci_tennis_expert", "json",
-                "os", "pathlib", "re", "stat", "typing",
+                "inci_tennis_io", "os", "pathlib", "re", "stat", "typing",
             },
             "live_two_model_paper_cli.py": {
-                "__future__", "argparse", "dataclasses", "decimal",
+                "__future__", "argparse", "dataclasses", "decimal", "fcntl",
                 "inci_tennis_expert", "inci_tennis_runtime", "json", "os",
                 "pathlib", "signal", "stat", "sys", "tempfile", "time", "typing",
             },

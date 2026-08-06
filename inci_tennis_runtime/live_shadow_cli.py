@@ -267,6 +267,12 @@ class LiveShadowCliDependencies:
     ] = _accept_collection_identity
 
 
+def _paper_observer_allows_price_only(observer: object | None) -> bool:
+    """A paper observer is authorized only for provider-verified captures."""
+
+    return observer is None
+
+
 def _parser() -> _Parser:
     parser = _Parser(
         prog="python -m inci_tennis_runtime.live_shadow_cli",
@@ -1614,6 +1620,10 @@ async def _run_choose(
         raise ShadowCollectorError("shadow_selection_identity_changed")
     selected_wall_ns, selected_monotonic_ns = _clock_pair(services)
     if choice.status is HybridStatus.PRICE_ONLY:
+        if not _paper_observer_allows_price_only(services.capture_observer):
+            raise ShadowCollectorError(
+                "shadow_live_paper_verified_provider_required"
+            )
         return await _run_price_choice(
             row=choice,
             snapshot=snapshot,
@@ -1657,6 +1667,8 @@ async def _run_choose(
         return result
     if type(result) is not _VerifiedCollectionHalt:
         raise ShadowCollectorError("shadow_internal_error")
+    if not _paper_observer_allows_price_only(services.capture_observer):
+        raise ShadowCollectorError(result.code)
     failover_wall_ns, failover_monotonic_ns = _clock_pair(services)
     if failover_monotonic_ns < selected_monotonic_ns:
         raise ShadowCollectorError("shadow_clock_invalid")

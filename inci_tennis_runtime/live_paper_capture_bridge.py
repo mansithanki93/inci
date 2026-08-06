@@ -46,15 +46,25 @@ from inci_tennis_expert.live_paper_contracts import (
 from inci_tennis_expert.live_paper_execution import project_paper_l2
 from inci_tennis_expert.live_paper_score import observation_from_live_score_facts
 from inci_tennis_expert.live_paper_session import (
+    LivePaperDurableParentReceipt,
+    LivePaperCaptureReceiptInput,
     LivePaperHeartbeatInput,
     LivePaperL2Input,
     LivePaperRecord,
     LivePaperRecordKind,
+    LivePaperProviderAuthority,
     LivePaperScoreBatchInput,
     LivePaperSessionConfig,
     LivePaperSessionState,
     open_live_paper_session,
     reduce_live_paper_input,
+    compute_live_paper_provider_authority_sha256,
+    compute_live_paper_parent_receipt_sha256,
+)
+from inci_tennis_io.shadow_evidence import PersistedKalshiFrame
+from inci_tennis_io.sportradar_trial_transport import (
+    TrialCapture,
+    TrialObservationRecord,
 )
 from inci_tennis_expert.live_two_model import (
     LiveArtifactAuthority,
@@ -70,6 +80,7 @@ __all__ = (
     "LivePaperManifest",
     "manifest_from_document",
     "load_live_paper_manifest",
+    "live_paper_provider_authorities",
     "GrowingJsonlCaptureBridge",
     "LivePaperCaptureObserver",
 )
@@ -238,6 +249,48 @@ class LivePaperManifest:
         return selected[0]
 
 
+def live_paper_provider_authorities(
+    manifest: LivePaperManifest,
+) -> tuple[LivePaperProviderAuthority, ...]:
+    if type(manifest) is not LivePaperManifest:
+        _fail("manifest_authority")
+    return tuple(
+        sorted(
+            (
+                LivePaperProviderAuthority(
+                    row.slot,
+                    row.source_id,
+                    row.provider_match_id,
+                    row.home_player_id,
+                    row.away_player_id,
+                    row.independent_lineage_id,
+                    row.source_lineage_sha256,
+                    row.independence_proven,
+                    row.independence_proof_sha256,
+                )
+                for row in manifest.providers
+            ),
+            key=lambda row: (
+                row.slot,
+                row.source_id,
+                row.provider_match_id,
+                row.home_player_id,
+                row.away_player_id,
+                row.independent_lineage_id,
+                row.source_lineage_sha256,
+                (
+                    "true"
+                    if row.independence_proven is True
+                    else "false"
+                    if row.independence_proven is False
+                    else "none"
+                ),
+                row.independence_proof_sha256 or "",
+            ),
+        )
+    )
+
+
 def _market(document: object, side: PlayerSide) -> tuple[str, str]:
     row = _exact(document, _MARKET_FIELDS, "manifest_market")
     expected = "HOME" if side is PlayerSide.HOME else "AWAY"
@@ -264,6 +317,8 @@ def manifest_from_document(document: object, *, raw_sha256: str | None = None) -
     try:
         match_format = MatchFormat[root["match_format"]]  # type: ignore[index]
     except (KeyError, TypeError):
+        _fail("match_format")
+    if match_format is not MatchFormat.STANDARD_ADVANTAGE_BO3_TB7_ALL_SETS:
         _fail("match_format")
     home_player_id = _text(root["home_player_id"], "home_player_id")
     away_player_id = _text(root["away_player_id"], "away_player_id")
@@ -369,6 +424,144 @@ def _payload(envelope: dict[str, object]) -> bytes:
     return raw
 
 
+def _parent_receipt(
+    *,
+    source_kind: str,
+    capture_id: str,
+    raw_reference: str,
+    raw_sha256: str,
+    durable_receipt_sha256: str,
+    captured_wall_ns: int,
+    captured_monotonic_ns: int,
+    clock_uncertainty_ns: int,
+    physical_connection_generation: int | None,
+) -> LivePaperDurableParentReceipt:
+    digest = compute_live_paper_parent_receipt_sha256(
+        source_kind=source_kind,
+        capture_id=capture_id,
+        raw_reference=raw_reference,
+        raw_sha256=raw_sha256,
+        durable_receipt_sha256=durable_receipt_sha256,
+        captured_wall_ns=captured_wall_ns,
+        captured_monotonic_ns=captured_monotonic_ns,
+        clock_uncertainty_ns=clock_uncertainty_ns,
+        physical_connection_generation=physical_connection_generation,
+    )
+    return LivePaperDurableParentReceipt(
+        source_kind,
+        capture_id,
+        raw_reference,
+        raw_sha256,
+        durable_receipt_sha256,
+        digest,
+        captured_wall_ns,
+        captured_monotonic_ns,
+        clock_uncertainty_ns,
+        physical_connection_generation,
+    )
+
+
+def _durable_contract_sha256(kind: str, projection: object) -> str:
+    return sha256(
+        b"INCI-LIVE-PAPER-COLLECTOR-RECEIPT-V1\0"
+        + kind.encode("ascii")
+        + b"\0"
+        + json.dumps(
+            projection,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def _trial_observation_sha256(value: TrialObservationRecord) -> str:
+    reservation = value.reservation
+    return _durable_contract_sha256(
+        "sportradar_trial_observation",
+        {
+            "command": value.command,
+            "reservation": {
+                "session_id": reservation.session_id,
+                "session_attempt": reservation.session_attempt,
+                "access_attempt": reservation.access_attempt,
+                "route": reservation.route,
+                "started_wall_ns": reservation.started_wall_ns,
+            },
+            "provider_match_id": value.provider_match_id,
+            "generated_wall_ns": value.generated_wall_ns,
+            "captured_wall_ns": value.captured_wall_ns,
+            "status": value.status,
+            "match_status": value.match_status,
+            "payload_sha256": value.payload_sha256,
+            "raw_path": str(value.raw_path),
+            "progression": value.progression,
+            "last_event_id": value.last_event_id,
+            "terminal_reason": value.terminal_reason,
+        },
+    )
+
+
+def _kalshi_receipt_sha256(value: PersistedKalshiFrame) -> str:
+    return _durable_contract_sha256(
+        "shadow_kalshi_capture",
+        {
+            "raw_path": value.raw_path,
+            "raw_sha256": value.raw_sha256,
+            "captured_wall_ns": value.captured_wall_ns,
+            "captured_monotonic_ns": value.captured_monotonic_ns,
+            "clock_uncertainty_ns": value.clock_uncertainty_ns,
+            "physical_connection_generation": (
+                value.physical_connection_generation
+            ),
+        },
+    )
+
+
+def _sportradar_completed_set(value: object) -> SetScore:
+    if type(value) is not dict:
+        _fail("sportradar_terminal_set_invalid")
+    home = value.get("home_score")
+    away = value.get("away_score")
+    home_tiebreak = value.get("home_tiebreak_score")
+    away_tiebreak = value.get("away_tiebreak_score")
+    if (
+        type(home) is not int
+        or type(away) is not int
+        or not 0 <= home <= 7
+        or not 0 <= away <= 7
+    ):
+        _fail("sportradar_terminal_set_invalid")
+    is_tiebreak_set = (home, away) in {(7, 6), (6, 7)}
+    if is_tiebreak_set:
+        tiebreak_winner = max(home_tiebreak, away_tiebreak) if (
+            type(home_tiebreak) is int
+            and type(away_tiebreak) is int
+        ) else -1
+        tiebreak_loser = min(home_tiebreak, away_tiebreak) if (
+            type(home_tiebreak) is int
+            and type(away_tiebreak) is int
+        ) else -1
+        legal_tiebreak = (
+            tiebreak_winner == 7 and 0 <= tiebreak_loser <= 5
+        ) or (
+            tiebreak_winner > 7
+            and tiebreak_loser == tiebreak_winner - 2
+        )
+        if (
+            type(home_tiebreak) is not int
+            or type(away_tiebreak) is not int
+            or min(home_tiebreak, away_tiebreak) < 0
+            or not legal_tiebreak
+            or (home > away) != (home_tiebreak > away_tiebreak)
+        ):
+            _fail("sportradar_terminal_set_invalid")
+    elif home_tiebreak is not None or away_tiebreak is not None:
+        _fail("sportradar_terminal_set_invalid")
+    return SetScore(home, away, home_tiebreak, away_tiebreak)
+
+
 class GrowingJsonlCaptureBridge:
     """Stateful raw-capture adapter over the pure Task 4 session reducer."""
 
@@ -382,6 +575,8 @@ class GrowingJsonlCaptureBridge:
         self.records: list[LivePaperRecord] = []
         self._latest_scores: dict[tuple[str, str], object] = {}
         self._revisions: dict[tuple[str, str], int] = {}
+        self._capture_ids: set[str] = set()
+        self._capture_digests: set[str] = set()
         self._book = UnqualifiedTwoTickerBookReducer(
             (manifest.binding.home_ticker, manifest.binding.away_ticker)
         )
@@ -427,8 +622,16 @@ class GrowingJsonlCaptureBridge:
         opened_wall_ns: int,
         opened_monotonic_ns: int,
     ) -> "GrowingJsonlCaptureBridge":
+        provider_authorities = live_paper_provider_authorities(manifest)
         config = LivePaperSessionConfig(
             canonical_match_id=manifest.canonical_match_id,
+            manifest_sha256=manifest.manifest_sha256,
+            provider_authorities=provider_authorities,
+            provider_authority_sha256=(
+                compute_live_paper_provider_authority_sha256(
+                    provider_authorities
+                )
+            ),
             static_artifact=static_artifact,
             dynamic_artifact=dynamic_artifact,
             artifact_authority=artifact_authority,
@@ -440,8 +643,51 @@ class GrowingJsonlCaptureBridge:
         )
         return cls(manifest, open_live_paper_session(config))
 
-    def restore_records(self, records: tuple[LivePaperRecord, ...]) -> None:
+    def restore_records(
+        self,
+        records: tuple[LivePaperRecord, ...],
+        *,
+        reconstruct_live_adapter: bool = True,
+    ) -> None:
         self.records = list(records)
+        if not reconstruct_live_adapter:
+            return
+        for record in records:
+            body = record.payload.body
+            if record.kind is LivePaperRecordKind.RAW_SCORE_RECEIPT:
+                for observation in body.observations:
+                    key = (observation.provider_slot, observation.source_id)
+                    self._latest_scores[key] = observation
+                    self._revisions[key] = max(
+                        self._revisions.get(key, 0), observation.state.revision
+                    )
+                parents = body.durable_parent_receipts
+            elif record.kind is LivePaperRecordKind.RAW_L2_RECEIPT:
+                self.last_book_monotonic_ns = body.frame.captured_monotonic_ns
+                parents = (
+                    ()
+                    if body.durable_parent_receipt is None
+                    else (body.durable_parent_receipt,)
+                )
+            elif record.kind is LivePaperRecordKind.RAW_CAPTURE_RECEIPT:
+                parents = (body.durable_parent_receipt,)
+            else:
+                parents = ()
+            for parent in parents:
+                self._capture_ids.add(parent.capture_id)
+                self._capture_digests.add(parent.raw_sha256)
+
+    def _check_capture_reuse(
+        self, capture_id: str, digest: str, *, exact_durable_parent: bool = False
+    ) -> None:
+        if capture_id in self._capture_ids or (
+            exact_durable_parent and digest in self._capture_digests
+        ):
+            _fail("capture_reuse")
+
+    def _commit_capture(self, capture_id: str, digest: str) -> None:
+        self._capture_ids.add(capture_id)
+        self._capture_digests.add(digest)
 
     def _reduce(self, item: object) -> tuple[LivePaperRecord, ...]:
         if self._rehydrating:
@@ -496,6 +742,10 @@ class GrowingJsonlCaptureBridge:
         wall = _positive(row["captured_wall_ns"], "capture_clock")
         monotonic = _positive(row["captured_monotonic_ns"], "capture_clock", allow_zero=True)
         uncertainty = _positive(row["clock_uncertainty_ns"], "capture_clock", allow_zero=True)
+        capture_id = _text(row["raw_capture_id"], "raw_capture_id")
+        raw = _payload(row)
+        raw_digest = sha256(raw).hexdigest()
+        self._check_capture_reuse(capture_id, raw_digest)
         context = LiveScoreCaptureContext(
             provider_source_id=source,
             revision_domain_id="paper-local-revisions-v1",
@@ -508,11 +758,11 @@ class GrowingJsonlCaptureBridge:
             local_capture_wall_ns=wall,
             local_capture_monotonic_ns=monotonic,
             local_clock_uncertainty_ns=uncertainty,
-            raw_capture_id=_text(row["raw_capture_id"], "raw_capture_id"),
+            raw_capture_id=capture_id,
             lineage_independence_proven=binding.independence_proven,
         )
         try:
-            normalized = parse_live_score(slot, _payload(row), context)
+            normalized = parse_live_score(slot, raw, context)
         except Exception as error:
             raise LivePaperBridgeError("score_parse") from error
         if normalized.facts is None:
@@ -533,12 +783,29 @@ class GrowingJsonlCaptureBridge:
             )
         except Exception as error:
             raise LivePaperBridgeError("score_projection") from error
+        previous = self._latest_scores.get(key)
         self._revisions[key] = revision
         self._latest_scores[key] = observation
-        return self._reduce_latest_scores(wall, monotonic)
+        try:
+            records = self._reduce_latest_scores(wall, monotonic)
+        except BaseException:
+            if previous is None:
+                self._latest_scores.pop(key, None)
+                self._revisions.pop(key, None)
+            else:
+                self._latest_scores[key] = previous
+                self._revisions[key] = revision - 1
+            raise
+        self._commit_capture(capture_id, raw_digest)
+        return records
 
     def _reduce_latest_scores(
-        self, wall: int, monotonic: int
+        self,
+        wall: int,
+        monotonic: int,
+        durable_parent_receipts: tuple[
+            LivePaperDurableParentReceipt, ...
+        ] = (),
     ) -> tuple[LivePaperRecord, ...]:
         observations = tuple(
             sorted(
@@ -546,7 +813,14 @@ class GrowingJsonlCaptureBridge:
                 key=lambda item: (item.provider_slot, item.source_id),
             )
         )
-        return self._reduce(LivePaperScoreBatchInput(observations, wall, monotonic))
+        return self._reduce(
+            LivePaperScoreBatchInput(
+                observations,
+                wall,
+                monotonic,
+                durable_parent_receipts,
+            )
+        )
 
     def accept_sportradar_capture(
         self,
@@ -555,6 +829,7 @@ class GrowingJsonlCaptureBridge:
         captured_wall_ns: int,
         captured_monotonic_ns: int,
         clock_uncertainty_ns: int,
+        durable_parent_receipt: LivePaperDurableParentReceipt | None = None,
     ) -> tuple[LivePaperRecord, ...]:
         """Project one reviewed Sportradar summary/timeline raw capture."""
         providers = tuple(row for row in self.manifest.providers if row.slot == "sportradar")
@@ -572,11 +847,16 @@ class GrowingJsonlCaptureBridge:
                 )
         except Exception as error:
             raise LivePaperBridgeError("sportradar_parse") from error
-        natural_end = (
-            score.status in {"ended", "closed"}
-            and score.match_status in {"ended", "closed"}
-        )
-        active = score.status in {"live", "suspended", "interrupted"}
+        natural_end = (score.status, score.match_status) in {
+            ("ended", "ended"),
+            ("closed", "closed"),
+        }
+        active = score.status == "live" and score.match_status in {
+            "live",
+            "1st_set",
+            "2nd_set",
+            "3rd_set",
+        }
         if (
             score.home_id != binding.home_player_id
             or score.away_id != binding.away_player_id
@@ -649,8 +929,7 @@ class GrowingJsonlCaptureBridge:
             period_rows = document["sport_event_status"].get("period_scores", [])
             completed_raw = period_rows if natural_end else period_rows[:-1]
             completed = tuple(
-                SetScore(row["home_score"], row["away_score"], None, None)
-                for row in completed_raw
+                _sportradar_completed_set(row) for row in completed_raw
             )
         except Exception as error:
             raise LivePaperBridgeError("sportradar_score_projection") from error
@@ -662,6 +941,11 @@ class GrowingJsonlCaptureBridge:
                     (games[0] == 6 and 0 <= games[1] <= 4)
                     or (games[1] == 6 and 0 <= games[0] <= 4)
                     or games in {(7, 5), (5, 7)}
+                    or (
+                        games in {(7, 6), (6, 7)}
+                        and item.tiebreak_points_home is not None
+                        and item.tiebreak_points_away is not None
+                    )
                 )
                 if not legal:
                     _fail("sportradar_terminal_set_invalid")
@@ -677,6 +961,25 @@ class GrowingJsonlCaptureBridge:
             ):
                 _fail("sportradar_terminal_score_mismatch")
         raw_digest = sha256(raw).hexdigest()
+        if durable_parent_receipt is not None:
+            if (
+                type(durable_parent_receipt)
+                is not LivePaperDurableParentReceipt
+                or durable_parent_receipt.source_kind
+                != "sportradar_trial_observation"
+                or durable_parent_receipt.raw_sha256 != raw_digest
+                or durable_parent_receipt.captured_wall_ns != captured_wall_ns
+                or durable_parent_receipt.captured_monotonic_ns
+                != captured_monotonic_ns
+                or durable_parent_receipt.clock_uncertainty_ns
+                != clock_uncertainty_ns
+            ):
+                _fail("sportradar_parent_receipt")
+            self._check_capture_reuse(
+                durable_parent_receipt.capture_id,
+                raw_digest,
+                exact_durable_parent=True,
+            )
         key = (binding.slot, binding.source_id)
         revision = self._revisions.get(key, 0) + 1
         state = TennisState(
@@ -747,16 +1050,65 @@ class GrowingJsonlCaptureBridge:
             captured_monotonic_ns=captured_monotonic_ns,
             independence_proof_sha256=binding.independence_proof_sha256,
         )
+        previous = self._latest_scores.get(key)
         self._revisions[key] = revision
         self._latest_scores[key] = observation
-        return self._reduce_latest_scores(captured_wall_ns, captured_monotonic_ns)
+        try:
+            records = self._reduce_latest_scores(
+                captured_wall_ns,
+                captured_monotonic_ns,
+                ()
+                if durable_parent_receipt is None
+                else (durable_parent_receipt,),
+            )
+        except BaseException:
+            if previous is None:
+                self._latest_scores.pop(key, None)
+                self._revisions.pop(key, None)
+            else:
+                self._latest_scores[key] = previous
+                self._revisions[key] = revision - 1
+            raise
+        if durable_parent_receipt is not None:
+            self._commit_capture(
+                durable_parent_receipt.capture_id, raw_digest
+            )
+        return records
 
-    def accept_kalshi_envelope(self, value: object) -> tuple[LivePaperRecord, ...]:
+    def accept_kalshi_envelope(
+        self,
+        value: object,
+        *,
+        durable_parent_receipt: LivePaperDurableParentReceipt | None = None,
+    ) -> tuple[LivePaperRecord, ...]:
         row = _exact(value, _KALSHI_FIELDS, "kalshi_envelope_fields")
         if row["kind"] != "kalshi_frame":
             _fail("kalshi_envelope_kind")
         generation = _positive(row["physical_connection_generation"], "kalshi_generation")
         raw = _payload(row)
+        raw_digest = sha256(raw).hexdigest()
+        wall = _positive(row["captured_wall_ns"], "capture_clock")
+        monotonic = _positive(row["captured_monotonic_ns"], "capture_clock", allow_zero=True)
+        uncertainty = _positive(row["clock_uncertainty_ns"], "capture_clock", allow_zero=True)
+        if durable_parent_receipt is not None:
+            if (
+                type(durable_parent_receipt)
+                is not LivePaperDurableParentReceipt
+                or durable_parent_receipt.source_kind != "shadow_kalshi_capture"
+                or durable_parent_receipt.raw_sha256 != raw_digest
+                or durable_parent_receipt.captured_wall_ns
+                != row["captured_wall_ns"]
+                or durable_parent_receipt.captured_monotonic_ns
+                != row["captured_monotonic_ns"]
+                or durable_parent_receipt.clock_uncertainty_ns
+                != row["clock_uncertainty_ns"]
+            ):
+                _fail("kalshi_parent_receipt")
+            self._check_capture_reuse(
+                durable_parent_receipt.capture_id,
+                raw_digest,
+                exact_durable_parent=True,
+            )
         try:
             parsed = parse_unqualified_book_message(raw)
             if self._generation is None or generation != self._generation:
@@ -773,10 +1125,19 @@ class GrowingJsonlCaptureBridge:
             _fail("kalshi_terminal")
         full_l2 = self._book.full_l2
         if full_l2 is None:
+            if durable_parent_receipt is not None:
+                records = self._reduce(
+                    LivePaperCaptureReceiptInput(
+                        durable_parent_receipt,
+                        wall,
+                        monotonic,
+                    )
+                )
+                self._commit_capture(
+                    durable_parent_receipt.capture_id, raw_digest
+                )
+                return records
             return ()
-        wall = _positive(row["captured_wall_ns"], "capture_clock")
-        monotonic = _positive(row["captured_monotonic_ns"], "capture_clock", allow_zero=True)
-        uncertainty = _positive(row["clock_uncertainty_ns"], "capture_clock", allow_zero=True)
         try:
             projected = project_paper_l2(
                 full_l2,
@@ -791,7 +1152,19 @@ class GrowingJsonlCaptureBridge:
         except Exception as error:
             raise LivePaperBridgeError("kalshi_projection") from error
         self.last_book_monotonic_ns = monotonic
-        return self._reduce(LivePaperL2Input(projected, wall, monotonic))
+        records = self._reduce(
+            LivePaperL2Input(
+                projected,
+                wall,
+                monotonic,
+                durable_parent_receipt,
+            )
+        )
+        if durable_parent_receipt is not None:
+            self._commit_capture(
+                durable_parent_receipt.capture_id, raw_digest
+            )
+        return records
 
 
 class LivePaperCaptureObserver:
@@ -829,16 +1202,56 @@ class LivePaperCaptureObserver:
         captured_monotonic_ns: int,
         clock_uncertainty_ns: int,
     ) -> None:
-        del durable_receipt
-        raw = getattr(capture, "payload", None)
-        if type(raw) is not bytes:
+        providers = tuple(
+            row for row in self.bridge.manifest.providers
+            if row.slot == "sportradar"
+        )
+        if (
+            type(capture) is not TrialCapture
+            or type(durable_receipt) is not TrialObservationRecord
+            or len(providers) != 1
+            or durable_receipt.command != "shadow"
+            or durable_receipt.provider_match_id
+            != providers[0].provider_match_id
+            or capture.reservation.route not in {"summary", "timeline"}
+            or durable_receipt.reservation != capture.reservation
+            or durable_receipt.raw_path != capture.raw_path
+            or durable_receipt.captured_wall_ns != capture.captured_wall_ns
+            or durable_receipt.captured_wall_ns != captured_wall_ns
+            or durable_receipt.payload_sha256
+            != sha256(capture.payload).hexdigest()
+            or not capture.raw_path.is_absolute()
+        ):
             _fail("collector_provider_capture")
+        raw = capture.payload
+        capture_id = "sportradar:" + ":".join(
+            (
+                capture.reservation.session_id,
+                str(capture.reservation.session_attempt),
+                str(capture.reservation.access_attempt),
+                capture.reservation.route,
+            )
+        )
+        parent = _parent_receipt(
+            source_kind="sportradar_trial_observation",
+            capture_id=capture_id,
+            raw_reference=str(capture.raw_path),
+            raw_sha256=durable_receipt.payload_sha256,
+            durable_receipt_sha256=_trial_observation_sha256(
+                durable_receipt
+            ),
+            captured_wall_ns=captured_wall_ns,
+            captured_monotonic_ns=captured_monotonic_ns,
+            clock_uncertainty_ns=clock_uncertainty_ns,
+            physical_connection_generation=None,
+        )
         self._sink(
             self.bridge.accept_sportradar_capture(
                 raw,
                 captured_wall_ns=captured_wall_ns,
                 captured_monotonic_ns=captured_monotonic_ns,
                 clock_uncertainty_ns=clock_uncertainty_ns,
+                durable_parent_receipt=parent,
             )
         )
 
@@ -851,11 +1264,34 @@ class LivePaperCaptureObserver:
         captured_monotonic_ns: int,
         clock_uncertainty_ns: int,
     ) -> None:
-        del durable_receipt
         raw = getattr(frame, "payload", None)
         generation = getattr(frame, "physical_connection_generation", None)
-        if type(raw) is not bytes or type(generation) is not int:
+        if (
+            type(raw) is not bytes
+            or type(generation) is not int
+            or type(durable_receipt) is not PersistedKalshiFrame
+            or durable_receipt.raw_sha256 != sha256(raw).hexdigest()
+            or durable_receipt.captured_wall_ns != captured_wall_ns
+            or durable_receipt.captured_monotonic_ns
+            != captured_monotonic_ns
+            or durable_receipt.clock_uncertainty_ns != clock_uncertainty_ns
+            or durable_receipt.physical_connection_generation != generation
+            or not os.path.isabs(durable_receipt.raw_path)
+        ):
             _fail("collector_kalshi_frame")
+        parent = _parent_receipt(
+            source_kind="shadow_kalshi_capture",
+            capture_id=durable_receipt.raw_path,
+            raw_reference=durable_receipt.raw_path,
+            raw_sha256=durable_receipt.raw_sha256,
+            durable_receipt_sha256=_kalshi_receipt_sha256(
+                durable_receipt
+            ),
+            captured_wall_ns=captured_wall_ns,
+            captured_monotonic_ns=captured_monotonic_ns,
+            clock_uncertainty_ns=clock_uncertainty_ns,
+            physical_connection_generation=generation,
+        )
         generation += self._generation_base
         records = self.bridge.accept_kalshi_envelope(
             {
@@ -865,7 +1301,8 @@ class LivePaperCaptureObserver:
                 "captured_monotonic_ns": captured_monotonic_ns,
                 "clock_uncertainty_ns": clock_uncertainty_ns,
                 "payload_base64": base64.b64encode(raw).decode("ascii"),
-            }
+            },
+            durable_parent_receipt=parent,
         )
         self._sink(records)
 

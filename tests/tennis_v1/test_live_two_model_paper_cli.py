@@ -211,6 +211,45 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             with self.assertRaises(LivePaperCliError):
                 validate_cli_paths(manifest=manifest, score_stream=score, kalshi_stream=book, static_artifact=None, dynamic_artifact=None, session_log=root / "missing" / "out", checkpoint=root / "checkpoint")
 
+    def test_writer_locks_and_rejects_path_swap_before_append(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import (
+            LivePaperCliError,
+            _DurableSessionWriter,
+        )
+        from inci_tennis_runtime.live_paper_capture_bridge import (
+            GrowingJsonlCaptureBridge,
+            manifest_from_document,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "session.jsonl"
+            checkpoint = root / "checkpoint.json"
+            writer = _DurableSessionWriter(log, checkpoint, b"")
+            try:
+                with self.assertRaisesRegex(
+                    LivePaperCliError, "session_log_locked"
+                ):
+                    _DurableSessionWriter(log, checkpoint, b"")
+                bridge = GrowingJsonlCaptureBridge.bootstrap(
+                    manifest_from_document(_manifest()),
+                    home_serve_probability=Decimal("0.80"),
+                    away_serve_probability=Decimal("0.20"),
+                    opened_wall_ns=900_000_000,
+                    opened_monotonic_ns=900_000_000,
+                )
+                bridge.accept_score_envelope(
+                    _score_envelope(_score_payload())
+                )
+                log.rename(root / "displaced-session.jsonl")
+                log.write_bytes(b"")
+                with self.assertRaisesRegex(
+                    LivePaperCliError, "session_log_changed"
+                ):
+                    writer.commit(tuple(bridge.records), bridge.state)
+            finally:
+                writer.close()
+
     def test_manifest_is_exact_and_proof_digest_must_match_before_consensus(self) -> None:
         from inci_tennis_runtime.live_paper_capture_bridge import LivePaperBridgeError, load_live_paper_manifest
 
@@ -229,6 +268,15 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             path.write_text(json.dumps(changed), encoding="ascii")
             with self.assertRaises(LivePaperBridgeError):
                 load_live_paper_manifest(path)
+            for unsupported in (
+                "STANDARD_ADVANTAGE_BO5_TB7_ALL_SETS",
+                "UNSUPPORTED",
+            ):
+                changed = _manifest()
+                changed["match_format"] = unsupported
+                path.write_text(json.dumps(changed), encoding="ascii")
+                with self.assertRaises(LivePaperBridgeError):
+                    load_live_paper_manifest(path)
 
     def test_growing_jsonl_rejects_duplicate_keys_and_json_numbers(self) -> None:
         from inci_tennis_runtime.live_two_model_paper_cli import LivePaperCliError, _jsonl
@@ -288,13 +336,27 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
         self.assertIn(LivePaperRecordKind.RAW_L2_RECEIPT, tuple(row.kind for row in reconnected))
         observer = LivePaperCaptureObserver(bridge)
 
-        async def observe(payload: bytes, wall: int) -> None:
+        async def observe(payload: bytes, wall: int, *, valid: bool = True) -> None:
+            from hashlib import sha256
+            from inci_tennis_io.shadow_evidence import PersistedKalshiFrame
+
             await observer.after_kalshi_commit(
                 frame=SimpleNamespace(
                     payload=payload,
                     physical_connection_generation=1,
                 ),
-                durable_receipt=object(),
+                durable_receipt=(
+                    PersistedKalshiFrame(
+                        raw_path=f"/tmp/live-paper-{wall}.bin",
+                        raw_sha256=sha256(payload).hexdigest(),
+                        captured_wall_ns=wall,
+                        captured_monotonic_ns=wall,
+                        clock_uncertainty_ns=0,
+                        physical_connection_generation=1,
+                    )
+                    if valid
+                    else object()
+                ),
                 captured_wall_ns=wall,
                 captured_monotonic_ns=wall,
                 clock_uncertainty_ns=0,
@@ -303,6 +365,8 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
         ack_3 = _wire({"id": 3, "type": "subscribed", "msg": {"channel": "orderbook_delta", "sid": 4}})
         home_3 = _wire({"type": "orderbook_snapshot", "sid": 4, "seq": 1, "msg": {"market_ticker": "KXTENNIS-HOME", "market_id": HOME_MARKET_ID, "yes_dollars_fp": [["0.10", "100.00"]], "no_dollars_fp": [["0.20", "100.00"]]}})
         away_3 = _wire({"type": "orderbook_snapshot", "sid": 4, "seq": 2, "msg": {"market_ticker": "KXTENNIS-AWAY", "market_id": AWAY_MARKET_ID, "yes_dollars_fp": [["0.10", "100.00"]], "no_dollars_fp": [["0.20", "100.00"]]}})
+        with self.assertRaises(LivePaperBridgeError):
+            asyncio.run(observe(ack_3, 1_699_000_000, valid=False))
         asyncio.run(observe(ack_3, 1_700_000_000))
         asyncio.run(observe(home_3, 1_800_000_000))
         asyncio.run(observe(away_3, 1_900_000_000))
@@ -314,13 +378,84 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             latest_l2.payload.body.frame.physical_connection_generation,
             3,
         )
+        parent = latest_l2.payload.body.durable_parent_receipt
+        self.assertEqual(parent.raw_reference, "/tmp/live-paper-1900000000.bin")
+        self.assertEqual(parent.raw_sha256, latest_l2.payload.body.frame.raw_parent_receipt_sha256)
+        cursor_parents = tuple(
+            record.payload.body.durable_parent_receipt
+            for record in bridge.records
+            if record.kind is LivePaperRecordKind.RAW_CAPTURE_RECEIPT
+            and record.payload.body.durable_parent_receipt.raw_reference
+            in {
+                "/tmp/live-paper-1700000000.bin",
+                "/tmp/live-paper-1800000000.bin",
+            }
+        )
+        self.assertEqual(len(cursor_parents), 2)
+        resumed = GrowingJsonlCaptureBridge(manifest, bridge.state)
+        resumed.restore_records(tuple(bridge.records))
+        for payload, wall, cursor_parent in (
+            (ack_3, 1_700_000_000, cursor_parents[0]),
+            (home_3, 1_800_000_000, cursor_parents[1]),
+        ):
+            with self.assertRaisesRegex(LivePaperBridgeError, "capture_reuse"):
+                resumed.accept_kalshi_envelope(
+                    _kalshi_envelope(
+                        payload,
+                        wall=wall,
+                        mono=wall,
+                        generation=3,
+                    ),
+                    durable_parent_receipt=cursor_parent,
+                )
+
+    def test_live_restore_reconstructs_latest_score_revision_cursor(self) -> None:
+        from inci_tennis_runtime.live_paper_capture_bridge import (
+            GrowingJsonlCaptureBridge,
+            manifest_from_document,
+        )
+
+        manifest = manifest_from_document(_manifest())
+        bridge = GrowingJsonlCaptureBridge.bootstrap(
+            manifest,
+            home_serve_probability=Decimal("0.80"),
+            away_serve_probability=Decimal("0.20"),
+            opened_wall_ns=900_000_000,
+            opened_monotonic_ns=900_000_000,
+        )
+        bridge.accept_score_envelope(_score_envelope(_score_payload()))
+        resumed = GrowingJsonlCaptureBridge(manifest, bridge.state)
+        resumed.restore_records(tuple(bridge.records))
+
+        resumed.accept_score_envelope(
+            _score_envelope(
+                _score_payload(points="15 - 0"),
+                ordinal=2,
+                wall=1_100_000_000,
+                mono=1_100_000_000,
+            )
+        )
+
+        latest = next(
+            record.payload.body
+            for record in reversed(resumed.records)
+            if record.kind is LivePaperRecordKind.RAW_SCORE_RECEIPT
+        )
+        self.assertEqual(latest.observations[0].state.revision, 2)
 
     def test_sportradar_terminal_rejects_non_natural_and_illegal_sets(self) -> None:
         import inci_tennis_adapters.sportradar_trial_v3 as sportradar_trial_v3
         from inci_tennis_runtime.live_paper_capture_bridge import (
             GrowingJsonlCaptureBridge,
             LivePaperBridgeError,
+            LivePaperCaptureObserver,
+            _trial_observation_sha256,
             manifest_from_document,
+        )
+        from inci_tennis_io.sportradar_trial_transport import (
+            TrialAttemptReservation,
+            TrialCapture,
+            TrialObservationRecord,
         )
 
         document = _manifest()
@@ -342,14 +477,59 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             opened_wall_ns=1_000_000_000,
             opened_monotonic_ns=1_000_000_000,
         )
+        raw_capture = b'{"sport_event_status":{"period_scores":[]}}'
+        capture = TrialCapture(
+            TrialAttemptReservation(
+                "11111111-1111-4111-8111-111111111111",
+                1,
+                1,
+                "summary",
+                2_900_000_000,
+            ),
+            3_000_000_000,
+            Path("/tmp/sportradar-parent.json"),
+            raw_capture,
+        )
+        with self.assertRaises(LivePaperBridgeError):
+            asyncio.run(
+                LivePaperCaptureObserver(bridge).after_provider_commit(
+                    capture=capture,
+                    durable_receipt=object(),
+                    captured_wall_ns=3_000_000_000,
+                    captured_monotonic_ns=3_000_000_000,
+                    clock_uncertainty_ns=0,
+                )
+            )
+        receipt = TrialObservationRecord(
+            command="shadow",
+            reservation=capture.reservation,
+            provider_match_id="sr:sport_event:101",
+            generated_wall_ns=2_999_000_000,
+            captured_wall_ns=capture.captured_wall_ns,
+            status="live",
+            match_status="1st_set",
+            payload_sha256=sha256(raw_capture).hexdigest(),
+            raw_path=capture.raw_path,
+            progression="initial",
+            last_event_id=None,
+            terminal_reason=None,
+        )
+        self.assertNotEqual(
+            _trial_observation_sha256(receipt),
+            _trial_observation_sha256(
+                replace(receipt, progression="advanced", last_event_id=7)
+            ),
+        )
 
-        def score(match_status: str) -> SimpleNamespace:
+        def score(
+            match_status: str, *, status: str = "ended"
+        ) -> SimpleNamespace:
             return SimpleNamespace(
                 home_id="sr:competitor:201",
                 away_id="sr:competitor:202",
                 start_wall_ns=2_000_000_000,
                 best_of=3,
-                status="ended",
+                status=status,
                 match_status=match_status,
                 sets_home=2,
                 sets_away=0,
@@ -362,13 +542,24 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                 generated_wall_ns=3_000_000_000,
             )
 
-        def raw_sets(first: tuple[int, int], second: tuple[int, int]) -> bytes:
+        def raw_sets(
+            first: tuple[int, int],
+            second: tuple[int, int],
+            *,
+            first_tiebreak: tuple[int, int] | None = None,
+        ) -> bytes:
+            rows = [
+                {"home_score": first[0], "away_score": first[1]},
+                {"home_score": second[0], "away_score": second[1]},
+            ]
+            if first_tiebreak is not None:
+                rows[0].update(
+                    home_tiebreak_score=first_tiebreak[0],
+                    away_tiebreak_score=first_tiebreak[1],
+                )
             return json.dumps({
                 "sport_event_status": {
-                    "period_scores": [
-                        {"home_score": first[0], "away_score": first[1]},
-                        {"home_score": second[0], "away_score": second[1]},
-                    ]
+                    "period_scores": rows
                 }
             }, separators=(",", ":")).encode("ascii")
 
@@ -410,10 +601,83 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                 captured_monotonic_ns=3_000_000_001,
                 clock_uncertainty_ns=0,
             )
+        for status, match_status in (
+            ("live", "retired"),
+            ("live", "walkover"),
+            ("live", "defaulted"),
+            ("live", "cancelled"),
+            ("ended", "closed"),
+            ("closed", "ended"),
+            ("suspended", "suspended"),
+        ):
+            with self.subTest(status=status, match_status=match_status), mock.patch.object(
+                sportradar_trial_v3,
+                "parse_sport_event_timeline",
+                side_effect=sportradar_trial_v3.SportradarWireContractError(),
+            ), mock.patch.object(
+                sportradar_trial_v3,
+                "parse_sport_event_summary",
+                return_value=score(match_status, status=status),
+            ):
+                with self.assertRaises(LivePaperBridgeError):
+                    bridge.accept_sportradar_capture(
+                        raw_sets((6, 4), (6, 3)),
+                        captured_wall_ns=3_000_000_002,
+                        captured_monotonic_ns=3_000_000_002,
+                        clock_uncertainty_ns=0,
+                    )
         self.assertIn(LivePaperRecordKind.ANCHOR, tuple(row.kind for row in rows))
         self.assertEqual(
             bridge.state.score_coordinator.anchor.state.status.value,
             "ended",
+        )
+        tiebreak_bridge = GrowingJsonlCaptureBridge.bootstrap(
+            manifest_from_document(document),
+            home_serve_probability=Decimal("0.64"),
+            away_serve_probability=Decimal("0.61"),
+            opened_wall_ns=1_000_000_000,
+            opened_monotonic_ns=1_000_000_000,
+        )
+        with mock.patch.object(
+            sportradar_trial_v3,
+            "parse_sport_event_timeline",
+            side_effect=sportradar_trial_v3.SportradarWireContractError(),
+        ), mock.patch.object(
+            sportradar_trial_v3,
+            "parse_sport_event_summary",
+            return_value=score("ended"),
+        ):
+            with self.assertRaises(LivePaperBridgeError):
+                tiebreak_bridge.accept_sportradar_capture(
+                    raw_sets((7, 6), (6, 4)),
+                    captured_wall_ns=3_000_000_010,
+                    captured_monotonic_ns=3_000_000_010,
+                    clock_uncertainty_ns=0,
+                )
+            with self.assertRaises(LivePaperBridgeError):
+                tiebreak_bridge.accept_sportradar_capture(
+                    raw_sets(
+                        (7, 6),
+                        (6, 4),
+                        first_tiebreak=(8, 3),
+                    ),
+                    captured_wall_ns=3_000_000_010,
+                    captured_monotonic_ns=3_000_000_010,
+                    clock_uncertainty_ns=0,
+                )
+            tiebreak_rows = tiebreak_bridge.accept_sportradar_capture(
+                raw_sets(
+                    (7, 6),
+                    (6, 4),
+                    first_tiebreak=(7, 4),
+                ),
+                captured_wall_ns=3_000_000_011,
+                captured_monotonic_ns=3_000_000_011,
+                clock_uncertainty_ns=0,
+            )
+        self.assertIn(
+            LivePaperRecordKind.ANCHOR,
+            tuple(row.kind for row in tiebreak_rows),
         )
 
     def test_no_network_fixture_run_banner_terminal_and_replay_are_exact(self) -> None:
@@ -528,6 +792,52 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             session.write_bytes(committed)
             checkpoint.write_bytes(encode_live_paper_checkpoint(bridge.state))
 
+            expanded = json.loads(json.dumps(document))
+            second = dict(expanded["providers"][0])
+            second.update({
+                "slot": "goalserve",
+                "source_id": "goalserve-secondary",
+                "provider_match_id": "goalserve-101",
+                "home_player_id": "goalserve-home",
+                "away_player_id": "goalserve-away",
+                "independent_lineage_id": "goalserve-lineage",
+                "source_lineage_sha256": "c" * 64,
+                "independence_proof_sha256": "d" * 64,
+            })
+            expanded["providers"].append(second)
+            provider_edit = json.loads(json.dumps(document))
+            provider_edit["providers"][0]["provider_match_id"] = "changed-101"
+            proof_edit = json.loads(json.dumps(document))
+            proof_edit["providers"][0]["independence_proof_sha256"] = "e" * 64
+            market_edit = json.loads(json.dumps(document))
+            market_edit["markets"]["home"]["ticker"] = "KXTENNIS-CHANGED"
+            for label, changed in (
+                ("provider_added", expanded),
+                ("provider_identity", provider_edit),
+                ("proof", proof_edit),
+                ("market", market_edit),
+            ):
+                with self.subTest(resume_authority_edit=label):
+                    manifest_path.write_text(
+                        json.dumps(
+                            changed,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        encoding="ascii",
+                    )
+                    self.assertEqual(run([
+                        "--manifest", str(manifest_path), "--score-stream", str(scores),
+                        "--kalshi-stream", str(books), "--session-log", str(session),
+                        "--checkpoint", str(checkpoint), "--bootstrap-home-serve", "0.80",
+                        "--bootstrap-away-serve", "0.20", "--stop-at-eof",
+                    ], stdout=io.StringIO()), 1)
+                    self.assertEqual(session.read_bytes(), committed)
+            manifest_path.write_text(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                encoding="ascii",
+            )
+
             self.assertEqual(run([
                 "--manifest", str(manifest_path), "--score-stream", str(scores),
                 "--kalshi-stream", str(books), "--session-log", str(session),
@@ -578,13 +888,62 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                     "--live-readonly", "--manifest", str(manifest),
                     "--session-log", str(session), "--checkpoint", str(checkpoint),
                     "--bootstrap-home-serve", "0.80", "--bootstrap-away-serve", "0.20",
-                    "--duration-seconds", "1",
+                    "--duration-seconds", "10",
                 ], stdout=io.StringIO()), 0)
             replay = replay_live_paper_records(session.read_bytes(), require_terminal=True)
             self.assertEqual(
                 tuple(row.kind for row in replay.records),
                 (LivePaperRecordKind.HEARTBEAT, LivePaperRecordKind.TERMINAL),
             )
+            forbidden: list[str] = []
+            with mock.patch.object(
+                live_shadow_cli,
+                "run_cli",
+                side_effect=lambda *args, **kwargs: forbidden.append(
+                    "collector"
+                ),
+            ):
+                self.assertEqual(run([
+                    "--live-readonly", "--manifest", str(manifest),
+                    "--session-log", str(session), "--checkpoint", str(checkpoint),
+                    "--bootstrap-home-serve", "0.80", "--bootstrap-away-serve", "0.20",
+                    "--duration-seconds", "10",
+                ], stdout=io.StringIO()), 1)
+            self.assertEqual(forbidden, [])
+
+    def test_live_nonzero_collector_status_writes_halted_terminal(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import run
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            session = root / "session.jsonl"
+            checkpoint = root / "checkpoint.json"
+            document = _manifest()
+            provider = document["providers"][0]  # type: ignore[index]
+            provider["slot"] = "sportradar"
+            provider["source_id"] = "sportradar-primary"
+            manifest.write_text(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                encoding="ascii",
+            )
+            import inci_tennis_runtime.live_shadow_cli as live_shadow_cli
+
+            with mock.patch.object(live_shadow_cli, "run_cli", return_value=1):
+                self.assertEqual(run([
+                    "--live-readonly", "--manifest", str(manifest),
+                    "--session-log", str(session), "--checkpoint", str(checkpoint),
+                    "--bootstrap-home-serve", "0.80", "--bootstrap-away-serve", "0.20",
+                    "--duration-seconds", "10",
+                ], stdout=io.StringIO()), 1)
+            replay = replay_live_paper_records(
+                session.read_bytes(), require_terminal=True
+            )
+            self.assertEqual(
+                tuple(row.kind for row in replay.records),
+                (LivePaperRecordKind.TERMINAL,),
+            )
+            self.assertEqual(replay.records[-1].payload.body.reason, "halted")
 
 
 if __name__ == "__main__":

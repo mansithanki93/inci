@@ -81,8 +81,13 @@ from inci_tennis_expert.pilot_dynamic_model import (
 __all__ = (
     "LivePaperSessionError",
     "LivePaperRecordKind",
+    "LivePaperProviderAuthority",
+    "compute_live_paper_provider_authority_sha256",
+    "LivePaperDurableParentReceipt",
+    "compute_live_paper_parent_receipt_sha256",
     "LivePaperSessionConfig",
     "LivePaperScoreBatchInput",
+    "LivePaperCaptureReceiptInput",
     "LivePaperL2Input",
     "LivePaperHeartbeatInput",
     "LivePaperTerminalInput",
@@ -132,6 +137,7 @@ def _fail(code: str) -> None:
 class LivePaperRecordKind(str, Enum):
     RAW_SCORE_RECEIPT = "raw_score_receipt"
     RAW_L2_RECEIPT = "raw_l2_receipt"
+    RAW_CAPTURE_RECEIPT = "raw_capture_receipt"
     ANCHOR = "anchor"
     TRANSITION = "transition"
     FORECAST = "forecast"
@@ -145,9 +151,220 @@ class LivePaperRecordKind(str, Enum):
     TERMINAL = "terminal"
 
 
+def compute_live_paper_parent_receipt_sha256(
+    *,
+    source_kind: str,
+    capture_id: str,
+    raw_reference: str,
+    raw_sha256: str,
+    durable_receipt_sha256: str,
+    captured_wall_ns: int,
+    captured_monotonic_ns: int,
+    clock_uncertainty_ns: int,
+    physical_connection_generation: int | None,
+) -> str:
+    projection = {
+        "capture_id": capture_id,
+        "captured_monotonic_ns": captured_monotonic_ns,
+        "captured_wall_ns": captured_wall_ns,
+        "clock_uncertainty_ns": clock_uncertainty_ns,
+        "physical_connection_generation": physical_connection_generation,
+        "raw_reference": raw_reference,
+        "raw_sha256": raw_sha256,
+        "durable_receipt_sha256": durable_receipt_sha256,
+        "source_kind": source_kind,
+    }
+    return sha256(
+        b"INCI-LIVE-PAPER-DURABLE-PARENT-V1\0"
+        + json.dumps(
+            projection,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class LivePaperDurableParentReceipt:
+    """Authenticated reference to the collector's already-durable raw parent."""
+
+    source_kind: str
+    capture_id: str
+    raw_reference: str
+    raw_sha256: str
+    durable_receipt_sha256: str
+    receipt_sha256: str
+    captured_wall_ns: int
+    captured_monotonic_ns: int
+    clock_uncertainty_ns: int
+    physical_connection_generation: int | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.source_kind not in {
+                "sportradar_trial_observation",
+                "shadow_kalshi_capture",
+            }
+            or type(self.capture_id) is not str
+            or not self.capture_id
+            or not self.capture_id.isascii()
+            or len(self.capture_id) > 512
+            or type(self.raw_reference) is not str
+            or not self.raw_reference.startswith("/")
+            or not self.raw_reference.isascii()
+            or len(self.raw_reference) > 4_096
+            or not _is_sha(self.raw_sha256)
+            or not _is_sha(self.durable_receipt_sha256)
+            or not _is_sha(self.receipt_sha256)
+            or type(self.captured_wall_ns) is not int
+            or self.captured_wall_ns <= 0
+            or type(self.captured_monotonic_ns) is not int
+            or self.captured_monotonic_ns < 0
+            or type(self.clock_uncertainty_ns) is not int
+            or self.clock_uncertainty_ns < 0
+            or (
+                self.physical_connection_generation is not None
+                and (
+                    type(self.physical_connection_generation) is not int
+                    or self.physical_connection_generation <= 0
+                )
+            )
+            or self.receipt_sha256
+            != compute_live_paper_parent_receipt_sha256(
+                source_kind=self.source_kind,
+                capture_id=self.capture_id,
+                raw_reference=self.raw_reference,
+                raw_sha256=self.raw_sha256,
+                durable_receipt_sha256=self.durable_receipt_sha256,
+                captured_wall_ns=self.captured_wall_ns,
+                captured_monotonic_ns=self.captured_monotonic_ns,
+                clock_uncertainty_ns=self.clock_uncertainty_ns,
+                physical_connection_generation=(
+                    self.physical_connection_generation
+                ),
+            )
+        ):
+            _fail("durable_parent_receipt")
+
+
+@dataclass(frozen=True, slots=True)
+class LivePaperProviderAuthority:
+    """Exact provider identity and independence proof frozen by the manifest."""
+
+    slot: str
+    source_id: str
+    provider_match_id: str
+    home_player_id: str
+    away_player_id: str
+    independent_lineage_id: str
+    source_lineage_sha256: str
+    independence_proven: bool | None
+    independence_proof_sha256: str | None
+
+    def __post_init__(self) -> None:
+        texts = (
+            self.slot,
+            self.source_id,
+            self.provider_match_id,
+            self.home_player_id,
+            self.away_player_id,
+            self.independent_lineage_id,
+        )
+        if any(
+            type(value) is not str
+            or not value
+            or not value.isascii()
+            or len(value) > 256
+            for value in texts
+        ):
+            _fail("provider_authority")
+        if (
+            type(self.source_lineage_sha256) is not str
+            or _SHA_RE.fullmatch(self.source_lineage_sha256) is None
+        ):
+            _fail("provider_authority")
+        if (
+            self.independence_proven is not None
+            and type(self.independence_proven) is not bool
+        ):
+            _fail("provider_authority")
+        if self.independence_proof_sha256 is not None and (
+            type(self.independence_proof_sha256) is not str
+            or _SHA_RE.fullmatch(self.independence_proof_sha256) is None
+        ):
+            _fail("provider_authority")
+        if (self.independence_proven is True) != (
+            self.independence_proof_sha256 is not None
+        ):
+            _fail("provider_authority")
+
+
+def _provider_authority_key(
+    value: LivePaperProviderAuthority,
+) -> tuple[str, ...]:
+    return (
+        value.slot,
+        value.source_id,
+        value.provider_match_id,
+        value.home_player_id,
+        value.away_player_id,
+        value.independent_lineage_id,
+        value.source_lineage_sha256,
+        (
+            "true"
+            if value.independence_proven is True
+            else "false"
+            if value.independence_proven is False
+            else "none"
+        ),
+        value.independence_proof_sha256 or "",
+    )
+
+
+def compute_live_paper_provider_authority_sha256(
+    values: tuple[LivePaperProviderAuthority, ...],
+) -> str:
+    if (
+        type(values) is not tuple
+        or not values
+        or len(values) > 8
+        or any(type(value) is not LivePaperProviderAuthority for value in values)
+        or values != tuple(sorted(values, key=_provider_authority_key))
+    ):
+        _fail("provider_authorities")
+    projection = [
+        {
+            "slot": value.slot,
+            "source_id": value.source_id,
+            "provider_match_id": value.provider_match_id,
+            "home_player_id": value.home_player_id,
+            "away_player_id": value.away_player_id,
+            "independent_lineage_id": value.independent_lineage_id,
+            "source_lineage_sha256": value.source_lineage_sha256,
+            "independence_proven": value.independence_proven,
+            "independence_proof_sha256": value.independence_proof_sha256,
+        }
+        for value in values
+    ]
+    return sha256(
+        b"INCI-LIVE-PAPER-PROVIDER-AUTHORITY-V1\0"
+        + json.dumps(
+            projection,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    ).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class LivePaperSessionConfig:
     canonical_match_id: str
+    manifest_sha256: str
+    provider_authorities: tuple[LivePaperProviderAuthority, ...]
+    provider_authority_sha256: str
     static_artifact: ServeStrengthArtifact
     dynamic_artifact: DynamicPointArtifact
     artifact_authority: LiveArtifactAuthority
@@ -169,6 +386,16 @@ class LivePaperSessionConfig:
     def __post_init__(self) -> None:
         if type(self.canonical_match_id) is not str or not self.canonical_match_id:
             _fail("config")
+        if (
+            type(self.manifest_sha256) is not str
+            or _SHA_RE.fullmatch(self.manifest_sha256) is None
+            or type(self.provider_authorities) is not tuple
+            or self.provider_authority_sha256
+            != compute_live_paper_provider_authority_sha256(
+                self.provider_authorities
+            )
+        ):
+            _fail("config_authority")
         if (
             type(self.static_artifact) is not ServeStrengthArtifact
             or type(self.dynamic_artifact) is not DynamicPointArtifact
@@ -211,6 +438,7 @@ class LivePaperScoreBatchInput:
     observations: tuple[LivePaperSourceObservation, ...]
     observed_wall_ns: int
     observed_monotonic_ns: int
+    durable_parent_receipts: tuple[LivePaperDurableParentReceipt, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -222,6 +450,43 @@ class LivePaperScoreBatchInput:
                 _fail("input_collection")
             _fail("score_input")
         _clocks(self.observed_wall_ns, self.observed_monotonic_ns)
+        if (
+            type(self.durable_parent_receipts) is not tuple
+            or any(
+                type(item) is not LivePaperDurableParentReceipt
+                or item.source_kind != "sportradar_trial_observation"
+                for item in self.durable_parent_receipts
+            )
+            or len(
+                {item.capture_id for item in self.durable_parent_receipts}
+            )
+            != len(self.durable_parent_receipts)
+            or len(
+                {item.raw_sha256 for item in self.durable_parent_receipts}
+            )
+            != len(self.durable_parent_receipts)
+            or any(
+                item.raw_sha256
+                not in {
+                    observation.raw_receipt_sha256
+                    for observation in self.observations
+                }
+                for item in self.durable_parent_receipts
+            )
+        ):
+            _fail("score_parent_receipt")
+
+
+@dataclass(frozen=True, slots=True)
+class LivePaperCaptureReceiptInput:
+    durable_parent_receipt: LivePaperDurableParentReceipt
+    observed_wall_ns: int
+    observed_monotonic_ns: int
+
+    def __post_init__(self) -> None:
+        if type(self.durable_parent_receipt) is not LivePaperDurableParentReceipt:
+            _fail("capture_receipt_input")
+        _clocks(self.observed_wall_ns, self.observed_monotonic_ns)
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,11 +494,23 @@ class LivePaperL2Input:
     frame: LivePaperL2Frame
     observed_wall_ns: int
     observed_monotonic_ns: int
+    durable_parent_receipt: LivePaperDurableParentReceipt | None = None
 
     def __post_init__(self) -> None:
         if type(self.frame) is not LivePaperL2Frame:
             _fail("l2_input")
         _clocks(self.observed_wall_ns, self.observed_monotonic_ns)
+        parent = self.durable_parent_receipt
+        if parent is not None and (
+            type(parent) is not LivePaperDurableParentReceipt
+            or parent.source_kind != "shadow_kalshi_capture"
+            or parent.raw_sha256 != self.frame.raw_parent_receipt_sha256
+            or parent.captured_wall_ns != self.frame.captured_wall_ns
+            or parent.captured_monotonic_ns
+            != self.frame.captured_monotonic_ns
+            or parent.clock_uncertainty_ns != self.frame.clock_uncertainty_ns
+        ):
+            _fail("l2_parent_receipt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,7 +535,8 @@ class LivePaperTerminalInput:
 
 
 LivePaperInput: TypeAlias = (
-    LivePaperScoreBatchInput | LivePaperL2Input | LivePaperHeartbeatInput | LivePaperTerminalInput
+    LivePaperScoreBatchInput | LivePaperCaptureReceiptInput | LivePaperL2Input
+    | LivePaperHeartbeatInput | LivePaperTerminalInput
 )
 
 
@@ -473,7 +751,9 @@ _V1_TYPES: Final[tuple[type[object], ...]] = (
     PilotSupportReason, ServeStrengthArtifact, PilotOutcomeEstimate,
     DynamicBeliefSnapshot, DynamicParameterCandidate, DynamicPointArtifact,
     DynamicPointModel,
-    LivePaperRecordKind, LivePaperSessionConfig, LivePaperScoreBatchInput,
+    LivePaperRecordKind, LivePaperProviderAuthority,
+    LivePaperDurableParentReceipt, LivePaperSessionConfig,
+    LivePaperScoreBatchInput, LivePaperCaptureReceiptInput,
     LivePaperL2Input, LivePaperHeartbeatInput, LivePaperTerminalInput,
     _LivePaperPayload, _LivePaperRejection, LivePaperPositionMark,
     _LivePaperCheckpointProjection, LivePaperSessionState,
@@ -1099,6 +1379,15 @@ def reduce_live_paper_input(state: LivePaperSessionState, item: LivePaperInput) 
         _fail("post_terminal")
     if type(item) is LivePaperScoreBatchInput:
         return _reduce_score(state, item)
+    if type(item) is LivePaperCaptureReceiptInput:
+        records: list[LivePaperRecord] = []
+        state = _emit(
+            state,
+            records,
+            LivePaperRecordKind.RAW_CAPTURE_RECEIPT,
+            item,
+        )
+        return state, tuple(records)
     if type(item) is LivePaperL2Input:
         return _reduce_l2(state, item)
     if type(item) is LivePaperHeartbeatInput:
@@ -1201,6 +1490,7 @@ def _input_from_record(record: LivePaperRecord) -> LivePaperInput:
     body = record.payload.body
     expected: dict[LivePaperRecordKind, type[object]] = {
         LivePaperRecordKind.RAW_SCORE_RECEIPT: LivePaperScoreBatchInput,
+        LivePaperRecordKind.RAW_CAPTURE_RECEIPT: LivePaperCaptureReceiptInput,
         LivePaperRecordKind.RAW_L2_RECEIPT: LivePaperL2Input,
         LivePaperRecordKind.HEARTBEAT: LivePaperHeartbeatInput,
         LivePaperRecordKind.TERMINAL: LivePaperTerminalInput,

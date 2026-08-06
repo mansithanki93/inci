@@ -449,6 +449,117 @@ class ShadowEvidenceStoreTests(unittest.TestCase):
 
 
 class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_heartbeat_observer_requires_a_durable_scored_observation(
+        self,
+    ) -> None:
+        """Waiting dashboards must not become unaudited paper heartbeats."""
+
+        from inci_tennis_runtime.live_shadow_collector import LiveShadowCollector
+
+        clock = _Clock()
+        callbacks: list[str] = []
+
+        class Observer:
+            async def after_provider_commit(self, **values: object) -> None:
+                del values
+
+            async def after_kalshi_commit(self, **values: object) -> None:
+                del values
+
+            async def after_heartbeat_commit(self, **values: object) -> None:
+                del values
+                callbacks.append("heartbeat")
+
+        collector = LiveShadowCollector(
+            provider_match_id=MATCH_ID,
+            market_tickers=TICKERS,
+            sportradar_transport=object(),
+            sportradar_ledger=object(),
+            kalshi_transport=object(),
+            market_projector=_Projector(lambda _: None),
+            evidence_store=object(),
+            wall_ns=clock.wall_ns,
+            monotonic_ns=clock.monotonic_ns,
+            pause=clock.pause,
+            stop_requested=lambda: False,
+            render=lambda _: None,
+            capture_observer=Observer(),
+        )
+        collector._next_heartbeat_monotonic_ns = clock.monotonic_ns()
+
+        await collector._emit_timeout_heartbeat_if_due()
+
+        self.assertEqual(callbacks, [])
+
+    async def test_successful_frame_traffic_emits_due_durable_heartbeat(
+        self,
+    ) -> None:
+        """Continuous successful receives cannot starve paper heartbeat cadence."""
+
+        from inci_tennis_runtime.live_shadow_collector import LiveShadowCollector
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = _Clock()
+            events: list[str] = []
+            frame = _Frame(b"continuous-frame", clock)
+
+            class Evidence:
+                def persist_kalshi_frame(self, value: object) -> object:
+                    return SimpleNamespace(
+                        raw_sha256=value.raw_sha256,
+                        physical_connection_generation=(
+                            value.physical_connection_generation
+                        ),
+                        captured_wall_ns=value.captured_wall_ns,
+                        captured_monotonic_ns=value.captured_monotonic_ns,
+                        clock_uncertainty_ns=value.clock_uncertainty_ns,
+                        raw_path="/tmp/continuous-frame",
+                    )
+
+                def append_observation(self, record: object) -> None:
+                    events.append(f"evidence:{record.reason}")
+
+                def append_terminal(self, **values: object) -> None:
+                    del values
+
+            class Observer:
+                async def after_provider_commit(self, **values: object) -> None:
+                    del values
+
+                async def after_kalshi_commit(self, **values: object) -> None:
+                    del values
+
+                async def after_heartbeat_commit(self, **values: object) -> None:
+                    del values
+                    events.append("observer:heartbeat")
+
+            collector = LiveShadowCollector(
+                provider_match_id=MATCH_ID,
+                market_tickers=TICKERS,
+                sportradar_transport=_SportradarTransport(
+                    _capture(Path(directory))
+                ),
+                sportradar_ledger=_SportradarLedger(),
+                kalshi_transport=_KalshiTransport(clock, [frame]),
+                market_projector=_Projector(lambda _: _candidate_projection()),
+                evidence_store=Evidence(),
+                wall_ns=clock.wall_ns,
+                monotonic_ns=clock.monotonic_ns,
+                pause=clock.pause,
+                stop_requested=lambda: False,
+                render=lambda _: None,
+                capture_observer=Observer(),
+            )
+            await collector._capture_summary()
+            clock.advance(60)
+            collector._next_heartbeat_monotonic_ns = clock.monotonic_ns()
+
+            await collector._receive(1.0)
+
+        heartbeat = "evidence:kalshi_receive_timeout_heartbeat"
+        self.assertIn(heartbeat, events)
+        self.assertLess(events.index(heartbeat), events.index("observer:heartbeat"))
+
     async def test_optional_capture_observer_runs_only_after_durable_commits(self) -> None:
         """Catches paper projection observing raw inputs before shadow durability."""
         from inci_tennis_runtime.live_shadow_collector import LiveShadowCollector
