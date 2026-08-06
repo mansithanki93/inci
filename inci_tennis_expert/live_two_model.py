@@ -119,12 +119,142 @@ def _artifact_bound_to_anchor(
 def _operator_bootstrap_components(
     static_artifact: ServeStrengthArtifact,
     dynamic_artifact: DynamicPointArtifact,
-) -> tuple[bool, bool]:
-    """Recognize each template component so the weaker authority cannot erase."""
-    return (
-        static_artifact.version == "operator-bootstrap-serve-v1",
-        dynamic_artifact.version == "operator-bootstrap-dynamic-v1",
+) -> tuple[bool, bool, bool, bool]:
+    """Classify complete and partial bootstrap provenance without a secret."""
+    static_core = (
+        static_artifact.training_match_ids == _BOOTSTRAP_STATIC_TRAINING_IDS
+        and static_artifact.training_match_ids_sha256
+        == compute_training_match_ids_sha256(_BOOTSTRAP_STATIC_TRAINING_IDS)
+        and static_artifact.source_data_sha256 == _sha("operator-supplied-serve-priors")
+        and static_artifact.feature_definition_sha256 == _sha("no-market-prior-bootstrap")
+        and static_artifact.code_sha256 == _sha("operator-bootstrap-template-v1")
     )
+    dynamic_core = (
+        dynamic_artifact.training_match_ids == _BOOTSTRAP_DYNAMIC_TRAINING_IDS
+        and dynamic_artifact.validation_match_ids
+        == _BOOTSTRAP_DYNAMIC_VALIDATION_IDS
+        and dynamic_artifact.source_data_sha256
+        == _sha("operator-bootstrap-dynamic-template")
+        and dynamic_artifact.feature_definition_sha256
+        == _sha("three-state-synthetic-plumbing")
+        and dynamic_artifact.code_sha256 == _sha("operator-bootstrap-template-v1")
+        and dynamic_artifact.selected.transition_matrix == _BOOTSTRAP_MATRIX
+        and dynamic_artifact.selected.home_initial_weights == _BOOTSTRAP_WEIGHTS
+        and dynamic_artifact.selected.away_initial_weights == _BOOTSTRAP_WEIGHTS
+        and dynamic_artifact.selected.logit_offsets == _BOOTSTRAP_OFFSETS
+    )
+    static_marker = (
+        static_artifact.version == "operator-bootstrap-serve-v1"
+        or static_artifact.training_match_ids == _BOOTSTRAP_STATIC_TRAINING_IDS
+        or static_core
+        or any(
+            value in {
+                compute_training_match_ids_sha256(_BOOTSTRAP_STATIC_TRAINING_IDS),
+                _sha("operator-supplied-serve-priors"),
+                _sha("no-market-prior-bootstrap"),
+                _sha("operator-bootstrap-template-v1"),
+            }
+            for value in (
+                static_artifact.training_match_ids_sha256,
+                static_artifact.source_data_sha256,
+                static_artifact.feature_definition_sha256,
+                static_artifact.code_sha256,
+            )
+        )
+    )
+    dynamic_marker = (
+        dynamic_artifact.version == "operator-bootstrap-dynamic-v1"
+        or dynamic_artifact.training_match_ids == _BOOTSTRAP_DYNAMIC_TRAINING_IDS
+        or dynamic_artifact.validation_match_ids
+        == _BOOTSTRAP_DYNAMIC_VALIDATION_IDS
+        or dynamic_core
+        or any(
+            value in {
+                _sha("operator-bootstrap-dynamic-template"),
+                _sha("three-state-synthetic-plumbing"),
+                _sha("operator-bootstrap-template-v1"),
+            }
+            for value in (
+                dynamic_artifact.source_data_sha256,
+                dynamic_artifact.feature_definition_sha256,
+                dynamic_artifact.code_sha256,
+            )
+        )
+    )
+    target_invariants = (
+        static_artifact.target_canonical_match_id
+        == dynamic_artifact.target_canonical_match_id
+        and static_artifact.target_scheduled_start_wall_ns
+        == dynamic_artifact.target_scheduled_start_wall_ns
+        and static_artifact.cutoff_wall_ns == dynamic_artifact.cutoff_wall_ns
+        and static_artifact.cutoff_wall_ns
+        < static_artifact.target_scheduled_start_wall_ns
+    )
+    static_authentic = static_artifact.artifact_sha256 == compute_serve_strength_artifact_sha256(
+        version=static_artifact.version,
+        target_canonical_match_id=static_artifact.target_canonical_match_id,
+        target_scheduled_start_wall_ns=static_artifact.target_scheduled_start_wall_ns,
+        cutoff_wall_ns=static_artifact.cutoff_wall_ns,
+        training_match_ids=static_artifact.training_match_ids,
+        training_match_ids_sha256=static_artifact.training_match_ids_sha256,
+        source_data_sha256=static_artifact.source_data_sha256,
+        feature_definition_sha256=static_artifact.feature_definition_sha256,
+        code_sha256=static_artifact.code_sha256,
+        home_serve_point_probability=static_artifact.home_serve_point_probability,
+        away_serve_point_probability=static_artifact.away_serve_point_probability,
+    )
+    dynamic_authentic = dynamic_artifact.artifact_sha256 == compute_dynamic_point_artifact_sha256(
+        version=dynamic_artifact.version,
+        target_canonical_match_id=dynamic_artifact.target_canonical_match_id,
+        target_scheduled_start_wall_ns=dynamic_artifact.target_scheduled_start_wall_ns,
+        cutoff_wall_ns=dynamic_artifact.cutoff_wall_ns,
+        training_match_ids=dynamic_artifact.training_match_ids,
+        validation_match_ids=dynamic_artifact.validation_match_ids,
+        source_data_sha256=dynamic_artifact.source_data_sha256,
+        feature_definition_sha256=dynamic_artifact.feature_definition_sha256,
+        code_sha256=dynamic_artifact.code_sha256,
+        selected=dynamic_artifact.selected,
+    )
+    return (
+        static_marker,
+        dynamic_marker,
+        static_marker and static_core and static_authentic and target_invariants,
+        dynamic_marker
+        and dynamic_core
+        and dynamic_authentic
+        and target_invariants,
+    )
+
+
+def _artifact_authority_is_valid(
+    static_artifact: ServeStrengthArtifact,
+    dynamic_artifact: DynamicPointArtifact,
+    authority: LiveArtifactAuthority,
+) -> bool:
+    static_marker, dynamic_marker, static_bootstrap, dynamic_bootstrap = (
+        _operator_bootstrap_components(static_artifact, dynamic_artifact)
+    )
+    if static_marker or dynamic_marker:
+        return (
+            authority is LiveArtifactAuthority.OPERATOR_BOOTSTRAP
+            and static_bootstrap
+            and dynamic_bootstrap
+        )
+    return authority is LiveArtifactAuthority.TRAINED_ARTIFACT
+
+
+def _match_binding(state: TennisState) -> tuple[object, ...]:
+    return (
+        state.scheduled_start_wall_ns,
+        state.match_format,
+        state.provider_match_id,
+        state.home_player_id,
+        state.away_player_id,
+    )
+
+
+def _matches_binding(state: TennisState, binding: tuple[object, ...]) -> bool:
+    return _match_binding(state) == binding
 
 
 def _state_digest(
@@ -132,7 +262,8 @@ def _state_digest(
     consensus_epoch: int, correction_epoch: int, rebase_epoch: int,
     static_artifact_sha256: str, dynamic_artifact_sha256: str,
     belief_sha256: str, source_sha256: str, anchor_sha256: str,
-    transition_sha256: str | None, authority: LiveArtifactAuthority,
+    transition_sha256: str | None, match_binding: tuple[object, ...],
+    authority: LiveArtifactAuthority,
 ) -> str:
     return live_paper_contract_sha256({
         "canonical_match_id": canonical_match_id,
@@ -147,6 +278,7 @@ def _state_digest(
         "source_sha256": source_sha256,
         "anchor_sha256": anchor_sha256,
         "transition_sha256": transition_sha256,
+        "match_binding": match_binding,
         "authority": authority,
     })
 
@@ -175,6 +307,7 @@ class LiveTwoModelState:
     source_sha256: str
     anchor_sha256: str
     transition_sha256: str | None
+    match_binding: tuple[object, ...]
     artifact_authority: LiveArtifactAuthority
     state_sha256: str
 
@@ -185,6 +318,7 @@ class LiveTwoModelState:
             or type(self.dynamic_artifact) is not DynamicPointArtifact
             or type(self.current_state) is not TennisState
             or type(self.dynamic_model) is not DynamicPointModel
+            or type(self.match_binding) is not tuple or len(self.match_binding) != 5
             or type(self.local_point_ordinal) is not int or self.local_point_ordinal < 0
             or any(type(epoch) is not int or epoch < 0 for epoch in (
                 self.consensus_epoch, self.correction_epoch, self.rebase_epoch,
@@ -192,10 +326,15 @@ class LiveTwoModelState:
             or type(self.artifact_authority) is not LiveArtifactAuthority
         ):
             _fail("state")
+        if not _artifact_authority_is_valid(
+            self.static_artifact, self.dynamic_artifact, self.artifact_authority
+        ):
+            _fail("artifact_authority")
         if (
             self.dynamic_model.serve_artifact != self.static_artifact
             or self.dynamic_model.dynamic_artifact != self.dynamic_artifact
             or self.correction_epoch != self.current_state.correction_epoch
+            or not _matches_binding(self.current_state, self.match_binding)
             or self.state_sha256 != _state_digest(
                 canonical_match_id=self.canonical_match_id,
                 state=self.current_state,
@@ -209,6 +348,7 @@ class LiveTwoModelState:
                 source_sha256=self.source_sha256,
                 anchor_sha256=self.anchor_sha256,
                 transition_sha256=self.transition_sha256,
+                match_binding=self.match_binding,
                 authority=self.artifact_authority,
             )
         ):
@@ -279,7 +419,8 @@ def _make_state(
     current_state: TennisState, dynamic_model: DynamicPointModel,
     local_point_ordinal: int, consensus_epoch: int, correction_epoch: int,
     rebase_epoch: int, source_sha256: str, anchor_sha256: str,
-    transition_sha256: str | None, authority: LiveArtifactAuthority,
+    transition_sha256: str | None, match_binding: tuple[object, ...],
+    authority: LiveArtifactAuthority,
 ) -> LiveTwoModelState:
     values = dict(
         canonical_match_id=dynamic_artifact.target_canonical_match_id,
@@ -288,7 +429,8 @@ def _make_state(
         local_point_ordinal=local_point_ordinal, consensus_epoch=consensus_epoch,
         correction_epoch=correction_epoch, rebase_epoch=rebase_epoch,
         source_sha256=source_sha256, anchor_sha256=anchor_sha256,
-        transition_sha256=transition_sha256, artifact_authority=authority,
+        transition_sha256=transition_sha256, match_binding=match_binding,
+        artifact_authority=authority,
     )
     return LiveTwoModelState(
         state_sha256=_state_digest(
@@ -300,6 +442,7 @@ def _make_state(
             belief_sha256=dynamic_model.belief.belief_sha256,
             source_sha256=source_sha256, anchor_sha256=anchor_sha256,
             transition_sha256=transition_sha256, authority=authority,
+            match_binding=match_binding,
         ),
         **values,
     )  # type: ignore[arg-type]
@@ -411,13 +554,8 @@ def open_live_two_model(
         or not _artifact_bound_to_anchor(static_artifact, dynamic_artifact, anchor)
     ):
         _fail("artifact_mismatch")
-    static_bootstrap, dynamic_bootstrap = _operator_bootstrap_components(
-        static_artifact, dynamic_artifact
-    )
-    if (
-        static_bootstrap != dynamic_bootstrap
-        or static_bootstrap
-        != (artifact_authority is LiveArtifactAuthority.OPERATOR_BOOTSTRAP)
+    if not _artifact_authority_is_valid(
+        static_artifact, dynamic_artifact, artifact_authority
     ):
         _fail("artifact_authority")
     model = DynamicPointModel.initialize(
@@ -433,6 +571,7 @@ def open_live_two_model(
             parent_receipt_sha256s=anchor.parent_receipt_sha256s,
         ),
         anchor_sha256=anchor.anchor_sha256, transition_sha256=None,
+        match_binding=_match_binding(anchor.state),
         authority=artifact_authority,
     )
     return state, _forecast(
@@ -451,11 +590,16 @@ def apply_live_paper_transition(
         transition.canonical_match_id != state.canonical_match_id
         or transition.local_point_ordinal != state.local_point_ordinal + 1
         or score_coordinates(transition.before_state) != score_coordinates(state.current_state)
+        or not _matches_binding(transition.before_state, state.match_binding)
+        or not _matches_binding(transition.after_state, state.match_binding)
         or transition.consensus_epoch != state.consensus_epoch
         or transition.correction_epoch != state.correction_epoch
         or transition.rebase_epoch != state.rebase_epoch
     ):
-        _fail("local_point_ordinal")
+        _fail("match_binding" if (
+            not _matches_binding(transition.before_state, state.match_binding)
+            or not _matches_binding(transition.after_state, state.match_binding)
+        ) else "local_point_ordinal")
     prior = state.dynamic_model.belief.belief_sha256
     try:
         model, _ = state.dynamic_model.observe_state_point(
@@ -479,6 +623,7 @@ def apply_live_paper_transition(
         ),
         anchor_sha256=state.anchor_sha256,
         transition_sha256=transition.transition_sha256,
+        match_binding=state.match_binding,
         authority=state.artifact_authority,
     )
     return next_state, _forecast(
@@ -511,6 +656,7 @@ def rebase_live_two_model(
             parent_receipt_sha256s=anchor.parent_receipt_sha256s,
         ),
         anchor_sha256=anchor.anchor_sha256, transition_sha256=None,
+        match_binding=_match_binding(anchor.state),
         authority=state.artifact_authority,
     )
     return next_state, _forecast(

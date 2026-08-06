@@ -102,3 +102,59 @@ run provides the fresh completion evidence.
 This task intentionally supplies only the state-model bridge. Durable
 checkpointing/replay and paper execution remain later tasks; this module emits
 the immutable commitments those layers need.
+
+## Fix round 1 — artifact and match-binding seal
+
+### Root cause
+
+- Bootstrap classification examined only two public version strings. Recomputing
+  the public artifact digests after changing those strings made the complete
+  bootstrap template appear trained.
+- `score_coordinates()` intentionally excludes scheduled start, provider match
+  identity, player identities, and format. It is correct for score comparison
+  but insufficient as the live-model continuity boundary.
+
+### RED evidence
+
+Focused live test command before the fix:
+
+```text
+/Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest \
+  tests.tennis_v1.test_live_two_model -v
+```
+
+Result: `Ran 10 tests` / `FAILED (failures=5)`.
+
+- Recomputed bootstrap artifacts with both versions retagged as trained were
+  accepted (`AssertionError: LiveTwoModelError not raised`).
+- A trained artifact carrying one bootstrap fingerprint was accepted.
+- Scheduled-start, home-player, and provider-match drift with unchanged legal
+  score coordinates were accepted before posterior update.
+
+### GREEN implementation and evidence
+
+- Bootstrap classification now validates the complete public bootstrap
+  fingerprint: exact versions, partitions and static partition digest, frozen
+  source/feature/code digests, dynamic template matrix/weights/offsets,
+  cross-artifact target/cutoff invariants, and both self-digests. Any complete
+  or partial bootstrap marker rejects a purported trained pair. This is strict
+  public fingerprint classification, not a claim of secret provenance.
+- `LiveTwoModelState.__post_init__` repeats the authority check.
+- State freezes the anchor binding `(scheduled start, format, provider match,
+  home player, away player)`. Every transition's before and after state must
+  match it before `DynamicPointModel.observe_state_point` can run.
+- Static/dynamic state-helper equivalence tests now also assert fixed known
+  Decimal outcomes, preventing a shared regression from self-confirming.
+
+Final requested command:
+
+```text
+/Users/mthanki/.venvs/inci-expert-py314/bin/python -m unittest \
+  tests.tennis_v1.test_live_two_model \
+  tests.tennis_v1.test_pilot_static_model \
+  tests.tennis_v1.test_pilot_dynamic_model \
+  tests.tennis_v1.test_two_model_pilot -v
+```
+
+Result: `Ran 47 tests in 2.371s` / `OK`. `git diff --check` was included and
+completed cleanly.

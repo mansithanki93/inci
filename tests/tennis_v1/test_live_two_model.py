@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from decimal import Decimal
 import unittest
 
@@ -23,7 +23,13 @@ from inci_tennis_expert.live_paper_contracts import (
 )
 from inci_tennis_expert.pilot_dynamic_model import (
     DynamicPointArtifact,
+    DynamicPointModel,
     compute_dynamic_point_artifact_sha256,
+)
+from inci_tennis_expert.pilot_contracts import (
+    ServeStrengthArtifact,
+    compute_serve_strength_artifact_sha256,
+    compute_training_match_ids_sha256,
 )
 from inci_tennis_expert.tennis_score import apply_point
 
@@ -144,6 +150,61 @@ def _transition(before: TennisState, *, ordinal: int, winner: PlayerSide = Playe
     )
 
 
+def _remake_transition(
+    transition: LivePaperPointTransition, **changes: object
+) -> LivePaperPointTransition:
+    values = {
+        field.name: getattr(transition, field.name)
+        for field in fields(LivePaperPointTransition)
+        if field.name != "transition_sha256"
+    }
+    values.update(changes)
+    return make_live_paper_transition(**values)
+
+
+def _trained_artifacts(api: object) -> tuple[ServeStrengthArtifact, DynamicPointArtifact]:
+    _, bootstrap_dynamic = api.build_operator_bootstrap_artifacts(
+        canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+        cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+        away_serve_point_probability=Decimal(".61"),
+    )
+    static_values = {
+        "version": "trained-serve-v1",
+        "target_canonical_match_id": "match-1",
+        "target_scheduled_start_wall_ns": 9_000,
+        "cutoff_wall_ns": 8_999,
+        "training_match_ids": ("trained-static",),
+        "training_match_ids_sha256": compute_training_match_ids_sha256(("trained-static",)),
+        "source_data_sha256": SHA_A,
+        "feature_definition_sha256": SHA_B,
+        "code_sha256": SHA_C,
+        "home_serve_point_probability": Decimal(".64"),
+        "away_serve_point_probability": Decimal(".61"),
+    }
+    dynamic_values = {
+        "version": "trained-dynamic-v1",
+        "target_canonical_match_id": "match-1",
+        "target_scheduled_start_wall_ns": 9_000,
+        "cutoff_wall_ns": 8_999,
+        "training_match_ids": ("trained-dynamic",),
+        "validation_match_ids": ("trained-validation",),
+        "source_data_sha256": SHA_A,
+        "feature_definition_sha256": SHA_B,
+        "code_sha256": SHA_C,
+        "selected": bootstrap_dynamic.selected,
+    }
+    return (
+        ServeStrengthArtifact(
+            artifact_sha256=compute_serve_strength_artifact_sha256(**static_values),
+            **static_values,
+        ),
+        DynamicPointArtifact(
+            artifact_sha256=compute_dynamic_point_artifact_sha256(**dynamic_values),
+            **dynamic_values,
+        ),
+    )
+
+
 class LiveTwoModelTests(unittest.TestCase):
     def test_anchor_forecasts_both_models_before_a_new_point(self) -> None:
         api = _api()
@@ -254,6 +315,139 @@ class LiveTwoModelTests(unittest.TestCase):
                 anchor=_anchor(_state()),
                 artifact_authority=api.LiveArtifactAuthority.TRAINED_ARTIFACT,
             )
+
+    def test_recomputed_bootstrap_artifacts_cannot_promote_by_retagging_versions(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        static_values = {
+            field.name: getattr(static, field.name)
+            for field in fields(ServeStrengthArtifact) if field.name != "artifact_sha256"
+        }
+        dynamic_values = {
+            field.name: getattr(dynamic, field.name)
+            for field in fields(DynamicPointArtifact) if field.name != "artifact_sha256"
+        }
+        static_values["version"] = "trained-serve-v1"
+        dynamic_values["version"] = "trained-dynamic-v1"
+        retagged_static = ServeStrengthArtifact(
+            artifact_sha256=compute_serve_strength_artifact_sha256(**static_values),
+            **static_values,
+        )
+        retagged_dynamic = DynamicPointArtifact(
+            artifact_sha256=compute_dynamic_point_artifact_sha256(**dynamic_values),
+            **dynamic_values,
+        )
+
+        with self.assertRaisesRegex(api.LiveTwoModelError, "artifact_authority"):
+            api.open_live_two_model(
+                static_artifact=retagged_static, dynamic_artifact=retagged_dynamic,
+                anchor=_anchor(_state()),
+                artifact_authority=api.LiveArtifactAuthority.TRAINED_ARTIFACT,
+            )
+
+    def test_partial_bootstrap_marker_fails_and_authentic_trained_fixture_opens(self) -> None:
+        api = _api()
+        static, dynamic = _trained_artifacts(api)
+        values = {
+            field.name: getattr(dynamic, field.name)
+            for field in fields(DynamicPointArtifact) if field.name != "artifact_sha256"
+        }
+        values["code_sha256"] = api._sha("operator-bootstrap-template-v1")
+        partial_marker = DynamicPointArtifact(
+            artifact_sha256=compute_dynamic_point_artifact_sha256(**values), **values
+        )
+        with self.assertRaisesRegex(api.LiveTwoModelError, "artifact_authority"):
+            api.open_live_two_model(
+                static_artifact=static, dynamic_artifact=partial_marker,
+                anchor=_anchor(_state()),
+                artifact_authority=api.LiveArtifactAuthority.TRAINED_ARTIFACT,
+            )
+
+        values["code_sha256"] = SHA_C
+        values["training_match_ids"] = ("operator-bootstrap-dynamic-train-v1",)
+        partition_marker = DynamicPointArtifact(
+            artifact_sha256=compute_dynamic_point_artifact_sha256(**values), **values
+        )
+        with self.assertRaisesRegex(api.LiveTwoModelError, "artifact_authority"):
+            api.open_live_two_model(
+                static_artifact=static, dynamic_artifact=partition_marker,
+                anchor=_anchor(_state()),
+                artifact_authority=api.LiveArtifactAuthority.TRAINED_ARTIFACT,
+            )
+
+        _, forecast = api.open_live_two_model(
+            static_artifact=static, dynamic_artifact=dynamic, anchor=_anchor(_state()),
+            artifact_authority=api.LiveArtifactAuthority.TRAINED_ARTIFACT,
+        )
+        self.assertEqual(forecast.authority_label, "TRAINED_ARTIFACT / RESEARCH_ONLY")
+
+    def test_live_state_rechecks_bootstrap_authority_invariant(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        state, _ = api.open_live_two_model(
+            static_artifact=static, dynamic_artifact=dynamic, anchor=_anchor(_state()),
+            artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
+        )
+        object.__setattr__(state, "artifact_authority", api.LiveArtifactAuthority.TRAINED_ARTIFACT)
+
+        with self.assertRaisesRegex(api.LiveTwoModelError, "artifact_authority"):
+            state.__post_init__()
+
+    def test_transition_rejects_scheduled_start_drift_before_posterior_mutation(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        state, _ = api.open_live_two_model(
+            static_artifact=static, dynamic_artifact=dynamic, anchor=_anchor(_state()),
+            artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
+        )
+        accepted = _transition(state.current_state, ordinal=1)
+        drifted = _remake_transition(
+            accepted,
+            before_state=replace(accepted.before_state, scheduled_start_wall_ns=9_001),
+            after_state=replace(accepted.after_state, scheduled_start_wall_ns=9_001),
+        )
+
+        with self.assertRaisesRegex(api.LiveTwoModelError, "match_binding"):
+            api.apply_live_paper_transition(state, drifted)
+        self.assertEqual(state.dynamic_model.belief, DynamicPointModel.initialize(
+            serve_artifact=static, dynamic_artifact=dynamic
+        ).belief)
+
+    def test_transition_rejects_player_or_provider_match_drift_before_posterior_mutation(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        state, _ = api.open_live_two_model(
+            static_artifact=static, dynamic_artifact=dynamic, anchor=_anchor(_state()),
+            artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
+        )
+        accepted = _transition(state.current_state, ordinal=1)
+        for field_name, value in (("home_player_id", "other-home"), ("provider_match_id", "other-match")):
+            with self.subTest(field_name=field_name):
+                drifted = _remake_transition(
+                    accepted,
+                    after_state=replace(accepted.after_state, **{field_name: value}),
+                )
+                with self.assertRaisesRegex(api.LiveTwoModelError, "match_binding"):
+                    api.apply_live_paper_transition(state, drifted)
+                self.assertEqual(state.dynamic_model.belief, DynamicPointModel.initialize(
+                    serve_artifact=static, dynamic_artifact=dynamic
+                ).belief)
 
     def test_exact_transition_updates_only_the_server_belief_and_uses_after_state(self) -> None:
         api = _api()

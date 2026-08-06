@@ -202,13 +202,20 @@ class StaticPilotModelTests(unittest.TestCase):
         event = _point_event()
         artifact = _serve_artifact()
 
+        event_estimate = evaluate_static_outcome(event, artifact)
+        state_estimate = evaluate_static_state(
+            canonical_match_id=event.canonical_match_id,
+            state=event.after_state,
+            artifact=artifact,
+        )
+        self.assertEqual(event_estimate, state_estimate)
         self.assertEqual(
-            evaluate_static_outcome(event, artifact),
-            evaluate_static_state(
-                canonical_match_id=event.canonical_match_id,
-                state=event.after_state,
-                artifact=artifact,
-            ),
+            state_estimate.home_current_set_probability,
+            Decimal("0.62431489338675756379549950781453041851047604816177"),
+        )
+        self.assertEqual(
+            state_estimate.home_match_probability,
+            Decimal("0.65962452925784292453809878578520856041676173413651"),
         )
 
     def test_matches_existing_exact_live_probability(self) -> None:

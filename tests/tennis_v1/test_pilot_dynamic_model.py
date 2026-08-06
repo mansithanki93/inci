@@ -211,13 +211,20 @@ class DynamicPointModelTests(unittest.TestCase):
         event = _point()
         model = _model()
 
+        event_estimate = model.evaluate(event)
+        state_estimate = evaluate_dynamic_state(
+            model=model,
+            canonical_match_id=event.canonical_match_id,
+            state=event.after_state,
+        )
+        self.assertEqual(event_estimate, state_estimate)
         self.assertEqual(
-            model.evaluate(event),
-            evaluate_dynamic_state(
-                model=model,
-                canonical_match_id=event.canonical_match_id,
-                state=event.after_state,
-            ),
+            state_estimate.home_next_point_probability,
+            Decimal("0.636889562463792044056463464900472908367560738513468"),
+        )
+        self.assertEqual(
+            state_estimate.home_match_probability,
+            Decimal("0.597028280820923495924509774338320910849242641967439660"),
         )
 
     def test_candidate_rejects_tiny_excess_initial_mass_exactly(self) -> None:
