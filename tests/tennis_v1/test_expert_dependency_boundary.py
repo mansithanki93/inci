@@ -178,10 +178,10 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "800622b10c0aeca377508e06b4cf39f75af68613b0ba08578ede5f2ccb317298"
         ),
         "live_shadow_cli.py": (
-            "dbd77c5e4f8282e507101ced817a92a9dad04ec67db5dcd989ee6d839cb0f79d"
+            "12ac6f5847c0ccac6f84727b688fb7f72d88e98c5882ef0a071530648f0682a2"
         ),
         "live_shadow_collector.py": (
-            "e80eeb288c32d872c13a9fd220615706264841b13a0d0ec602bd04065a6e2fa6"
+            "2e68e0c7e0002d24091e9764918cd72eb1c6c5026b15edf911eb23248609d153"
         ),
         "provider_qualification_controller.py": (
             "94be825905f29c252c1d4d32f4544e6e1084661b099255b4d0cfbee9e02d6109"
