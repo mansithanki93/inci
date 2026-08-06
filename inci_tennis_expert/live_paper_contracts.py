@@ -27,6 +27,7 @@ __all__ = (
     "LivePaperScoreDecision",
     "LivePaperRebaseCandidate",
     "LivePaperScoreCoordinatorState",
+    "LivePaperMarketBinding",
     "live_paper_contract_sha256",
     "score_coordinates",
     "make_live_paper_anchor",
@@ -42,6 +43,40 @@ _PAPER_LOCAL_REVISION_AUTHORITY = "PAPER_LOCAL_REVISION_TRANSPORT_ONLY"
 
 class LivePaperContractError(ValueError):
     """Fixed-code rejection for a paper-only score value."""
+
+
+@dataclass(frozen=True, slots=True)
+class LivePaperMarketBinding:
+    """Frozen two-market identity and YES-to-player orientation."""
+
+    canonical_match_id: str
+    scheduled_start_wall_ns: int
+    home_player_id: str
+    away_player_id: str
+    home_ticker: str
+    home_market_id: str
+    home_yes_player_side: PlayerSide
+    away_ticker: str
+    away_market_id: str
+    away_yes_player_side: PlayerSide
+
+    def __post_init__(self) -> None:
+        _id(self.canonical_match_id, "canonical_match_id")
+        _integer(self.scheduled_start_wall_ns, "scheduled_start_wall_ns", positive=True)
+        _id(self.home_player_id, "home_player_id")
+        _id(self.away_player_id, "away_player_id")
+        _id(self.home_ticker, "home_ticker")
+        _id(self.away_ticker, "away_ticker")
+        _id(self.home_market_id, "home_market_id")
+        _id(self.away_market_id, "away_market_id")
+        if (
+            self.home_player_id == self.away_player_id
+            or self.home_ticker == self.away_ticker
+            or self.home_market_id == self.away_market_id
+            or self.home_yes_player_side is not PlayerSide.HOME
+            or self.away_yes_player_side is not PlayerSide.AWAY
+        ):
+            _fail("market_binding")
 
 
 class PaperScoreTrust(str, Enum):

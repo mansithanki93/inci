@@ -204,6 +204,21 @@ EXPECTED_PACKAGE_AST_SHA256 = {
     },
 }
 
+LIVE_PAPER_MODULE_AST_SHA256 = {
+    "live_paper_contracts.py": (
+        "c4af161dd6e88b3e5471d6a70d40b2c844a808ecbfeadaca6ab48a1b750ce5e9"
+    ),
+    "live_paper_execution.py": (
+        "52ff7be5d8f0a6567f0de360bbfe949181aea55948db40124322fb1bb05def73"
+    ),
+    "live_paper_score.py": (
+        "6fefcc8627ae6fa64cf50865699b31077c221bb8f95e105cf52300b010f346b0"
+    ),
+    "live_two_model.py": (
+        "f4728f2b2aa03bcf955cfe061ea840da45eb8bd3fc20b569d881e053e3afef92"
+    ),
+}
+
 EXPECTED_PACKAGE_RESOURCE_SHA256 = {
     "inci_tennis_expert": {
         "schemas/binding-review-v1.schema.json": (
@@ -3226,6 +3241,37 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 package_name=package_name,
                 filename=filename,
             )
+
+    def test_live_paper_modules_are_ast_sealed_and_capability_free(self) -> None:
+        """Catches a paper bridge gaining a client, route, or mutation verb."""
+        forbidden_text = {
+            "kalshiclient",
+            "executor",
+            "create_order",
+            "cancel_order",
+            "/portfolio/",
+            "--live",
+            "--demo",
+        }
+        for filename, expected_digest in LIVE_PAPER_MODULE_AST_SHA256.items():
+            with self.subTest(filename=filename):
+                source = (PACKAGE_ROOTS["inci_tennis_expert"] / filename).read_text(
+                    encoding="utf-8"
+                )
+                self.assertEqual(canonical_ast_sha256(source, filename), expected_digest)
+                tree = ast.parse(source, filename=filename, type_comments=False)
+                bindings = _imported_bindings(tree)
+                self.assertFalse(
+                    {
+                        binding
+                        for binding in bindings
+                        if binding.endswith(".KalshiClient")
+                        or binding.endswith(".Executor")
+                        or binding in {"KalshiClient", "Executor", "executor"}
+                    }
+                )
+                strings = {value.lower() for value in _folded_static_strings(tree)}
+                self.assertFalse(strings & forbidden_text)
 
     def test_four_packages_have_independent_ast_seals(self) -> None:
         self.assertEqual(set(EXPECTED_PACKAGE_AST_SHA256), set(PACKAGE_ROOTS))
