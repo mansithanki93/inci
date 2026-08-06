@@ -14,9 +14,10 @@ observations into anchors, exact point transitions, or typed abstentions. A
 state-based two-model runner consumes only accepted anchors/transitions. A
 separate pure policy and delayed L2 simulator produce paper actions and fills.
 An append-only canonical JSONL session log makes the complete run replayable.
-The first executable CLI reads growing JSONL score captures and Kalshi raw
-WebSocket frames; network collection remains in the existing read-only
-collector process and is not duplicated in the model process.
+The executable CLI supports both deterministic growing-JSONL inputs and a live
+composition that reuses the existing scope-checked Kalshi read-only transport
+and durable collector. Live captures reach the model only through an additive
+post-commit observer after the collector has persisted their raw bytes.
 
 **Tech stack:** CPython 3.14.5, standard library only, immutable dataclasses,
 `Decimal`, `unittest`, existing exact tennis recursion, existing candidate
@@ -31,9 +32,11 @@ score parsers, existing Kalshi V2 full-L2 reducer, canonical JSONL, SHA-256.
   order creation/cancellation routes, or any write-capable transport.
 - Preserve the offline `PilotPointEvent` two-lineage authority; single-source
   paper data uses new contracts and never becomes research/live authority.
-- Score authority is `CONSENSUS_PAPER` for two or more fresh proven-independent
-  agreeing lineages, `SINGLE_SOURCE_PAPER` for one fresh complete source and no
-  fresh disagreement, otherwise `ABSTAINED`.
+- Score authority is `CONSENSUS_PAPER` for two or more fresh agreeing sources
+  whose independent-lineage IDs are distinct and proven independent;
+  `SINGLE_SOURCE_PAPER` means exactly one independent lineage is represented,
+  even if mirrored by multiple source endpoints, with no fresh disagreement;
+  otherwise authority is `ABSTAINED`.
 - Never infer a missing point. A duplicate causes no update; a score gap,
   regression, correction, stale input, or disagreement causes an abstention.
 - Rebase only after a stable post-quarantine score; reset Model 2 to its frozen
@@ -113,6 +116,7 @@ class LivePaperScoreDecisionKind(str, Enum):
 class LivePaperSourceObservation:
     provider_slot: str
     source_id: str
+    independent_lineage_id: str
     lineage_sha256: str
     independence_proven: bool | None
     state: TennisState
@@ -191,6 +195,11 @@ def observation_from_live_score_facts(
   successor (ordinal increments once and winner/server are exact), duplicate
   capture (no update), multi-point gap/correction (quarantine), and stable
   re-anchor (rebase epoch increments; ordinal does not invent missing points).
+- [ ] Define stable re-anchor deterministically: two or more fresh independent
+  lineages agreeing in one reduction may re-anchor immediately; otherwise one
+  lineage must repeat the identical complete score on two strictly later
+  captures at least `250_000_000ns` apart and both within the five-second
+  freshness window. Any disagreement resets the candidate.
 - [ ] Implement exact successor resolution by testing both legal point winners
   through the existing tennis scorer. Do not accept a transition unless one
   and only one winner produces the observed score.
@@ -282,6 +291,8 @@ def rebase_live_two_model(
 def project_paper_l2(
     l2: UnqualifiedTwoTickerL2State,
     *,
+    binding: LivePaperMarketBinding,
+    raw_parent_receipt_sha256: str,
     captured_wall_ns: int,
     captured_monotonic_ns: int,
     clock_uncertainty_ns: int,
@@ -313,6 +324,11 @@ def reduce_paper_book(
   YES bid/ask ladders without flattening depth, rejecting incomplete/crossed/
   gapped/stale/mismatched frames, and preserving generation/SID/sequence/raw
   parent identity.
+- [ ] Define `LivePaperMarketBinding` in `live_paper_contracts.py` with the
+  canonical match ID, scheduled start, HOME/AWAY player IDs, HOME/AWAY market
+  ticker+UUID, and explicit `YES -> PlayerSide` orientation. Require both
+  reducer markets and IDs to match it exactly; never infer orientation from
+  ticker text or array order.
 - [ ] Implement the immutable book projection and virtual depth ledger.
 - [ ] Write RED tests for: no entry before a set completes; both models must
   support the same side; conservative HOME/AWAY fair values; largest visible
@@ -325,7 +341,8 @@ def reduce_paper_book(
   decision book cannot fill it, a later book can produce zero/partial/full
   fills, consumed virtual depth cannot be reused, and no stale frame can fill.
 - [ ] Write RED tests for fee-aware executable bid marks and exits at `+$5`,
-  `-$5`, or `300s`; a missing/insufficient bid must leave residual inventory.
+  `-$5`, or `300s`; SELL actions, like BUY actions, can fill only from a later
+  eligible L2 frame. A missing/insufficient bid must leave residual inventory.
 - [ ] Implement the pure simulator with no client/transport field and no order
   vocabulary beyond explicitly named `PaperAction`/`PaperFill` values.
 - [ ] Add an AST dependency-boundary test forbidding order-capable imports and
@@ -384,17 +401,28 @@ def replay_live_paper_records(raw: bytes) -> LivePaperReplayResult: ...
 **Files:**
 
 - Create: `inci_tennis_runtime/live_two_model_paper_cli.py`
+- Create: `inci_tennis_runtime/live_paper_capture_bridge.py`
+- Modify: `inci_tennis_runtime/live_shadow_collector.py`
 - Create: `tests/tennis_v1/test_live_two_model_paper_cli.py`
+- Modify: `tests/tennis_v1/test_live_shadow_collector.py`
 - Modify: `README.md`
 - Modify: `tests/tennis_v1/test_expert_dependency_boundary.py`
 
-**CLI contract:**
+**CLI contracts:**
 
 ```text
 python -m inci_tennis_runtime.live_two_model_paper_cli \
   --manifest /absolute/match-manifest.json \
   --score-stream /absolute/growing-score-captures.jsonl \
   --kalshi-stream /absolute/growing-kalshi-frames.jsonl \
+  --session-log /absolute/live-paper-session.jsonl \
+  --checkpoint /absolute/live-paper-checkpoint.json \
+  --bootstrap-home-serve 0.64 \
+  --bootstrap-away-serve 0.61
+
+python -m inci_tennis_runtime.live_two_model_paper_cli \
+  --live-readonly \
+  --manifest /absolute/match-manifest.json \
   --session-log /absolute/live-paper-session.jsonl \
   --checkpoint /absolute/live-paper-checkpoint.json \
   --bootstrap-home-serve 0.64 \
@@ -410,6 +438,23 @@ python -m inci_tennis_runtime.live_two_model_paper_cli \
   physical generation/clocks plus base64 raw WebSocket payload. Reuse
   `parse_live_score` and `UnqualifiedTwoTickerBookReducer` rather than accepting
   caller-supplied normalized probabilities or books.
+- [ ] Write RED collector tests for an optional `LivePaperCaptureObserver`.
+  It receives a raw Kalshi frame only after `persist_kalshi_frame` succeeds and
+  a provider capture only after its trial-ledger receipt succeeds. Observer
+  failure halts the paper bridge but cannot mutate or relabel collector
+  evidence. With no observer, existing collector behavior remains byte-for-byte
+  unchanged.
+- [ ] Implement the additive post-commit observer and a capture bridge that
+  feeds the same parsers/reducers/session reducer used by JSONL mode. The
+  observer interface carries raw parent receipts and capture clocks, not a
+  top-of-book rendering projection.
+- [ ] In `--live-readonly` mode, reuse the existing collector's catalog/match
+  selection, Sportradar capture transport, and `KalshiReadOnlyTransport` rather
+  than creating a second socket implementation. Validate the manifest against
+  the selected exact provider/player/market IDs. The Kalshi key scope check must
+  equal `{"read"}` before subscription; reject all other scopes. Additional
+  API-Tennis/GoalServe/Live-Tennis-API score adapters may join through growing
+  JSONL sources in the same session.
 - [ ] Write RED end-to-end tests with fixture streams proving: banner first;
   initial anchor forecast; first-set gating; point update; one-second delayed
   partial paper fill on a later L2 frame; typed exit/terminal; and byte-identical
@@ -419,12 +464,10 @@ python -m inci_tennis_runtime.live_two_model_paper_cli \
   replacement, and a compact terminal dashboard showing score trust, both model
   probabilities, book age, paper position/P&L, and top rejection reason.
 - [ ] Add dependency seals proving the CLI imports neither legacy bot/executor
-  nor any order-capable transport. It may consume only already-captured
-  growing files in Version 1.
-- [ ] Document how the existing read-only collector (or a capture adapter) must
-  write the two growing stream formats, how to run the paper bridge, what each
-  authority label means, and the explicit limitation that this commit does not
-  yet open provider/Kalshi sockets itself.
+  nor any order-capable transport. Its only network authority is the existing
+  scope-checked read-only collector composition.
+- [ ] Document live-readonly and growing-file modes, the stream formats, exact
+  key scope requirement, bootstrap/artifact modes, and every authority label.
 - [ ] Run focused CLI/session tests, all targeted tennis pilot/collector tests,
   `/Users/mthanki/.venvs/inci/bin/python tests.py`, and a no-network smoke run.
 - [ ] Commit as `feat: add live two-model paper cli`.
@@ -441,4 +484,5 @@ python -m inci_tennis_runtime.live_two_model_paper_cli \
 - [ ] Run the branch-wide code review gate and resolve all Critical/Important
   findings.
 - [ ] Push `feature/two-model-pilot` and report exact commit SHAs, test counts,
-  runnable command, and remaining limitation (capture files are external).
+  runnable live/read-only and deterministic-replay commands, and any remaining
+  provider-coverage limitation.
