@@ -1022,6 +1022,30 @@ def _checkpoint_projection(state: LivePaperSessionState) -> _LivePaperCheckpoint
     )
 
 
+def _score_clock_basis(
+    observations: tuple[LivePaperSourceObservation, ...],
+) -> tuple[int, int, int]:
+    if not observations:
+        _fail("score_clock")
+    wall_ns = max(observation.captured_wall_ns for observation in observations)
+    monotonic_ns = max(
+        observation.captured_monotonic_ns for observation in observations
+    )
+    uncertainties: list[int] = []
+    for observation in observations:
+        wall_delta_ns = wall_ns - observation.captured_wall_ns
+        monotonic_delta_ns = (
+            monotonic_ns - observation.captured_monotonic_ns
+        )
+        if wall_delta_ns < 0 or monotonic_delta_ns < 0:
+            _fail("score_clock")
+        uncertainties.append(
+            max(wall_delta_ns, monotonic_delta_ns)
+            + observation.state.last_clock_uncertainty_ns
+        )
+    return wall_ns, monotonic_ns, max(uncertainties)
+
+
 def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) -> tuple[LivePaperSessionState, tuple[LivePaperRecord, ...]]:
     if any(observation.canonical_match_id != state.config.canonical_match_id for observation in item.observations):
         _fail("canonical_match_id")
@@ -1050,9 +1074,13 @@ def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) 
                 observation
                 for observation in item.observations
                 if observation.captured_monotonic_ns <= item.observed_monotonic_ns
-                and item.observed_monotonic_ns - observation.captured_monotonic_ns
-                <= state.config.score_freshness_ns
                 and observation.captured_wall_ns <= item.observed_wall_ns
+                and max(
+                    item.observed_wall_ns - observation.captured_wall_ns,
+                    item.observed_monotonic_ns
+                    - observation.captured_monotonic_ns,
+                ) + observation.state.last_clock_uncertainty_ns
+                <= state.config.score_freshness_ns
                 and score_coordinates(observation.state)
                 == score_coordinates(decision.anchor.state)
             )
@@ -1063,20 +1091,30 @@ def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) 
                 monotonic_ns = state.last_score_monotonic_ns
                 uncertainty_ns = state.last_score_clock_uncertainty_ns
             else:
-                wall_ns = max(observation.captured_wall_ns for observation in eligible)
-                monotonic_ns = max(observation.captured_monotonic_ns for observation in eligible)
-                uncertainty_ns = max(observation.state.last_clock_uncertainty_ns for observation in eligible)
+                wall_ns, monotonic_ns, uncertainty_ns = _score_clock_basis(
+                    eligible
+                )
         else:
             if decision.anchor is None:
                 _fail("score_anchor")
-            wall_ns = decision.anchor.accepted_wall_ns
-            monotonic_ns = decision.anchor.accepted_monotonic_ns
             parent_receipts = set(decision.anchor.parent_receipt_sha256s)
-            uncertainty_ns = max(
-                observation.state.last_clock_uncertainty_ns
+            supporting = tuple(
+                observation
                 for observation in item.observations
                 if observation.raw_receipt_sha256 in parent_receipts
             )
+            if {
+                observation.raw_receipt_sha256 for observation in supporting
+            } != parent_receipts:
+                _fail("score_clock")
+            wall_ns, monotonic_ns, uncertainty_ns = _score_clock_basis(
+                supporting
+            )
+            if (
+                wall_ns != decision.anchor.accepted_wall_ns
+                or monotonic_ns != decision.anchor.accepted_monotonic_ns
+            ):
+                _fail("score_clock")
         if clock_actionable and wall_ns is not None and monotonic_ns is not None and uncertainty_ns is not None:
             state = replace(
                 state,

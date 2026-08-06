@@ -212,6 +212,116 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
             ((SHA_C, SHA_D), (SHA_D, SHA_B)),
         )
 
+    def test_consensus_anchor_uses_authenticated_supporting_clock_bounds(self) -> None:
+        api = _api()
+        contracts, score = api
+        now_ns = 10_000_000_000
+        old_ns = 6_000_000_000
+        uncertainty_ns = 1_000_000_000
+        source_a = _state(last_clock_uncertainty_ns=uncertainty_ns)
+        source_b = replace(
+            source_a,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+        )
+
+        _, decision = _reduce(
+            api,
+            score.initial_live_paper_score_coordinator_state("match-1"),
+            (
+                _observation(
+                    api,
+                    source_a,
+                    captured_wall_ns=now_ns,
+                    captured_monotonic_ns=old_ns,
+                ),
+                _observation(
+                    api,
+                    source_b,
+                    source_id="source-b",
+                    lineage_id="lineage-b",
+                    lineage_sha256=SHA_B,
+                    raw_receipt_sha256=SHA_C,
+                    captured_wall_ns=old_ns,
+                    captured_monotonic_ns=now_ns,
+                    independence_proof_sha256=SHA_D,
+                ),
+            ),
+            now_wall_ns=now_ns,
+            now_monotonic_ns=now_ns,
+        )
+
+        self.assertIs(decision.trust, contracts.PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertEqual(decision.anchor.accepted_wall_ns, now_ns)
+        self.assertEqual(decision.anchor.accepted_monotonic_ns, now_ns)
+
+    def test_consensus_anchor_clock_basis_excludes_unproven_observations(self) -> None:
+        api = _api()
+        contracts, score = api
+        proven_ns = 8_000_000_000
+        unproven_ns = 10_000_000_000
+        now_ns = 10_000_000_000
+        source_a = _state()
+        source_b = replace(
+            source_a,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+        )
+        source_c = replace(
+            source_a,
+            provider_source_id="provider-c",
+            revision_domain_id="provider-c-local",
+            source_lineage_sha256=SHA_C,
+            provider_match_id="provider-c-match",
+        )
+
+        _, decision = _reduce(
+            api,
+            score.initial_live_paper_score_coordinator_state("match-1"),
+            (
+                _observation(
+                    api,
+                    source_a,
+                    captured_wall_ns=proven_ns,
+                    captured_monotonic_ns=proven_ns,
+                ),
+                _observation(
+                    api,
+                    source_b,
+                    source_id="source-b",
+                    lineage_id="lineage-b",
+                    lineage_sha256=SHA_B,
+                    raw_receipt_sha256=SHA_C,
+                    captured_wall_ns=proven_ns,
+                    captured_monotonic_ns=proven_ns,
+                    independence_proof_sha256=SHA_D,
+                ),
+                _observation(
+                    api,
+                    source_c,
+                    source_id="source-c",
+                    lineage_id="lineage-c",
+                    lineage_sha256=SHA_C,
+                    independent=None,
+                    raw_receipt_sha256="e" * 64,
+                    captured_wall_ns=unproven_ns,
+                    captured_monotonic_ns=unproven_ns,
+                ),
+            ),
+            now_wall_ns=now_ns,
+            now_monotonic_ns=now_ns,
+        )
+
+        self.assertIs(decision.trust, contracts.PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertEqual(decision.anchor.accepted_wall_ns, proven_ns)
+        self.assertEqual(decision.anchor.accepted_monotonic_ns, proven_ns)
+
     def test_mirrored_endpoints_on_one_lineage_remain_single_source_paper(self) -> None:
         api = _api()
         contracts, score = api
@@ -597,6 +707,69 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
 
         self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.REBASED)
         self.assertEqual(rebased_state.rebase_epoch, 1)
+
+    def test_consensus_rebase_uses_authenticated_supporting_clock_bounds(self) -> None:
+        api = _api()
+        contracts, score = api
+        before = _state()
+        initial, _ = _reduce(
+            api,
+            score.initial_live_paper_score_coordinator_state("match-1"),
+            (_observation(api, before),),
+        )
+        gap = _after_one_point(
+            _after_one_point(before, PlayerSide.HOME),
+            PlayerSide.AWAY,
+        )
+        quarantined, _ = _reduce(
+            api,
+            initial,
+            (_observation(api, gap, captured_monotonic_ns=2_000),),
+            now=2_000,
+        )
+        now_ns = 10_000_000_000
+        old_ns = 6_000_000_000
+        uncertainty_ns = 1_000_000_000
+        source_a = replace(gap, last_clock_uncertainty_ns=uncertainty_ns)
+        source_b = replace(
+            source_a,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+        )
+
+        _, decision = _reduce(
+            api,
+            quarantined,
+            (
+                _observation(
+                    api,
+                    source_a,
+                    captured_wall_ns=now_ns,
+                    captured_monotonic_ns=old_ns,
+                ),
+                _observation(
+                    api,
+                    source_b,
+                    source_id="source-b",
+                    lineage_id="lineage-b",
+                    lineage_sha256=SHA_B,
+                    raw_receipt_sha256=SHA_C,
+                    captured_wall_ns=old_ns,
+                    captured_monotonic_ns=now_ns,
+                    independence_proof_sha256=SHA_D,
+                ),
+            ),
+            now_wall_ns=now_ns,
+            now_monotonic_ns=now_ns,
+        )
+
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.REBASED)
+        self.assertEqual(decision.anchor.accepted_wall_ns, now_ns)
+        self.assertEqual(decision.anchor.accepted_monotonic_ns, now_ns)
 
 
 if __name__ == "__main__":

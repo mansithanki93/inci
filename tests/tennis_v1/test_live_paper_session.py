@@ -113,6 +113,29 @@ def _config(api: object) -> object:
     )
 
 
+def _consensus_config(api: object) -> object:
+    config = _config(api)
+    authority_b = api.LivePaperProviderAuthority(
+        slot="fixture",
+        source_id="source-b",
+        provider_match_id="provider-b-match",
+        home_player_id="provider-b-home",
+        away_player_id="provider-b-away",
+        independent_lineage_id="lineage-b",
+        source_lineage_sha256=SHA_C,
+        independence_proven=True,
+        independence_proof_sha256=SHA_D,
+    )
+    authorities = (*config.provider_authorities, authority_b)
+    return replace(
+        config,
+        provider_authorities=authorities,
+        provider_authority_sha256=(
+            api.compute_live_paper_provider_authority_sha256(authorities)
+        ),
+    )
+
+
 def _score_state() -> TennisState:
     return TennisState(
         provider_source_id="provider-a",
@@ -173,6 +196,47 @@ def _score_input(api: object) -> object:
         observations=(observation,),
         observed_wall_ns=2_000_000_000,
         observed_monotonic_ns=2_000_000_000,
+    )
+
+
+def _skewed_consensus_score_input(api: object) -> object:
+    base = _score_input(api).observations[0]
+    now_ns = 10_000_000_000
+    old_ns = 6_000_000_000
+    uncertainty_ns = 1_000_000_000
+    source_a = replace(
+        base,
+        state=replace(
+            base.state,
+            last_clock_uncertainty_ns=uncertainty_ns,
+        ),
+        captured_wall_ns=now_ns,
+        captured_monotonic_ns=old_ns,
+    )
+    source_b = replace(
+        base,
+        source_id="source-b",
+        independent_lineage_id="lineage-b",
+        lineage_sha256=SHA_C,
+        independence_proof_sha256=SHA_D,
+        raw_receipt_sha256="e" * 64,
+        state=replace(
+            base.state,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_C,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+            last_clock_uncertainty_ns=uncertainty_ns,
+        ),
+        captured_wall_ns=old_ns,
+        captured_monotonic_ns=now_ns,
+    )
+    return api.LivePaperScoreBatchInput(
+        (source_a, source_b),
+        now_ns,
+        now_ns,
     )
 
 
@@ -567,6 +631,107 @@ class LivePaperSessionTests(unittest.TestCase):
         )
         self.assertIn("action", tuple(record.kind.value for record in book_rows))
         raw = api.encode_live_paper_records(anchor_rows + unchanged_rows + book_rows)
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
+    def test_consensus_clock_skew_cannot_extend_score_actionability(self) -> None:
+        """Catches component-wise maxima creating a young clock no source observed."""
+        api = _api()
+        state = api.open_live_paper_session(_consensus_config(api))
+
+        state, score_rows = api.reduce_live_paper_input(
+            state,
+            _skewed_consensus_score_input(api),
+        )
+        state, preceding_rows = api.reduce_live_paper_input(
+            state,
+            _captured_l2_input(
+                api,
+                1,
+                9_000_000_000,
+                10_000_000_000,
+                "6" * 64,
+            ),
+        )
+        state, book_rows = api.reduce_live_paper_input(
+            state,
+            _l2_input(api, 2, 14_000_000_000, "7" * 64),
+        )
+
+        self.assertEqual(state.last_score_wall_ns, 10_000_000_000)
+        self.assertEqual(state.last_score_monotonic_ns, 10_000_000_000)
+        self.assertEqual(state.last_score_clock_uncertainty_ns, 5_000_000_000)
+        self.assertEqual(
+            preceding_rows[-1].payload.body.reason,
+            "book_precedes_score",
+        )
+        self.assertIsNone(state.portfolio.pending_action)
+        self.assertEqual(book_rows[-1].payload.body.reason, "score_stale")
+        self.assertNotIn("action", tuple(record.kind.value for record in book_rows))
+        raw = api.encode_live_paper_records(score_rows + preceding_rows + book_rows)
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
+    def test_unchanged_consensus_refresh_uses_conservative_clock_basis(self) -> None:
+        """Catches unchanged score refresh synthesizing the same young clock pair."""
+        api = _api()
+        state = api.open_live_paper_session(_consensus_config(api))
+        state, anchor_rows = api.reduce_live_paper_input(state, _score_input(api))
+
+        state, unchanged_rows = api.reduce_live_paper_input(
+            state,
+            _skewed_consensus_score_input(api),
+        )
+        state, book_rows = api.reduce_live_paper_input(
+            state,
+            _l2_input(api, 1, 14_000_000_000, "7" * 64),
+        )
+
+        self.assertEqual(state.last_score_wall_ns, 10_000_000_000)
+        self.assertEqual(state.last_score_monotonic_ns, 10_000_000_000)
+        self.assertEqual(state.last_score_clock_uncertainty_ns, 5_000_000_000)
+        self.assertIsNone(state.portfolio.pending_action)
+        self.assertEqual(book_rows[-1].payload.body.reason, "score_stale")
+        self.assertNotIn("action", tuple(record.kind.value for record in book_rows))
+        raw = api.encode_live_paper_records(
+            anchor_rows + unchanged_rows + book_rows
+        )
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
+    def test_consensus_rebase_clock_skew_cannot_extend_score_actionability(self) -> None:
+        """Catches a rebase anchor carrying the same synthetic young clock."""
+        api = _api()
+        state = api.open_live_paper_session(_consensus_config(api))
+        state, anchor_rows = api.reduce_live_paper_input(state, _score_input(api))
+        gap = _advanced_observation(api, 2)
+        state, quarantine_rows = api.reduce_live_paper_input(
+            state,
+            api.LivePaperScoreBatchInput(
+                (gap,),
+                3_000_000_000,
+                3_000_000_000,
+            ),
+        )
+        self.assertTrue(state.score_coordinator.quarantined)
+
+        state, rebase_rows = api.reduce_live_paper_input(
+            state,
+            _skewed_consensus_score_input(api),
+        )
+        state, book_rows = api.reduce_live_paper_input(
+            state,
+            _l2_input(api, 1, 14_000_000_000, "7" * 64),
+        )
+
+        self.assertFalse(state.score_coordinator.quarantined)
+        self.assertEqual(state.score_coordinator.rebase_epoch, 1)
+        self.assertEqual(state.last_score_wall_ns, 10_000_000_000)
+        self.assertEqual(state.last_score_monotonic_ns, 10_000_000_000)
+        self.assertEqual(state.last_score_clock_uncertainty_ns, 5_000_000_000)
+        self.assertIsNone(state.portfolio.pending_action)
+        self.assertEqual(book_rows[-1].payload.body.reason, "score_stale")
+        self.assertNotIn("action", tuple(record.kind.value for record in book_rows))
+        raw = api.encode_live_paper_records(
+            anchor_rows + quarantine_rows + rebase_rows + book_rows
+        )
         self.assertEqual(api.replay_live_paper_records(raw).state, state)
 
     def test_integrity_rejections_cover_shape_chain_terminal_and_truncation(self) -> None:
