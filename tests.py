@@ -5253,9 +5253,11 @@ def _normalized_market(*, ticker, event_ticker, bid=Decimal(50), ask=Decimal(52)
             "yes_ask_size": ask_size}
 
 
-def _discover_cfg(*, sports=(), tickers=(), max_markets=10, max_spread=3):
+def _discover_cfg(*, sports=(), tickers=(), max_markets=10, max_spread=3,
+                  one_contract_per_event=True):
     return Config(sports=list(sports), tickers=list(tickers),
                   max_monitored_markets=max_markets, max_spread=max_spread,
+                  one_contract_per_event=one_contract_per_event,
                   state_root=tempfile.mkdtemp())
 
 
@@ -5587,7 +5589,7 @@ def test_discovery_prefers_scoreboard_bindable_contracts():
 
 
 def test_dynamic_contract_cap_allows_siblings_from_one_game():
-    """The cap counts contracts, so one Games Event may occupy two slots."""
+    """With one_contract_per_event off, one Games Event may occupy two slots."""
     from datetime import datetime, timezone
     from sports_discovery import discover_game_contracts
 
@@ -5626,14 +5628,70 @@ def test_dynamic_contract_cap_allows_siblings_from_one_game():
         )})
 
     result = discover_game_contracts(
-        _discover_cfg(sports=("Tennis",), max_markets=2), client,
+        _discover_cfg(sports=("Tennis",), max_markets=2,
+                      one_contract_per_event=False), client,
         now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc))
 
     assert result.tickers == (
         sibling_event + "-A", sibling_event + "-B")
     assert result.stats["candidates"] == 3
     assert result.stats["selected"] == 2
+    assert result.stats["skipped_event_siblings"] == 0
     print("PASS dynamic cap allows sibling contracts from one Games Event")
+
+
+def test_discovery_keeps_one_contract_per_event():
+    """Default one_contract_per_event drops the weaker sibling and fills elsewhere."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    sibling_event = "KXGAME-26JUL26-SIBLINGS"
+    other_event = "KXGAME-26JUL26-OTHER"
+    client = _dynamic_discovery_client(
+        series=({"series_ticker": "KXGAME", "category": "Sports",
+                 "tags": ("Tennis",)},),
+        milestones={"Tennis League": (
+            _normalized_game(
+                milestone_id="siblings", event_ticker=sibling_event),
+            _normalized_game(
+                milestone_id="other", event_ticker=other_event),
+        )},
+        events={"KXGAME": (
+            _normalized_event(
+                event_ticker=sibling_event, series_ticker="KXGAME",
+                markets=(
+                    _normalized_market(
+                        ticker=sibling_event + "-A",
+                        event_ticker=sibling_event,
+                        bid=Decimal(50), ask=Decimal(51),
+                        bid_size=Decimal(20), ask_size=Decimal(20)),
+                    _normalized_market(
+                        ticker=sibling_event + "-B",
+                        event_ticker=sibling_event,
+                        bid=Decimal(50), ask=Decimal(51),
+                        bid_size=Decimal(15), ask_size=Decimal(15)),
+                )),
+            _normalized_event(
+                event_ticker=other_event, series_ticker="KXGAME",
+                markets=(_normalized_market(
+                    ticker=other_event + "-A", event_ticker=other_event,
+                    bid=Decimal(50), ask=Decimal(51),
+                    bid_size=Decimal(1), ask_size=Decimal(1)),)),
+        )})
+
+    def score(contract):
+        # Prefer the shallower sibling B to prove score overrides rank order.
+        return (1, Decimal(1)) if contract.ticker.endswith("-B") else (1, Decimal(0))
+
+    result = discover_game_contracts(
+        _discover_cfg(sports=("Tennis",), max_markets=2), client,
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),
+        sibling_score=score)
+    assert result.tickers == (
+        sibling_event + "-B", other_event + "-A")
+    assert result.stats["skipped_event_siblings"] == 1
+    assert result.stats["selected"] == 2
+    print("PASS discovery keeps one contract per event")
 
 
 def test_dynamic_discovery_filters_books_and_reports_stable_stats():
@@ -5679,6 +5737,7 @@ def test_dynamic_discovery_filters_books_and_reports_stable_stats():
         "skip_market_no_depth": 2, "skip_market_wide_spread": 1,
         "skip_milestone_off_category": 1, "skip_milestone_outside_day": 1,
         "skip_series_off_category": 1, "skip_unsupported_market_scalar": 2,
+        "skipped_event_siblings": 0,
     }
     malformed = _dynamic_discovery_client(
         series=({"series_ticker": "KXATP", "category": "Sports",
@@ -6521,7 +6580,7 @@ def test_run_session_discovers_and_reports_only_once():
         "  utc=[1970-01-01T00:00:00Z, 1970-01-02T00:00:00Z)",
         "[discover] series_rows=3 milestone_pages=2 milestone_rows=4 "
         "event_pages=1 event_rows=2 candidates=1 bindable_candidates=0 "
-        "selected=1 selected_bindable=0",
+        "skipped_event_siblings=0 selected=1 selected_bindable=0",
         "  skips=skip_a=1, skip_z=2",
         "[discover] Tennis | League | Game | T | "
         "1970-01-01T01:00:00Z | bid=50 ask=52 spread=2 "
@@ -7574,6 +7633,7 @@ if __name__ == "__main__":
     test_best_ten_are_global_across_selected_sports()
     test_discovery_prefers_scoreboard_bindable_contracts()
     test_dynamic_contract_cap_allows_siblings_from_one_game()
+    test_discovery_keeps_one_contract_per_event()
     test_dynamic_discovery_filters_books_and_reports_stable_stats()
     test_discovery_requires_exactly_one_source()
     test_explicit_tickers_must_be_today_games_and_within_cap()
@@ -7781,4 +7841,4 @@ if __name__ == "__main__":
     test_display_player_name_from_kalshi_title()
     test_rank_contracts_prefer_bind_tiers()
     test_gate_binds_itf_via_live_tennis_secondary()
-    print("\nALL TESTS PASS (217 tests)")
+    print("\nALL TESTS PASS (218 tests)")

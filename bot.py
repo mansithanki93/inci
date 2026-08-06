@@ -200,7 +200,7 @@ def format_discovery_telemetry(discovery):
     count_keys = (
         "series_rows", "milestone_pages", "milestone_rows",
         "event_pages", "event_rows", "candidates", "bindable_candidates",
-        "selected", "selected_bindable",
+        "skipped_event_siblings", "selected", "selected_bindable",
     )
     skip_items = sorted(
         (key, value) for key, value in stats.items()
@@ -537,6 +537,10 @@ def run_session(cfg, client):
                       f"(bindable={discovery.stats.get('bindable_candidates', 0)}; "
                       f"selected_bindable="
                       f"{discovery.stats.get('selected_bindable', 0)})")
+            if cfg.one_contract_per_event:
+                print("[discover] one_contract_per_event=on "
+                      f"(skipped_siblings="
+                      f"{discovery.stats.get('skipped_event_siblings', 0)})")
             if cfg.live_tennis_enabled:
                 from live_tennis import resolve_api_key
                 if espn_gate.live_tennis_cache is not None:

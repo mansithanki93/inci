@@ -283,6 +283,44 @@ def rank_contracts_prefer_bind(candidates, contracts_per_trade, bindable_tickers
     )
 
 
+def select_one_per_event(ranked, max_markets, *, sibling_score=None):
+    """Keep at most one contract per ``event_ticker`` from an already-ranked list.
+
+    Within an event, the contract with the highest ``sibling_score(contract)``
+    wins (ties keep the earlier-ranked contract). When ``sibling_score`` is
+    omitted, the first ranked sibling wins. Returns up to ``max_markets``
+    winners in the original ranked order.
+    """
+    if isinstance(max_markets, bool) or not isinstance(max_markets, int) or max_markets <= 0:
+        raise ValueError("max_markets must be a positive integer")
+    ranked = tuple(ranked)
+    if not all(isinstance(candidate, SelectedContract) for candidate in ranked):
+        raise ValueError("ranked must contain SelectedContract values")
+    best = {}
+    for index, contract in enumerate(ranked):
+        event = contract.provenance.event_ticker
+        try:
+            score = sibling_score(contract) if sibling_score is not None else ()
+        except Exception:  # noqa: BLE001 — treat as worst sibling score
+            score = ()
+        if not isinstance(score, tuple):
+            score = (score,)
+        # Higher score wins; earlier rank breaks ties.
+        key = (score, -index)
+        previous = best.get(event)
+        if previous is None or key > previous[0]:
+            best[event] = (key, contract)
+    winners = {contract.ticker for _, contract in best.values()}
+    selected = []
+    for contract in ranked:
+        if contract.ticker not in winners:
+            continue
+        selected.append(contract)
+        if len(selected) >= max_markets:
+            break
+    return tuple(selected)
+
+
 def _selected_sports(filters):
     if isinstance(filters, Mapping):
         if "sports" in filters:
@@ -784,13 +822,16 @@ def _discover_explicit_tickers(cfg, client, *, now=None):
         stats=dict(sorted(stats.items())))
 
 
-def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None):
+def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
+                            sibling_score=None):
     """Prove and select today's Games from one explicit discovery source.
 
     When ``bind_predicate`` is set (and ``cfg.prefer_scoreboard_bind`` is
     true), bindable contracts are ranked ahead of unbound ones; each tier
-    still uses the standard depth/spread ranking. Explicit ticker lists are
-    unchanged (order preserved, no re-rank).
+    still uses the standard depth/spread ranking. With
+    ``cfg.one_contract_per_event`` (default on), at most one market per
+    Event is kept — ``sibling_score`` picks the winner when provided.
+    Explicit ticker lists are unchanged (order preserved, no re-rank).
     """
     has_sports = bool(getattr(cfg, "sports", None))
     has_tickers = bool(getattr(cfg, "tickers", None))
@@ -949,7 +990,16 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None):
     max_markets = getattr(cfg, "max_monitored_markets", None)
     if isinstance(max_markets, bool) or not isinstance(max_markets, int) or max_markets <= 0:
         raise ValueError("cfg.max_monitored_markets must be a positive integer")
-    contracts = ranked[:max_markets]
+    if bool(getattr(cfg, "one_contract_per_event", True)):
+        # Sibling drop count uses the uncapped winner set.
+        uncapped = max(len(ranked), 1)
+        all_winners = select_one_per_event(
+            ranked, uncapped, sibling_score=sibling_score)
+        stats["skipped_event_siblings"] = max(0, len(ranked) - len(all_winners))
+        contracts = all_winners[:max_markets]
+    else:
+        contracts = ranked[:max_markets]
+        stats["skipped_event_siblings"] = 0
     stats["selected"] = len(contracts)
     stats["selected_bindable"] = sum(
         1 for contract in contracts if contract.ticker in bindable_tickers)

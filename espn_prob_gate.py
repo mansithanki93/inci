@@ -157,6 +157,39 @@ class EspnProbGate:
             ticker=ticker, player_name=player_name,
             event_title=event_title) is not None
 
+    def model_edge_score(self, *, ticker: str, player_name: str,
+                         event_title: str, ask_cents) -> tuple:
+        """Sibling-ranking score: ``(bound, edge)`` — higher is better.
+
+        Unbound / unscored contracts get ``(0, 0)`` so a bindable sibling
+        with any edge wins. Used only for discovery one-per-event picks.
+        """
+        bound = self.find_bind(
+            ticker=ticker, player_name=player_name,
+            event_title=event_title)
+        if bound is None:
+            return (0, Decimal(0))
+        match, me, opp = bound
+        try:
+            ask = Decimal(str(ask_cents))
+        except Exception:
+            return (1, Decimal(0))
+        if ask <= 0 or ask >= 100:
+            return (1, Decimal(0))
+        live = match.state == "in"
+        sets_me, sets_opp = completed_sets_won(
+            me.sets, opp.sets, live=live)
+        g_me, g_opp = current_games(me.sets, opp.sets, live=live)
+        if match.games is not None and (g_me, g_opp) == (0, 0) and live:
+            if match.competitors[0].display_name == me.display_name:
+                g_me, g_opp = match.games
+            else:
+                g_opp, g_me = match.games
+        model = match_win_probability(
+            sets_me, sets_opp, g_me, g_opp, best_of=match.best_of)
+        edge = Decimal(str(round(model, 6))) - (ask / Decimal(100))
+        return (1, edge)
+
     def decide(self, *, ticker: str, player_name: str, event_title: str,
                ask_cents) -> GateDecision:
         if not self.enabled():
