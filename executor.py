@@ -1,18 +1,19 @@
 """Order execution.
 
-Paper: nonblocking pending orders fill only from a same-ticker observation at
-or after their due time, bounded by book depth. Orders are one of two kinds:
+Paper: delayed IOC / taker simulation aligned with Config.time_in_force
+(immediate_or_cancel). Orders become eligible only after sim_latency_s, then
+get one attempt against the then-current top of book (depth-capped). Any
+unfilled remainder is canceled — nothing is retained as GTC.
 
-* RESTING — entries and non-stop exits. Limits are pegged to the executable
-  side needed for the dip-scalp path, not the passive far touch:
-  BUY rests at the ask (fill when a later ask is still at or below that limit);
-  SELL rests at the bid (fill when a later bid is still at or above that limit).
-  That avoids the adverse-selection trap of resting a bid under a dip (which
-  only fills on further decline) and the unreachable-TP trap of resting an
-  offer after the bid already printed the take-profit. No adverse slippage is
-  applied; an unfilled resting order stays working until it fills or cancels.
-* MARKETABLE (taker) — stop-loss exits. The order crosses the spread on the
-  first due quote at bid - slippage, so risk is exited immediately.
+Pricing:
+* BUY: current ask, only if ask is still at or below the signal-time cap.
+* Take-profit SELL: current bid, only if bid is still at or above the
+  signal-time floor.
+* Time-exit SELL: current bid (marketable; no floor revalidation).
+* Stop-loss SELL: bid minus sim_slippage_cents (adverse marketable exit).
+
+The ``resting`` field on PendingPaperOrder is a deprecated compatibility
+knob; paper execution always uses IOC and never retains working orders.
 
 Live/demo (disabled both at bot and executor levels): official Create V2 body
 (side=bid|ask, separate price, fp string count, time_in_force,
@@ -49,8 +50,11 @@ class PendingPaperOrder:
     contracts: Decimal
     due_at: float
     reason: str
-    resting: bool = True
-    # Maker limit (cents) captured at submit; None marks a marketable order.
+    # Deprecated: always treated as IOC. Kept so older call sites/tests that
+    # still pass resting= do not break on construction.
+    resting: bool = False
+    # BUY: max acceptable ask (signal cap). Non-stop SELL: min acceptable bid.
+    # None for marketable stop/time exits (no floor/cap revalidation).
     limit_price: object = None
 
 
@@ -91,45 +95,34 @@ class Executor:
 
     # ---------- Paper ----------
     def _paper_fill(self, order):
-        """Attempt one aggregate fill for a due order; None if it cannot fill.
-
-        Resting (maker) orders fill at their captured limit only when the
-        market trades through it. Marketable (taker) orders cross the spread
-        immediately with adverse slippage.
-        """
+        """One IOC attempt against the current book; None if it cannot fill."""
         ticker, side = order.ticker, order.side
         bid, bid_qty, ask, ask_qty = self.feed.top_of_book(ticker)
-        if order.resting:
-            limit = order.limit_price
-            if limit is None:
+        is_stop = "stop-loss" in order.reason
+        is_time = order.reason.startswith("time exit")
+        if side == "BUY":
+            if ask is None:
                 return None
-            if side == "BUY":
-                # Resting BUY is pegged at the ask: fill while the offer is
-                # still at or below that limit (no further-dump requirement).
-                if ask is None or ask > limit:
-                    return None
-                price, avail = limit, ask_qty
-            else:
-                # Resting SELL is pegged at the bid: fill while the bid is
-                # still at or above that limit (locks take-profit without
-                # needing another climb through the spread).
-                if bid is None or bid < limit:
-                    return None
-                price, avail = limit, bid_qty
-            kind = "resting"
+            if order.limit_price is not None and ask > order.limit_price:
+                return None
+            price, avail = ask, ask_qty
+            kind = "ioc"
         else:
-            # Marketable: cross the spread with adverse slippage.
-            if side == "BUY":
-                if ask is None:
-                    return None
-                price = min(Decimal(99), ask + self.cfg.sim_slippage_cents)
-                avail = ask_qty
-            else:
-                if bid is None:
-                    return None
+            if bid is None:
+                return None
+            if is_stop:
                 price = max(Decimal(0), bid - self.cfg.sim_slippage_cents)
                 avail = bid_qty
-            kind = "market"
+                kind = "ioc-stop"
+            elif is_time:
+                price, avail = bid, bid_qty
+                kind = "ioc-time"
+            else:
+                if (order.limit_price is not None
+                        and bid < order.limit_price):
+                    return None
+                price, avail = bid, bid_qty
+                kind = "ioc"
         avail = avail if avail is not None else Decimal(0)
         filled = min(Decimal(str(order.contracts)), Decimal(str(avail)))
         if filled <= 0:
@@ -149,22 +142,22 @@ class Executor:
             raise HaltError("submit_paper called outside paper mode")
         if self.has_pending(ticker):
             return None
-        if resting is None:
-            # BUY always rests; a SELL rests unless it is a stop-loss, which
-            # must cross immediately to exit risk.
-            resting = side == "BUY" or "stop-loss" not in reason
-        if resting and limit_price is None:
-            # Peg to the executable price the scalp needs: BUY at ask, SELL
-            # at bid. Far-touch pegs (bid for buys / ask for sells) systematically
-            # adverse-select dip entries and strand take-profits.
+        # ``resting`` is ignored: paper is always delayed IOC.
+        _ = resting
+        is_stop = "stop-loss" in reason
+        is_time = reason.startswith("time exit")
+        if limit_price is None and not is_stop and not is_time:
+            # Capture signal-time touch as IOC revalidation bound.
             bid, _, ask, _ = self.feed.top_of_book(ticker)
             limit_price = ask if side == "BUY" else bid
+        if is_stop or is_time:
+            limit_price = None
         submitted_at = self.clock() if now is None else now
         order = PendingPaperOrder(
             ticker=ticker, side=side,
             contracts=Decimal(str(contracts)),
             due_at=submitted_at + self.cfg.sim_latency_s,
-            reason=reason, resting=bool(resting),
+            reason=reason, resting=False,
             limit_price=(None if limit_price is None
                          else Decimal(str(limit_price))))
         self.pending_paper.append(order)
@@ -175,11 +168,19 @@ class Executor:
                    and (side is None or o.side == side)
                    for o in self.pending_paper)
 
+    def get_pending(self, ticker=None, side=None):
+        for order in self.pending_paper:
+            if ((ticker is None or order.ticker == ticker)
+                    and (side is None or order.side == side)):
+                return order
+        return None
+
     def pending_count(self, side=None):
         return sum(1 for order in self.pending_paper
                    if side is None or order.side == side)
 
     def process_due_paper_orders(self, now=None, ticker=None):
+        """Consume every due order with one IOC attempt; never retain GTC."""
         now = self.clock() if now is None else now
         results = []
         remaining = []
@@ -189,16 +190,8 @@ class Executor:
                 remaining.append(order)
                 continue
             fill = self._paper_fill(order)
-            if fill is not None:
-                results.append((order, fill))
-            elif order.resting:
-                # A resting maker order keeps working until it is crossed or
-                # canceled; it is never dropped or fabricated into a fill.
-                remaining.append(order)
-            else:
-                # A marketable order that cannot fill this quote is consumed;
-                # the engine re-evaluates and may resubmit on the next quote.
-                results.append((order, None))
+            # IOC: filled or canceled — never left working after the attempt.
+            results.append((order, fill))
         self.pending_paper = remaining
         return results
 

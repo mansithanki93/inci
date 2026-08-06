@@ -2608,20 +2608,19 @@ def test_analyzer_replays_shared_portfolio_exactly_once():
         for ts in range(1, 21):
             quote(float(ts), "ACTIVE", groups["TRAIN"], 60, 59, 61)
             quote(ts + 0.1, "BLOCKED", groups["TEST"], 60, 59, 61)
-        # Resting BUY pegs at the ask; resting TP SELL pegs at the bid.
-        # ACTIVE dips first and holds the single shared slot the whole time,
-        # so BLOCKED can never submit a resting entry in the shared replay.
-        quote(21.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)   # A resting BUY@53
+        # Delayed IOC BUY/SELL at touch. ACTIVE dips first and holds the
+        # single shared slot the whole time, so BLOCKED never enters.
+        quote(21.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)   # A IOC BUY due@22
         quote(21.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked: A pending
-        quote(22.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)   # ask<=53 -> A fills@53
+        quote(22.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)   # ask<=cap -> A fills@53
         quote(22.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked: A holds slot
         quote(23.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)
         quote(23.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked
         quote(24.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)
         quote(24.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked
-        quote(25.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # TP: A resting SELL@58
+        quote(25.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # TP: A IOC SELL due@26
         quote(25.1, "BLOCKED", groups["TEST"], 59, 58, 60)   # blocked: A still open
-        quote(26.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # bid>=58 -> A SELL@58
+        quote(26.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # bid>=floor -> A SELL@58
         # BLOCKED's quiet quote arrives only after ACTIVE fully traded. In
         # isolation BLOCKED completes BUY->SELL on its own dip/TP path; in the
         # shared replay it already missed every slot and does not dip here.
@@ -2695,7 +2694,7 @@ def test_aggregate_fee_rounding():
     projected = projected_scalp_pnl_usd(
         Decimal(50), Config().take_profit, Config().contracts_per_trade,
         Config().sim_slippage_cents, Config().balance_precision_usd)
-    # Resting path: entry at ask, TP exit at entry+TP (no adverse slippage).
+    # Delayed IOC path: entry at ask, TP exit at entry+TP (no adverse slip).
     entry = Decimal(50)
     exit_fill = entry + Config().take_profit
     expected = ((exit_fill - entry) * Config().contracts_per_trade / 100
@@ -2727,25 +2726,167 @@ def test_residual_valuation_respects_depth_and_slippage():
 
 def test_unknown_depth_never_means_unlimited_fill():
     cfg = Config(); cfg.sim_latency_s = 0
-    # Resting BUY: the market trades through the resting bid, but the crossing
-    # depth is unknown, so it cannot fill and stays working (never fabricated).
+    # IOC BUY: unknown ask depth cannot fill; the one attempt is canceled
+    # (never fabricated into an unlimited fill, never retained as GTC).
     ex = Executor(cfg, None,
                   BookFeed(bid=Decimal(50), bq=None,
                            ask=Decimal(50), aq=None),
                   clock=lambda: 0.0, sleep=lambda _: None)
     ex.submit_paper("T", "BUY", 20, now=0.0)
-    assert ex.process_due_paper_orders(0.0, ticker="T") == []
-    assert ex.has_pending("T", side="BUY")
-    ex.cancel_pending_paper()
+    assert ex.process_due_paper_orders(0.0, ticker="T")[0][1] is None
+    assert not ex.has_pending("T", side="BUY")
     # Marketable stop-loss SELL: unknown bid depth cannot fill either.
     ex.submit_paper("T", "SELL", 20, "stop-loss", now=0.0)
     assert ex.process_due_paper_orders(0.0, ticker="T")[0][1] is None
+    assert not ex.has_pending("T", side="SELL")
     try:
         ex.execute("T", "BUY", 20)
         assert False
     except HaltError as error:
         assert "blocking paper execution" in str(error)
-    print("PASS unknown depth cannot fill; blocking paper bypass rejected")
+    print("PASS unknown depth cannot fill; IOC miss cancels; blocking "
+          "paper bypass rejected")
+
+
+def test_stop_deadline_does_not_slide_while_pending():
+    """A pending stop must keep its original due_at across later quotes."""
+    from collections import defaultdict
+    from strategy import Position
+
+    class Feed:
+        def __init__(self):
+            self.history = defaultdict(list)
+            self.book = (Decimal(40), Decimal(20),
+                         Decimal(42), Decimal(20))
+
+        def top_of_book(self, ticker):
+            return self.book
+
+    now = [10.0]
+    cfg = Config(); cfg.sim_latency_s = 1.0
+    feed = Feed()
+    ex = Executor(cfg, None, feed, clock=lambda: now[0], sleep=lambda _: None)
+    strat = ScalpStrategy(cfg)
+    strat.positions["T"] = Position(
+        "T", Decimal(50), Decimal(5), opened_at=0.0,
+        entry_fee_usd=Decimal("0.01"))
+    ctx = Context(cfg, feed, strat, ex, None, Safety(cfg),
+                  clock=lambda: now[0])
+
+    process_tick(ctx, "T", Decimal(41), Decimal(40), Decimal(42),
+                 observed_at=10.0)
+    pending = ex.get_pending("T", side="SELL")
+    assert pending is not None
+    assert "stop-loss" in pending.reason
+    assert pending.due_at == 11.0
+
+    # Later quotes while the stop is still pending must NOT cancel/resubmit
+    # with a fresh due_at (deadline sliding).
+    for ts in (10.3, 10.6, 10.9):
+        now[0] = ts
+        process_tick(ctx, "T", Decimal(41), Decimal(40), Decimal(42),
+                     observed_at=ts)
+        still = ex.get_pending("T", side="SELL")
+        assert still is pending
+        assert still.due_at == 11.0
+
+    now[0] = 11.0
+    process_tick(ctx, "T", Decimal(41), Decimal(40), Decimal(42),
+                 observed_at=11.0)
+    assert "T" not in strat.positions
+    assert not ex.has_pending("T")
+    print("PASS pending stop due_at does not slide across quotes")
+
+
+def test_time_exit_upgrades_working_take_profit():
+    """Max-hold must replace a pending TP so the 300s bound is binding."""
+    from collections import defaultdict
+    from strategy import Position
+
+    class Feed:
+        def __init__(self):
+            self.history = defaultdict(list)
+            self.book = (Decimal(52), Decimal(20),
+                         Decimal(54), Decimal(20))
+
+        def top_of_book(self, ticker):
+            return self.book
+
+    now = [299.0]
+    cfg = Config(); cfg.sim_latency_s = 5.0; cfg.max_hold_seconds = 300
+    feed = Feed()
+    ex = Executor(cfg, None, feed, clock=lambda: now[0], sleep=lambda _: None)
+    strat = ScalpStrategy(cfg)
+    # Bid already at TP (+5) near max-hold; TP is submitted with due_at
+    # after the hold limit so it is still pending when time exit fires.
+    strat.positions["T"] = Position(
+        "T", Decimal(47), Decimal(4), opened_at=0.0,
+        entry_fee_usd=Decimal("0.01"))
+    ctx = Context(cfg, feed, strat, ex, None, Safety(cfg),
+                  clock=lambda: now[0])
+    process_tick(ctx, "T", Decimal(53), Decimal(52), Decimal(54),
+                 observed_at=299.0)
+    tp = ex.get_pending("T", side="SELL")
+    assert tp is not None and "take-profit" in tp.reason
+    assert tp.due_at == 304.0
+
+    # Past max hold while TP is still pending: time exit upgrades once.
+    now[0] = 300.5
+    feed.book = (Decimal(50), Decimal(20), Decimal(52), Decimal(20))
+    process_tick(ctx, "T", Decimal(51), Decimal(50), Decimal(52),
+                 observed_at=300.5)
+    timed = ex.get_pending("T", side="SELL")
+    assert timed is not None
+    assert timed.reason.startswith("time exit")
+    assert timed.due_at == 305.5
+    assert timed is not tp
+    print("PASS time exit upgrades a pending take-profit once")
+
+
+def test_ioc_ask_cap_miss_cancels_entry():
+    """If the ask worsens past the signal cap, the delayed IOC misses."""
+    from collections import defaultdict
+
+    class MutableFeed:
+        def __init__(self):
+            self.history = defaultdict(list)
+            self.book = (Decimal(50), Decimal(20),
+                         Decimal(53), Decimal(20))
+
+        def top_of_book(self, ticker):
+            return self.book
+
+    cfg = Config(); cfg.sim_latency_s = 0
+    feed = MutableFeed()
+    ex = Executor(cfg, None, feed, clock=lambda: 0.0, sleep=lambda _: None)
+    order = ex.submit_paper("T", "BUY", 10, "dip", now=0.0)
+    assert order.limit_price == Decimal(53)
+    # Worse ask at due time: one attempt, miss, canceled.
+    feed.book = (Decimal(54), Decimal(20), Decimal(56), Decimal(20))
+    assert ex.process_due_paper_orders(0.0, ticker="T")[0][1] is None
+    assert not ex.has_pending("T")
+    print("PASS IOC entry miss on worsened ask cancels remainder")
+
+def test_entry_edge_uses_executable_ask_depth():
+    """Edge gate and submitted size must use visible ask depth, not hope."""
+    cfg = Config(); cfg.contracts_per_trade = 20
+    strat = ScalpStrategy(cfg)
+    hist = [(float(ts), Decimal(60)) for ts in range(-20, 0)]
+    # Thin book: only 3 contracts offered — size and projection must use 3.
+    sig = strat.check_entry(
+        "T", hist, 0.0, Decimal(52), Decimal(51), Decimal(53),
+        ask_qty=Decimal(3))
+    assert sig is not None
+    assert sig["contracts"] == Decimal(3)
+    assert "size 3" in sig["reason"]
+    # Unknown / zero depth cannot enter.
+    assert strat.check_entry(
+        "T", hist, 0.0, Decimal(52), Decimal(51), Decimal(53),
+        ask_qty=None) is None
+    assert strat.check_entry(
+        "T", hist, 0.0, Decimal(52), Decimal(51), Decimal(53),
+        ask_qty=0) is None
+    print("PASS entry sizes and edges against executable ask depth")
 
 
 def test_pricefeed_uses_installed_event_identity():
@@ -2832,12 +2973,12 @@ def test_replay_exact_paper_path_and_residual():
             w.writerow(research_row(
                 cfg=cfg, session="RESIDUAL", ts=t,
                 mid=60, bid=59, ask=61, bid_qty=500, ask_qty=500))
-        # Dip triggers a resting BUY pegged at the ask (53).
+        # Dip triggers a delayed IOC BUY (signal ask cap 53).
         w.writerow(research_row(
             cfg=cfg, session="RESIDUAL", ts=t + 1.5,
             mid=52, bid=51, ask=53, bid_qty=500, ask_qty=500))
-        # Ask still at/below the resting limit: BUY fills at 53, depth-limited
-        # to the ask size (6).
+        # Due quote: BUY fills at the then-current ask (51), depth-limited
+        # to the ask size (6); unfilled remainder is canceled (IOC).
         w.writerow(research_row(
             cfg=cfg, session="RESIDUAL", ts=t + 2.6,
             mid=50, bid=49, ask=51, bid_qty=500, ask_qty=6))
@@ -2848,12 +2989,12 @@ def test_replay_exact_paper_path_and_residual():
                 mid=40, bid=39, ask=41, bid_qty=0, ask_qty=500))
     r = replay(path, cfg=cfg)
     buys = [tr for tr in r["trades"] if tr[1] == "BUY"]
-    assert buys and buys[0][2] == Decimal(53)       # resting ask limit
+    assert buys and buys[0][2] == Decimal(51)       # current ask at fill
     assert buys[0][3] == Decimal(6)                 # depth-limited
     assert not any(tr[1] == "SELL" for tr in r["trades"])   # zero bid depth
     assert r["residual_contracts"] == Decimal(6)
     assert r["residual_marked"] < 0                 # loss NOT hidden
-    print("PASS replay: exact paper path (resting fill at ask limit, depth "
+    print("PASS replay: exact paper path (IOC fill at current ask, depth "
           "limit) and residual inventory counted in P&L")
 
 
@@ -2903,8 +3044,8 @@ def test_pending_paper_order_uses_first_observed_due_quote():
     assert not strat.positions and ex.has_pending("T")
 
     now[0] = 1.1
-    # First observed DUE quote for T with ask still at/below the resting ask
-    # limit (53): BUY fills at 53, depth-limited to the ask size (7).
+    # First observed DUE quote for T with ask still at/below the signal cap
+    # (53): BUY fills at the current ask (53), depth-limited to size (7).
     feed.apply(1.1, "T", Decimal(52), Decimal(51), Decimal(50),
                Decimal(53), Decimal(7))
     process_tick(ctx, "T", Decimal(52), Decimal(51), Decimal(53))
@@ -2921,8 +3062,8 @@ def test_quote_timestamp_is_causal_at_latency_boundary():
     class Feed:
         def __init__(self):
             self.history = defaultdict(list)
-            # Locked at the resting bid so the maker BUY is always crossable;
-            # only the due-time boundary decides whether it fills.
+            # Locked book so the IOC BUY is always fillable; only the
+            # due-time boundary decides whether it fills.
             self.book = (Decimal(51), Decimal(20),
                          Decimal(51), Decimal(20))
 
@@ -3018,7 +3159,7 @@ def test_replay_eof_never_fabricates_flatten_fills():
         w.writerow(research_row(
             cfg=cfg, session="EOF", ts=21, mid=52, bid=51, ask=53,
             bid_qty=100, ask_qty=100))
-        # Ask still at/below the resting ask limit; depth-limited fill.
+        # Ask still at/below the signal cap; depth-limited IOC fill.
         w.writerow(research_row(
             cfg=cfg, session="EOF", ts=22, mid=52, bid=51, ask=53,
             bid_qty=100, ask_qty=5))
@@ -3039,16 +3180,16 @@ def test_pricefeed_and_replayfeed_produce_identical_paper_fills():
         rows.append((float(ts), "T", Decimal(60), Decimal(59),
                      Decimal(61), Decimal(100), Decimal(100)))
     rows += [
-        # Dip: resting BUY pegged at the ask (53).
+        # Dip: delayed IOC BUY (signal ask cap 53).
         (21.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(100)),
-        # Ask still at/below limit; depth-limited resting fill at 53.
+        # Due: depth-limited IOC fill at current ask 53.
         (22.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(6)),
-        # Take-profit: resting SELL pegged at the bid (58).
+        # Take-profit: delayed IOC SELL (signal bid floor 58).
         (24.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
-        # Bid still at/above limit; resting SELL fills at 58.
+        # Due: IOC SELL fills at current bid 58.
         (25.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
     ]
@@ -3118,16 +3259,16 @@ def test_actual_runtime_driver_matches_replay():
     rows = [(float(ts), "T", Decimal(60), Decimal(59), Decimal(61),
              Decimal(100), Decimal(100)) for ts in range(1, 21)]
     rows += [
-        # Dip: resting BUY pegged at the ask (53).
+        # Dip: delayed IOC BUY (signal ask cap 53).
         (21.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(100)),
-        # Ask still at/below limit; depth-limited resting fill at 53.
+        # Due: depth-limited IOC fill at current ask 53.
         (22.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(6)),
-        # Take-profit: resting SELL pegged at the bid (58).
+        # Take-profit: delayed IOC SELL (signal bid floor 58).
         (24.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
-        # Bid still at/above limit; resting SELL fills at 58.
+        # Due: IOC SELL fills at current bid 58.
         (25.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
     ]
@@ -4730,15 +4871,15 @@ def test_replay_enforces_logged_market_lifecycle():
             writer.writerow(research_row(
                 cfg=cfg, session=name, ts=21, mid=52, bid=51, ask=53,
                 close_ts=close_ts, can_close_early=early))
-            # Ask still at/below resting ask limit so the BUY fills.
+            # Ask still at/below signal cap so the delayed IOC BUY fills.
             writer.writerow(research_row(
                 cfg=cfg, session=name, ts=22, mid=52, bid=51, ask=53,
                 close_ts=close_ts, can_close_early=early))
-            # Take-profit: resting SELL pegged at the bid.
+            # Take-profit: delayed IOC SELL at the bid floor.
             writer.writerow(research_row(
                 cfg=cfg, session=name, ts=23, mid=59, bid=58, ask=60,
                 close_ts=close_ts, can_close_early=early))
-            # Bid still at/above resting bid limit so the SELL fills.
+            # Bid still at/above floor so the IOC SELL fills.
             writer.writerow(research_row(
                 cfg=cfg, session=name, ts=24, mid=59, bid=58, ask=60,
                 close_ts=close_ts, can_close_early=early))
@@ -6538,7 +6679,7 @@ def test_delayed_paper_fill_logs_full_provenance():
             self.history["T"].append((1.0, Decimal(50)))
 
         def top_of_book(self, ticker):
-            # Ask still at the resting ask limit so the BUY can fill.
+            # Ask still at/below the signal cap so the IOC BUY can fill.
             return Decimal(49), Decimal(10), Decimal(49), Decimal(10)
 
         def lifecycle(self, ticker):
@@ -6607,7 +6748,7 @@ def test_immediate_buy_sell_paths_log_full_provenance():
         def check_exit(self, ticker, bid, now=None):
             return ({"reason": "stop"} if self.side == "SELL" else None)
 
-        def check_entry(self, *args):
+        def check_entry(self, *args, **kwargs):
             return ({"reason": "dip"} if self.side == "BUY" else None)
 
         def record_fill(self, ticker, side, price, count, fee, **kwargs):
@@ -7473,6 +7614,10 @@ if __name__ == "__main__":
     test_aggregate_fee_rounding()
     test_residual_valuation_respects_depth_and_slippage()
     test_unknown_depth_never_means_unlimited_fill()
+    test_stop_deadline_does_not_slide_while_pending()
+    test_time_exit_upgrades_working_take_profit()
+    test_ioc_ask_cap_miss_cancels_entry()
+    test_entry_edge_uses_executable_ask_depth()
     test_subcent_sell_fill_is_never_improved()
     test_pricefeed_uses_installed_event_identity()
     test_market_envelope_to_research_log_preserves_event_identity()
@@ -7519,4 +7664,4 @@ if __name__ == "__main__":
     test_replay_enforces_logged_market_lifecycle()
     test_termination_signals_route_through_interrupt()
     test_live_and_demo_disabled()
-    print("\nALL TESTS PASS (202 tests)")
+    print("\nALL TESTS PASS (206 tests)")

@@ -1,7 +1,9 @@
 """Inci's scalp logic. Decisions use EXECUTABLE prices (fix #3):
 entries are evaluated at the ask, exits at the bid. Entry is skipped
 unless the take-profit clears fees at that entry price (fix #4).
-Positions support partial fills (fix #2) and P&L is net of fees.
+Size is capped to visible ask depth so the edge gate matches what a
+delayed IOC can actually lift. Positions support partial fills (fix #2)
+and P&L is net of fees.
 """
 import time
 from dataclasses import dataclass
@@ -39,7 +41,8 @@ class ScalpStrategy:
         return self.realized_pnl
 
     # ---------- Entry: judged at the ASK ----------
-    def check_entry(self, ticker, history, now_ts, mid, bid, ask):
+    def check_entry(self, ticker, history, now_ts, mid, bid, ask,
+                    ask_qty=None):
         """history = (ts, mid) ticks strictly BEFORE this one."""
         self.refresh_daily_pnl(now_ts)
         if mid is None or bid is None or ask is None:
@@ -54,20 +57,29 @@ class ScalpStrategy:
             return None
         if self.realized_pnl <= -Decimal(str(self.cfg.max_daily_loss_usd)):
             return None
+        if ask_qty is None:
+            return None
+        try:
+            depth = Decimal(str(ask_qty))
+        except Exception:
+            return None
+        if depth <= 0:
+            return None
+        size = min(Decimal(str(self.cfg.contracts_per_trade)), depth)
         projected = projected_scalp_pnl_usd(
-            ask, self.cfg.take_profit, self.cfg.contracts_per_trade,
+            ask, self.cfg.take_profit, size,
             self.cfg.sim_slippage_cents,
             self.cfg.balance_precision_usd)
-        # Match the aggregate, slipped paper execution rather than a
-        # one-contract unslipped approximation.
+        # Match the aggregate delayed-IOC paper path on executable size.
         if projected <= 0:
             return None
         dip = dip_signal(history, now_ts, mid,
                          self.cfg.dip_threshold, self.cfg.lookback_seconds)
         if dip is not None:
             return {"action": "BUY",
+                    "contracts": size,
                     "reason": f"dip {dip:.1f}c; entry ask {ask}c, "
-                              f"projected net ${projected:+.4f}"}
+                              f"size {size}, projected net ${projected:+.4f}"}
         return None
 
     # ---------- Exit: judged at the BID ----------
