@@ -35,6 +35,8 @@ RESEARCH_CONFIG_FIELDS = (
     "espn_gate_enabled", "espn_leagues", "espn_cache_s",
     "espn_min_model_prob", "espn_min_edge", "prefer_scoreboard_bind",
     "one_contract_per_event",
+    "sibling_spike_enabled", "sibling_spike_cents",
+    "sibling_spike_lookback_s",
     "live_tennis_enabled", "live_tennis_tours", "live_tennis_cache_s",
     "live_tennis_include_upcoming", "live_tennis_ticker_substrings",
 )

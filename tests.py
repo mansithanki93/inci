@@ -5691,6 +5691,8 @@ def test_discovery_keeps_one_contract_per_event():
         sibling_event + "-B", other_event + "-A")
     assert result.stats["skipped_event_siblings"] == 1
     assert result.stats["selected"] == 2
+    assert result.stats["watch_siblings"] == 1
+    assert result.watch_tickers == (sibling_event + "-A",)
     print("PASS discovery keeps one contract per event")
 
 
@@ -5737,7 +5739,7 @@ def test_dynamic_discovery_filters_books_and_reports_stable_stats():
         "skip_market_no_depth": 2, "skip_market_wide_spread": 1,
         "skip_milestone_off_category": 1, "skip_milestone_outside_day": 1,
         "skip_series_off_category": 1, "skip_unsupported_market_scalar": 2,
-        "skipped_event_siblings": 0,
+        "skipped_event_siblings": 0, "watch_siblings": 0,
     }
     malformed = _dynamic_discovery_client(
         series=({"series_ticker": "KXATP", "category": "Sports",
@@ -6332,7 +6334,8 @@ class _Task4RunFeed:
             raise self.subscribe_error
 
 
-def _task4_clean_run_loop(ctx, reconciler, tickers):
+def _task4_clean_run_loop(ctx, reconciler, tickers, sleep=None,
+                          quote_tickers=None):
     ctx.log.end(clean=True, reason="operator interrupt")
     return True
 
@@ -6580,7 +6583,8 @@ def test_run_session_discovers_and_reports_only_once():
         "  utc=[1970-01-01T00:00:00Z, 1970-01-02T00:00:00Z)",
         "[discover] series_rows=3 milestone_pages=2 milestone_rows=4 "
         "event_pages=1 event_rows=2 candidates=1 bindable_candidates=0 "
-        "skipped_event_siblings=0 selected=1 selected_bindable=0",
+        "skipped_event_siblings=0 watch_siblings=0 selected=1 "
+        "selected_bindable=0",
         "  skips=skip_a=1, skip_z=2",
         "[discover] Tennis | League | Game | T | "
         "1970-01-01T01:00:00Z | bid=50 ask=52 spread=2 "
@@ -7831,6 +7835,7 @@ if __name__ == "__main__":
         test_parse_live_tennis_match_itf,
         test_display_player_name_from_kalshi_title,
         test_rank_contracts_prefer_bind_tiers,
+        test_mid_rise_in_lookback_and_sibling_spike_block,
         test_gate_binds_itf_via_live_tennis_secondary,
     )
     test_names_match_surname()
@@ -7840,5 +7845,6 @@ if __name__ == "__main__":
     test_parse_live_tennis_match_itf()
     test_display_player_name_from_kalshi_title()
     test_rank_contracts_prefer_bind_tiers()
+    test_mid_rise_in_lookback_and_sibling_spike_block()
     test_gate_binds_itf_via_live_tennis_secondary()
-    print("\nALL TESTS PASS (218 tests)")
+    print("\nALL TESTS PASS (219 tests)")

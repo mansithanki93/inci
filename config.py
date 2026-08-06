@@ -93,6 +93,12 @@ class Config:
     # (no both-sides of the same match). Among siblings, discovery prefers
     # the better scoreboard model edge when a gate score is available.
     one_contract_per_event: bool = True
+    # Block entry when the opposite YES (sibling) mid has spiked up within
+    # the lookback — e.g. underdog 5c→40c while we buy the favorite.
+    # Requires quoting watch_contracts (siblings) alongside traded markets.
+    sibling_spike_enabled: bool = True
+    sibling_spike_cents: int = 15
+    sibling_spike_lookback_s: float = 45.0
     # Live Tennis API secondary feed (ITF / optional challenger). Key from
     # live_tennis_api_key or env LIVETENNISAPI_KEY / LIVETENNIS_API_KEY.
     live_tennis_enabled: bool = True
@@ -194,7 +200,8 @@ class Config:
             number(name, positive=True)
         for name in ("sim_latency_s", "sim_slippage_cents", "max_spread",
                      "tp_trail_cents", "espn_cache_s", "espn_min_model_prob",
-                     "espn_min_edge", "live_tennis_cache_s"):
+                     "espn_min_edge", "live_tennis_cache_s",
+                     "sibling_spike_cents", "sibling_spike_lookback_s"):
             number(name, nonnegative=True)
         if number("espn_min_model_prob", nonnegative=True) > Decimal(1):
             raise ValueError("espn_min_model_prob must be <= 1")
@@ -211,6 +218,8 @@ class Config:
             raise ValueError("prefer_scoreboard_bind must be a bool")
         if not isinstance(self.one_contract_per_event, bool):
             raise ValueError("one_contract_per_event must be a bool")
+        if not isinstance(self.sibling_spike_enabled, bool):
+            raise ValueError("sibling_spike_enabled must be a bool")
         if not isinstance(self.live_tennis_enabled, bool):
             raise ValueError("live_tennis_enabled must be a bool")
         if not isinstance(self.live_tennis_include_upcoming, bool):
@@ -241,7 +250,7 @@ class Config:
         if maximum + take_profit > Decimal(100):
             raise ValueError("max_price + take_profit cannot exceed 100")
         for name in ("dip_threshold", "take_profit", "stop_loss",
-                     "max_spread", "tp_trail_cents"):
+                     "max_spread", "tp_trail_cents", "sibling_spike_cents"):
             if number(name, nonnegative=True) > Decimal(100):
                 raise ValueError(f"{name} cannot exceed 100 cents")
         contracts = number("contracts_per_trade", positive=True)
@@ -283,7 +292,7 @@ class Config:
                      "tp_trail_cents",
                      "contracts_per_trade", "max_daily_loss_usd",
                      "min_price", "max_price", "max_spread",
-                     "sim_slippage_cents"):
+                     "sim_slippage_cents", "sibling_spike_cents"):
             setattr(self, name, Decimal(str(getattr(self, name))))
         for name in ("lookback_seconds", "max_hold_seconds",
                      "sim_latency_s", "poll_interval", "fill_timeout_s",
@@ -291,7 +300,7 @@ class Config:
                      "stale_data_s", "reconcile_every_s",
                      "close_buffer_seconds", "espn_cache_s",
                      "espn_min_model_prob", "espn_min_edge",
-                     "live_tennis_cache_s"):
+                     "live_tennis_cache_s", "sibling_spike_lookback_s"):
             setattr(self, name, float(getattr(self, name)))
         self.espn_leagues = tuple(self.espn_leagues)
         self.live_tennis_tours = tuple(self.live_tennis_tours)

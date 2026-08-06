@@ -70,6 +70,38 @@ def _same_event_exposure(ctx, ticker):
     return None
 
 
+def _sibling_spike_block(ctx, ticker, now):
+    """Block when an opposite-side mid spiked up inside the lookback window."""
+    if not bool(getattr(ctx.cfg, "sibling_spike_enabled", True)):
+        return None
+    siblings = ()
+    if hasattr(ctx.feed, "sibling_tickers"):
+        try:
+            siblings = ctx.feed.sibling_tickers(ticker) or ()
+        except Exception:  # noqa: BLE001
+            siblings = ()
+    if not siblings:
+        return None
+    threshold = Decimal(str(getattr(ctx.cfg, "sibling_spike_cents", 15)))
+    lookback = float(getattr(
+        ctx.cfg, "sibling_spike_lookback_s",
+        getattr(ctx.cfg, "lookback_seconds", 45.0)))
+    worst = None
+    for sibling in siblings:
+        try:
+            rise = ctx.feed.mid_rise_in_lookback(sibling, now, lookback)
+        except Exception:  # noqa: BLE001
+            continue
+        rise = Decimal(str(rise))
+        if rise >= threshold and (worst is None or rise > worst[0]):
+            worst = (rise, sibling)
+    if worst is None:
+        return None
+    rise, sibling = worst
+    return (f"sibling_spike {sibling} mid +{rise}c "
+            f">= {threshold}c in {lookback:.0f}s")
+
+
 def sync_execution_observation(ctx, ticker):
     """Move the executor's fresh requote into the risk mark immediately."""
     observation = getattr(ctx.executor, "last_observation", None)
@@ -212,6 +244,12 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
                     f"[entry] BLOCKED {ticker}: already exposed on "
                     f"same event via {conflict}")
                 return
+        spike = _sibling_spike_block(ctx, ticker, now)
+        if spike is not None:
+            set_entry_status(
+                ctx, ticker, "blocked:sibling_spike",
+                f"[entry] BLOCKED {ticker}: {spike}")
+            return
         gate = getattr(ctx, "espn_gate", None)
         if gate is not None and gate.enabled():
             player_name = ticker

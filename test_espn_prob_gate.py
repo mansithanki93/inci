@@ -183,6 +183,60 @@ def test_rank_contracts_prefer_bind_tiers():
     print("PASS bind-prefer ranking tiers")
 
 
+def test_mid_rise_in_lookback_and_sibling_spike_block():
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from market_data import PriceFeed
+    from engine import Context, _sibling_spike_block
+    from sports_discovery import ContractProvenance, SelectedContract, DiscoveryResult
+
+    def contract(ticker, event):
+        return SelectedContract(
+            ticker=ticker, title=ticker, game_title="game",
+            bid=Decimal(50), ask=Decimal(51),
+            bid_size=Decimal(10), ask_size=Decimal(10),
+            provenance=ContractProvenance(
+                sport="Tennis", league=None, series_ticker="KXITF",
+                milestone_id="m", event_ticker=event,
+                scheduled_start_ts=1.0))
+
+    discovery = DiscoveryResult(
+        contracts=(contract("FAV", "E1"),),
+        selected_sports=("Tennis",),
+        local_timezone="UTC",
+        session_start_local="1970-01-01T00:00:00+00:00",
+        session_end_local="1970-01-02T00:00:00+00:00",
+        session_start_utc=0.0, session_end_utc=86400.0,
+        stats={"selected": 1},
+        watch_contracts=(contract("DOG", "E1"),),
+    )
+    feed = PriceFeed(Config(), client=object())
+    feed.install_discovery(discovery)
+    feed.history["DOG"].extend((
+        (100.0, Decimal("5")),
+        (110.0, Decimal("20")),
+        (120.0, Decimal("40")),
+    ))
+    assert feed.mid_rise_in_lookback("DOG", 120.0, 45.0) == Decimal("35")
+    assert feed.sibling_tickers("FAV") == ("DOG",)
+
+    cfg = Config(sibling_spike_enabled=True, sibling_spike_cents=15,
+                 sibling_spike_lookback_s=45)
+    ctx = Context(cfg, feed, strategy=SimpleNamespace(positions={}),
+                  executor=SimpleNamespace(pending_paper=[]),
+                  log=None, safety=None)
+    reason = _sibling_spike_block(ctx, "FAV", 120.0)
+    assert reason is not None and "sibling_spike" in reason and "DOG" in reason
+    assert "+35" in reason or "+35.0" in reason
+
+    cfg_off = Config(sibling_spike_enabled=False, sibling_spike_cents=15)
+    ctx_off = Context(cfg_off, feed, strategy=SimpleNamespace(positions={}),
+                      executor=SimpleNamespace(pending_paper=[]),
+                      log=None, safety=None)
+    assert _sibling_spike_block(ctx_off, "FAV", 120.0) is None
+    print("PASS sibling mid-rise spike block")
+
+
 def test_gate_binds_itf_via_live_tennis_secondary():
     cfg = Config(
         espn_gate_enabled=True,
@@ -241,5 +295,6 @@ if __name__ == "__main__":
     test_parse_live_tennis_match_itf()
     test_display_player_name_from_kalshi_title()
     test_rank_contracts_prefer_bind_tiers()
+    test_mid_rise_in_lookback_and_sibling_spike_block()
     test_gate_binds_itf_via_live_tennis_secondary()
     print("\nALL ESPN GATE TESTS PASS")
