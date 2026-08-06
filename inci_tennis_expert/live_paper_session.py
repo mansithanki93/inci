@@ -213,7 +213,13 @@ class LivePaperScoreBatchInput:
     observed_monotonic_ns: int
 
     def __post_init__(self) -> None:
-        if type(self.observations) is not tuple or any(type(item) is not LivePaperSourceObservation for item in self.observations):
+        if (
+            type(self.observations) is not tuple
+            or len(self.observations) > _MAX_JSON_COLLECTION
+            or any(type(item) is not LivePaperSourceObservation for item in self.observations)
+        ):
+            if type(self.observations) is tuple and len(self.observations) > _MAX_JSON_COLLECTION:
+                _fail("input_collection")
             _fail("score_input")
         _clocks(self.observed_wall_ns, self.observed_monotonic_ns)
 
@@ -319,7 +325,7 @@ class LivePaperRecord:
             or not _is_sha(self.record_sha256)
         ):
             _fail("record")
-        payload_projection = _project(self.payload)
+        payload_projection = _bounded_project(self.payload)
         if self.payload_sha256 != _digest(_canonical_json(payload_projection)):
             _fail("payload_sha256")
         if self.record_sha256 != _record_digest(
@@ -330,6 +336,7 @@ class LivePaperRecord:
             payload_sha256=self.payload_sha256,
         ):
             _fail("record_sha256")
+        _encode_record_line(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,6 +585,27 @@ def _validate_json_limits(value: object) -> None:
             _fail("json_strings")
 
 
+def _bounded_project(value: object) -> object:
+    try:
+        projection = _project(value)
+        _validate_json_limits(projection)
+        return projection
+    except LivePaperSessionError:
+        raise
+    except RecursionError as error:
+        raise LivePaperSessionError("json_depth") from error
+    except (OverflowError, MemoryError) as error:
+        raise LivePaperSessionError("json_resource") from error
+
+
+def _bounded_canonical_json(value: object, *, maximum_bytes: int, too_large: str) -> bytes:
+    _validate_json_limits(value)
+    raw = _canonical_json(value)
+    if len(raw) > maximum_bytes:
+        _fail(too_large)
+    return raw
+
+
 def _parse_json(raw: bytes, *, maximum_bytes: int = _MAX_CHECKPOINT_BYTES) -> object:
     if type(raw) is not bytes or len(raw) > maximum_bytes:
         _fail("json_too_large")
@@ -614,8 +642,10 @@ def _record_digest(*, record_ordinal: int, previous_record_sha256: str, kind: Li
 
 
 def _make_record(state: LivePaperSessionState, kind: LivePaperRecordKind, body: object) -> tuple[LivePaperSessionState, LivePaperRecord]:
+    if state.record_count >= _MAX_RECORDS:
+        _fail("record_count")
     payload = _LivePaperPayload(state.config if state.record_count == 0 else None, body)
-    projection = _project(payload)
+    projection = _bounded_project(payload)
     payload_sha = _digest(_canonical_json(projection))
     ordinal = state.record_count + 1
     record_sha = _record_digest(
@@ -635,6 +665,7 @@ def _make_record(state: LivePaperSessionState, kind: LivePaperRecordKind, body: 
         payload_sha,
         record_sha,
     )
+    _encode_record_line(record)
     return replace(state, record_head_sha256=record_sha, record_count=ordinal), record
 
 
@@ -1052,21 +1083,41 @@ def _record_envelope(record: LivePaperRecord) -> dict[str, object]:
         "record_ordinal": record.record_ordinal,
         "previous_record_sha256": record.previous_record_sha256,
         "kind": record.kind.value,
-        "payload": _project(record.payload),
+        "payload": _bounded_project(record.payload),
         "payload_sha256": record.payload_sha256,
         "record_sha256": record.record_sha256,
     }
 
 
+def _encode_record_line(record: LivePaperRecord) -> bytes:
+    return _bounded_canonical_json(
+        _record_envelope(record),
+        maximum_bytes=_MAX_RECORD_LINE_BYTES,
+        too_large="record_too_large",
+    ) + b"\n"
+
+
 def encode_live_paper_records(records: tuple[LivePaperRecord, ...]) -> bytes:
-    if type(records) is not tuple or any(type(record) is not LivePaperRecord for record in records):
+    if type(records) is not tuple or not records or any(type(record) is not LivePaperRecord for record in records):
         _fail("records")
+    if len(records) > _MAX_RECORDS:
+        _fail("record_count")
     previous = _ZERO_SHA256
+    chunks: list[bytes] = []
+    total_bytes = 0
     for ordinal, record in enumerate(records, 1):
         if record.record_ordinal != ordinal or record.previous_record_sha256 != previous:
             _fail("record_chain")
+        line = _encode_record_line(record)
+        total_bytes += len(line)
+        if total_bytes > _MAX_LOG_BYTES:
+            _fail("log_too_large")
+        chunks.append(line)
         previous = record.record_sha256
-    return b"".join(_canonical_json(_record_envelope(record)) + b"\n" for record in records)
+    try:
+        return b"".join(chunks)
+    except (OverflowError, MemoryError) as error:
+        raise LivePaperSessionError("json_resource") from error
 
 
 def _decode_records(raw: bytes) -> tuple[LivePaperRecord, ...]:
@@ -1168,7 +1219,7 @@ def _checkpoint_digest(payload_projection: object, payload_sha256: str) -> str:
 def encode_live_paper_checkpoint(state: LivePaperSessionState) -> bytes:
     if type(state) is not LivePaperSessionState:
         _fail("state")
-    payload = _project(state)
+    payload = _bounded_project(state)
     payload_sha = _digest(_canonical_json(payload))
     envelope = {
         "schema": _CHECKPOINT_SCHEMA,
@@ -1177,7 +1228,11 @@ def encode_live_paper_checkpoint(state: LivePaperSessionState) -> bytes:
         "payload_sha256": payload_sha,
         "checkpoint_sha256": _checkpoint_digest(payload, payload_sha),
     }
-    return _canonical_json(envelope)
+    return _bounded_canonical_json(
+        envelope,
+        maximum_bytes=_MAX_CHECKPOINT_BYTES,
+        too_large="checkpoint_too_large",
+    )
 
 
 def decode_live_paper_checkpoint(raw: bytes) -> LivePaperSessionState:

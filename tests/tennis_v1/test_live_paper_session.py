@@ -553,6 +553,85 @@ class LivePaperSessionTests(unittest.TestCase):
                 with self.assertRaisesRegex(api.LivePaperSessionError, "replay_mismatch"):
                     api.replay_live_paper_records(api.encode_live_paper_records(tuple(forged_records)))
 
+    def test_producer_rejects_oversized_causal_inputs_before_emission(self) -> None:
+        """Catches a local score batch or payload producing evidence replay cannot decode."""
+        api = _api()
+        observation = _score_input(api).observations[0]
+        with self.assertRaisesRegex(api.LivePaperSessionError, "input_collection"):
+            api.LivePaperScoreBatchInput(
+                (observation,) * 10_001,
+                2_000_000_000,
+                2_000_000_000,
+            )
+
+        state = api.open_live_paper_session(_config(api))
+        oversized = api.LivePaperTerminalInput(
+            "x" * (1024 * 1024 + 1),
+            2_000_000_000,
+            2_000_000_000,
+        )
+        with self.assertRaisesRegex(api.LivePaperSessionError, "json_string"):
+            api.reduce_live_paper_input(state, oversized)
+
+        deeply_nested: object = "leaf"
+        for _ in range(2_000):
+            deeply_nested = (deeply_nested,)
+        with self.assertRaisesRegex(api.LivePaperSessionError, "json_depth"):
+            api._make_record(
+                state,
+                api.LivePaperRecordKind.REJECTION,
+                deeply_nested,
+            )
+        usable, rows = api.reduce_live_paper_input(
+            state,
+            api.LivePaperTerminalInput("stop", 2_000_000_000, 2_000_000_000),
+        )
+        self.assertEqual(rows[0].record_ordinal, 1)
+        self.assertTrue(usable.terminal)
+
+    def test_producer_bounds_record_count_total_log_and_checkpoint_tree(self) -> None:
+        """Catches encoders returning oversized blobs or trees rejected by their decoders."""
+        api = _api()
+        initial = api.open_live_paper_session(_config(api))
+        _, one = api.reduce_live_paper_input(
+            initial,
+            api.LivePaperTerminalInput("stop", 2_000_000_000, 2_000_000_000),
+        )
+        with self.assertRaisesRegex(api.LivePaperSessionError, "record_count"):
+            api.encode_live_paper_records(one * 100_001)
+
+        state = initial
+        records = []
+        large_body = "x" * (1024 * 1024)
+        for _ in range(33):
+            state, record = api._make_record(state, api.LivePaperRecordKind.REJECTION, large_body)
+            records.append(record)
+        with self.assertRaisesRegex(api.LivePaperSessionError, "log_too_large"):
+            api.encode_live_paper_records(tuple(records))
+
+        completed, _ = _complete_session(api)
+        consumed = completed.portfolio.consumed_depth[0]
+        oversized_state = replace(
+            completed,
+            portfolio=replace(
+                completed.portfolio,
+                consumed_depth=(consumed,) * 10_001,
+            ),
+        )
+        with self.assertRaisesRegex(api.LivePaperSessionError, "json_collection"):
+            api.encode_live_paper_checkpoint(oversized_state)
+
+    def test_every_successful_producer_blob_round_trips(self) -> None:
+        """Catches producer/decoder limits drifting for accepted evidence."""
+        api = _api()
+        with self.assertRaisesRegex(api.LivePaperSessionError, "records"):
+            api.encode_live_paper_records(())
+        state, records = _complete_session(api)
+        log = api.encode_live_paper_records(records)
+        self.assertEqual(api.replay_live_paper_records(log, require_terminal=True).state, state)
+        checkpoint = api.encode_live_paper_checkpoint(state)
+        self.assertEqual(api.decode_live_paper_checkpoint(checkpoint), state)
+
     def test_heartbeat_advances_only_by_complete_sixty_second_intervals(self) -> None:
         """Catches early heartbeat output or schedule drift after a late tick."""
         api = _api()
