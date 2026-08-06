@@ -78,12 +78,21 @@ class Config:
     flatten_retries: int = 3          # attempts per position when flattening
     # --- ESPN score + win-prob entry gate (research) ---
     # When the runtime attaches EspnProbGate, entries require a live ESPN
-    # ATP/WTA bind and a score-model edge. Unbound ITF markets fail closed.
+    # ATP/WTA bind and a score-model edge. ITF can bind via Live Tennis when
+    # enabled + keyed; otherwise unbound markets fail closed.
     espn_gate_enabled: bool = True
     espn_leagues: tuple = ("atp", "wta")
     espn_cache_s: float = 15.0
     espn_min_model_prob: float = 0.35   # reject collapsing sides
     espn_min_edge: float = 0.03         # model_prob - ask/100
+    # Live Tennis API secondary feed (ITF / optional challenger). Key from
+    # live_tennis_api_key or env LIVETENNISAPI_KEY / LIVETENNIS_API_KEY.
+    live_tennis_enabled: bool = True
+    live_tennis_api_key: str = ""
+    live_tennis_tours: tuple = ("itf",)
+    live_tennis_cache_s: float = 120.0
+    live_tennis_include_upcoming: bool = False
+    live_tennis_ticker_substrings: tuple = ("ITF",)
 
     # Official Create V2 enums. Paper matches this: one delayed attempt, then
     # cancel remainder — never retain a stale working order.
@@ -177,7 +186,7 @@ class Config:
             number(name, positive=True)
         for name in ("sim_latency_s", "sim_slippage_cents", "max_spread",
                      "tp_trail_cents", "espn_cache_s", "espn_min_model_prob",
-                     "espn_min_edge"):
+                     "espn_min_edge", "live_tennis_cache_s"):
             number(name, nonnegative=True)
         if number("espn_min_model_prob", nonnegative=True) > Decimal(1):
             raise ValueError("espn_min_model_prob must be <= 1")
@@ -190,6 +199,19 @@ class Config:
             raise ValueError("espn_leagues must be a nonempty tuple of strings")
         if not isinstance(self.espn_gate_enabled, bool):
             raise ValueError("espn_gate_enabled must be a bool")
+        if not isinstance(self.live_tennis_enabled, bool):
+            raise ValueError("live_tennis_enabled must be a bool")
+        if not isinstance(self.live_tennis_include_upcoming, bool):
+            raise ValueError("live_tennis_include_upcoming must be a bool")
+        if not isinstance(self.live_tennis_api_key, str):
+            raise ValueError("live_tennis_api_key must be a string")
+        for name in ("live_tennis_tours", "live_tennis_ticker_substrings"):
+            values = getattr(self, name)
+            if (not isinstance(values, tuple)
+                    or not values
+                    or any(not isinstance(x, str) or not x for x in values)):
+                raise ValueError(
+                    f"{name} must be a nonempty tuple of strings")
         for name in ("max_open_positions", "max_monitored_markets",
                      "flatten_retries", "max_consec_errors"):
             positive_int(name)
@@ -256,7 +278,12 @@ class Config:
                      "cancel_timeout_s", "reconcile_timeout_s",
                      "stale_data_s", "reconcile_every_s",
                      "close_buffer_seconds", "espn_cache_s",
-                     "espn_min_model_prob", "espn_min_edge"):
+                     "espn_min_model_prob", "espn_min_edge",
+                     "live_tennis_cache_s"):
             setattr(self, name, float(getattr(self, name)))
         self.espn_leagues = tuple(self.espn_leagues)
+        self.live_tennis_tours = tuple(self.live_tennis_tours)
+        self.live_tennis_ticker_substrings = tuple(
+            self.live_tennis_ticker_substrings)
+        self.live_tennis_api_key = str(self.live_tennis_api_key or "")
         return self
