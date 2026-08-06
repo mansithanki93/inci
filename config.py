@@ -85,6 +85,14 @@ class Config:
     espn_cache_s: float = 15.0
     espn_min_model_prob: float = 0.35   # reject collapsing sides
     espn_min_edge: float = 0.03         # model_prob - ask/100
+    # When True (default), discovery ranks scoreboard-bindable contracts
+    # ahead of unbound ones, then applies the usual depth/spread ranking
+    # within each tier. Still capped by max_monitored_markets.
+    prefer_scoreboard_bind: bool = True
+    # When True (default), monitor/enter at most one YES contract per Event
+    # (no both-sides of the same match). Among siblings, discovery prefers
+    # the better scoreboard model edge when a gate score is available.
+    one_contract_per_event: bool = True
     # Live Tennis API secondary feed (ITF / optional challenger). Key from
     # live_tennis_api_key or env LIVETENNISAPI_KEY / LIVETENNIS_API_KEY.
     live_tennis_enabled: bool = True
@@ -199,6 +207,10 @@ class Config:
             raise ValueError("espn_leagues must be a nonempty tuple of strings")
         if not isinstance(self.espn_gate_enabled, bool):
             raise ValueError("espn_gate_enabled must be a bool")
+        if not isinstance(self.prefer_scoreboard_bind, bool):
+            raise ValueError("prefer_scoreboard_bind must be a bool")
+        if not isinstance(self.one_contract_per_event, bool):
+            raise ValueError("one_contract_per_event must be a bool")
         if not isinstance(self.live_tennis_enabled, bool):
             raise ValueError("live_tennis_enabled must be a bool")
         if not isinstance(self.live_tennis_include_upcoming, bool):

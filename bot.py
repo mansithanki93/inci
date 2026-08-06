@@ -199,7 +199,8 @@ def format_discovery_telemetry(discovery):
     stats = discovery.stats
     count_keys = (
         "series_rows", "milestone_pages", "milestone_rows",
-        "event_pages", "event_rows", "candidates", "selected",
+        "event_pages", "event_rows", "candidates", "bindable_candidates",
+        "skipped_event_siblings", "selected", "selected_bindable",
     )
     skip_items = sorted(
         (key, value) for key, value in stats.items()
@@ -497,9 +498,10 @@ def run_session(cfg, client):
     requested_tickers = tuple(cfg.tickers)
     print("PAPER mode (latency/spread/depth/slippage/fees simulated).")
 
+    espn_gate = (EspnProbGate(cfg) if cfg.espn_gate_enabled else None)
     try:
         feed = PriceFeed(cfg, client)
-        discovery = feed.discover()
+        discovery = feed.discover(scoreboard_gate=espn_gate)
     except Exception as error:
         reason = f"market discovery failed: {type(error).__name__}: {error}"
         return _precanonical_failure(
@@ -525,12 +527,20 @@ def run_session(cfg, client):
         journal = OrderJournal(cfg.order_journal_path)
         executor = Executor(cfg, client, feed, journal=journal)
         safety = Safety(cfg)
-        espn_gate = (EspnProbGate(cfg) if cfg.espn_gate_enabled else None)
         if espn_gate is not None:
             print("[espn] score+prob entry gate enabled "
                   f"(leagues={','.join(cfg.espn_leagues)}; "
                   f"min_p={cfg.espn_min_model_prob}; "
                   f"min_edge={cfg.espn_min_edge})")
+            if cfg.prefer_scoreboard_bind:
+                print("[discover] prefer_scoreboard_bind=on "
+                      f"(bindable={discovery.stats.get('bindable_candidates', 0)}; "
+                      f"selected_bindable="
+                      f"{discovery.stats.get('selected_bindable', 0)})")
+            if cfg.one_contract_per_event:
+                print("[discover] one_contract_per_event=on "
+                      f"(skipped_siblings="
+                      f"{discovery.stats.get('skipped_event_siblings', 0)})")
             if cfg.live_tennis_enabled:
                 from live_tennis import resolve_api_key
                 if espn_gate.live_tennis_cache is not None:

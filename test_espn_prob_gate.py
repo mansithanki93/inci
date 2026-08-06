@@ -141,6 +141,48 @@ def test_parse_live_tennis_match_itf():
     print("PASS Live Tennis ITF match parse")
 
 
+def test_display_player_name_from_kalshi_title():
+    from espn_prob_gate import display_player_name
+    assert display_player_name(
+        "Will Massimo Giunta win the Tabacco vs Giunta: M25 Fano match?"
+    ) == "Massimo Giunta"
+    assert display_player_name("Adrian Oetzbach") == "Adrian Oetzbach"
+    print("PASS Kalshi title player extraction")
+
+
+def test_rank_contracts_prefer_bind_tiers():
+    from decimal import Decimal
+    from sports_discovery import (
+        ContractProvenance, SelectedContract, rank_contracts,
+        rank_contracts_prefer_bind,
+    )
+
+    def contract(ticker, *, bid_size, ask_size=None, start=10):
+        ask_size = bid_size if ask_size is None else ask_size
+        return SelectedContract(
+            ticker=ticker, title=ticker, game_title="game",
+            bid=Decimal(50), ask=Decimal(51),
+            bid_size=Decimal(bid_size), ask_size=Decimal(ask_size),
+            provenance=ContractProvenance(
+                sport="Tennis", league=None, series_ticker="KXITF",
+                milestone_id="m-" + ticker, event_ticker="e-" + ticker,
+                scheduled_start_ts=start))
+
+    deep_unbound = contract("deep-unbound", bid_size=100)
+    shallow_bound = contract("shallow-bound", bid_size=5)
+    mid_bound = contract("mid-bound", bid_size=20)
+    ranked = rank_contracts_prefer_bind(
+        (deep_unbound, shallow_bound, mid_bound), Decimal(10),
+        {"shallow-bound", "mid-bound"})
+    assert tuple(c.ticker for c in ranked) == (
+        "mid-bound", "shallow-bound", "deep-unbound")
+    # Without prefer-bind, depth wins.
+    plain = rank_contracts(
+        (deep_unbound, shallow_bound, mid_bound), Decimal(10))
+    assert plain[0].ticker == "deep-unbound"
+    print("PASS bind-prefer ranking tiers")
+
+
 def test_gate_binds_itf_via_live_tennis_secondary():
     cfg = Config(
         espn_gate_enabled=True,
@@ -197,5 +239,7 @@ if __name__ == "__main__":
     test_parse_espn_competition_live()
     test_gate_blocks_unbound_and_allows_edge()
     test_parse_live_tennis_match_itf()
+    test_display_player_name_from_kalshi_title()
+    test_rank_contracts_prefer_bind_tiers()
     test_gate_binds_itf_via_live_tennis_secondary()
     print("\nALL ESPN GATE TESTS PASS")

@@ -42,6 +42,34 @@ def set_entry_status(ctx, ticker, status, message=None):
         print(message)
 
 
+def _event_ticker_for(ctx, ticker):
+    provenance = getattr(ctx.feed, "provenance_by_ticker", None) or {}
+    if not hasattr(provenance, "get"):
+        return None
+    row = provenance.get(ticker)
+    if row is None:
+        return None
+    return getattr(row, "event_ticker", None) or None
+
+
+def _same_event_exposure(ctx, ticker):
+    """Return another ticker with open/pending exposure on the same Event."""
+    event = _event_ticker_for(ctx, ticker)
+    if not event:
+        return None
+    occupied = set(ctx.strategy.positions)
+    for order in list(getattr(ctx.executor, "pending_paper", None) or ()):
+        other = getattr(order, "ticker", None)
+        if other:
+            occupied.add(other)
+    for other in occupied:
+        if other == ticker:
+            continue
+        if _event_ticker_for(ctx, other) == event:
+            return other
+    return None
+
+
 def sync_execution_observation(ctx, ticker):
     """Move the executor's fresh requote into the risk mark immediately."""
     observation = getattr(ctx.executor, "last_observation", None)
@@ -176,6 +204,14 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
     entry_sig = ctx.strategy.check_entry(ticker, hist, now,
                                          mid, bid, ask, ask_qty=ask_qty)
     if entry_sig:
+        if bool(getattr(ctx.cfg, "one_contract_per_event", True)):
+            conflict = _same_event_exposure(ctx, ticker)
+            if conflict is not None:
+                set_entry_status(
+                    ctx, ticker, "blocked:event_sibling",
+                    f"[entry] BLOCKED {ticker}: already exposed on "
+                    f"same event via {conflict}")
+                return
         gate = getattr(ctx, "espn_gate", None)
         if gate is not None and gate.enabled():
             player_name = ticker
