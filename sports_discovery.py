@@ -264,6 +264,25 @@ def rank_contracts(candidates, contracts_per_trade):
     )))
 
 
+def rank_contracts_prefer_bind(candidates, contracts_per_trade, bindable_tickers):
+    """Rank bindable contracts first, then unbound; each tier uses rank_contracts."""
+    if bindable_tickers is None:
+        raise ValueError("bindable_tickers is required")
+    try:
+        bindable_set = set(bindable_tickers)
+    except TypeError as error:
+        raise ValueError("bindable_tickers must be an iterable") from error
+    candidates = tuple(candidates)
+    if not all(isinstance(candidate, SelectedContract) for candidate in candidates):
+        raise ValueError("candidates must contain SelectedContract values")
+    bindable = tuple(c for c in candidates if c.ticker in bindable_set)
+    unbound = tuple(c for c in candidates if c.ticker not in bindable_set)
+    return (
+        rank_contracts(bindable, contracts_per_trade)
+        + rank_contracts(unbound, contracts_per_trade)
+    )
+
+
 def _selected_sports(filters):
     if isinstance(filters, Mapping):
         if "sports" in filters:
@@ -765,8 +784,14 @@ def _discover_explicit_tickers(cfg, client, *, now=None):
         stats=dict(sorted(stats.items())))
 
 
-def discover_game_contracts(cfg, client, *, now=None):
-    """Prove and select today's Games from one explicit discovery source."""
+def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None):
+    """Prove and select today's Games from one explicit discovery source.
+
+    When ``bind_predicate`` is set (and ``cfg.prefer_scoreboard_bind`` is
+    true), bindable contracts are ranked ahead of unbound ones; each tier
+    still uses the standard depth/spread ranking. Explicit ticker lists are
+    unchanged (order preserved, no re-rank).
+    """
     has_sports = bool(getattr(cfg, "sports", None))
     has_tickers = bool(getattr(cfg, "tickers", None))
     if has_sports == has_tickers:
@@ -905,12 +930,29 @@ def discover_game_contracts(cfg, client, *, now=None):
                 _add_market_skip(stats, "skip_event_not_open")
 
     stats["candidates"] = len(candidates)
-    ranked = rank_contracts(candidates, Decimal(str(cfg.contracts_per_trade)))
+    prefer_bind = bool(getattr(cfg, "prefer_scoreboard_bind", True))
+    bindable_tickers = set()
+    if prefer_bind and bind_predicate is not None:
+        for contract in candidates:
+            try:
+                if bind_predicate(contract):
+                    bindable_tickers.add(contract.ticker)
+            except Exception:  # noqa: BLE001 — fail-open to unbound tier
+                continue
+        ranked = rank_contracts_prefer_bind(
+            candidates, Decimal(str(cfg.contracts_per_trade)),
+            bindable_tickers)
+    else:
+        ranked = rank_contracts(
+            candidates, Decimal(str(cfg.contracts_per_trade)))
+    stats["bindable_candidates"] = len(bindable_tickers)
     max_markets = getattr(cfg, "max_monitored_markets", None)
     if isinstance(max_markets, bool) or not isinstance(max_markets, int) or max_markets <= 0:
         raise ValueError("cfg.max_monitored_markets must be a positive integer")
     contracts = ranked[:max_markets]
     stats["selected"] = len(contracts)
+    stats["selected_bindable"] = sum(
+        1 for contract in contracts if contract.ticker in bindable_tickers)
     return DiscoveryResult(
         contracts=contracts, selected_sports=selected_sports,
         local_timezone=window.local_timezone,

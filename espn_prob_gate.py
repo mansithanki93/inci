@@ -79,6 +79,18 @@ def ticker_wants_live_tennis(ticker: str, event_title: str = "",
     return any(str(part).upper() in hay for part in substrings if part)
 
 
+def display_player_name(player_name: str) -> str:
+    """Extract the player from a Kalshi 'Will X win the …' market title."""
+    text = str(player_name or "").strip()
+    lower = text.lower()
+    if lower.startswith("will ") and " win " in lower[5:]:
+        mid = text[5:]
+        idx = mid.lower().find(" win ")
+        if idx > 0:
+            return mid[:idx].strip()
+    return text
+
+
 class EspnProbGate:
     def __init__(
             self,
@@ -108,6 +120,43 @@ class EspnProbGate:
     def enabled(self) -> bool:
         return bool(getattr(self.cfg, "espn_gate_enabled", True))
 
+    def find_bind(self, *, ticker: str, player_name: str, event_title: str):
+        """Return ``(match, me, opp)`` for a live/pre scoreboard card, or None.
+
+        Used by entry gating and by discovery ranking. Scoreboard fetch errors
+        are swallowed so discovery can fail-open to depth ranking.
+        """
+        player_name = display_player_name(player_name)
+        event_title = event_title or ""
+        try:
+            matches = self.cache.matches()
+        except Exception:  # noqa: BLE001
+            matches = ()
+        bound = self._bind(player_name, event_title, matches)
+        if bound is None and self.live_tennis_cache is not None:
+            needles = tuple(getattr(
+                self.cfg, "live_tennis_ticker_substrings", ("ITF",)))
+            if ticker_wants_live_tennis(ticker, event_title, needles):
+                try:
+                    lt_matches = self.live_tennis_cache.matches()
+                except Exception:  # noqa: BLE001
+                    lt_matches = ()
+                if lt_matches:
+                    bound = self._bind(player_name, event_title, lt_matches)
+        if bound is None:
+            return None
+        match, me, opp = bound
+        if match.state == "post":
+            return None
+        return bound
+
+    def is_bound(self, *, ticker: str, player_name: str,
+                 event_title: str) -> bool:
+        """True when a live/pre scoreboard card binds (no ask/edge checks)."""
+        return self.find_bind(
+            ticker=ticker, player_name=player_name,
+            event_title=event_title) is not None
+
     def decide(self, *, ticker: str, player_name: str, event_title: str,
                ask_cents) -> GateDecision:
         if not self.enabled():
@@ -120,6 +169,8 @@ class EspnProbGate:
             return GateDecision(False, "blocked:invalid_ask")
         market_prob = ask / Decimal(100)
 
+        player_name = display_player_name(player_name)
+        lt_error = None
         try:
             matches = self.cache.matches()
         except Exception as error:  # noqa: BLE001
@@ -127,7 +178,6 @@ class EspnProbGate:
                 False, f"blocked:espn_unavailable ({error})")
 
         bound = self._bind(player_name, event_title, matches)
-        lt_error = None
         if bound is None and self.live_tennis_cache is not None:
             needles = tuple(getattr(
                 self.cfg, "live_tennis_ticker_substrings", ("ITF",)))

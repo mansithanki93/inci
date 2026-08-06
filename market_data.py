@@ -60,9 +60,18 @@ class PriceFeed:
         self.provenance_by_ticker = MappingProxyType(provenance)
         self._discovery_installed = True
 
-    def discover(self, *, now=None):
+    def discover(self, *, now=None, scoreboard_gate=None):
+        bind_predicate = None
+        prefer = bool(getattr(self.cfg, "prefer_scoreboard_bind", True))
+        if (prefer and scoreboard_gate is not None
+                and getattr(scoreboard_gate, "enabled", lambda: False)()):
+            def bind_predicate(contract, gate=scoreboard_gate):
+                return gate.is_bound(
+                    ticker=contract.ticker,
+                    player_name=contract.title,
+                    event_title=contract.game_title)
         result = discover_game_contracts(
-            self.cfg, self.client, now=now)
+            self.cfg, self.client, now=now, bind_predicate=bind_predicate)
         self.install_discovery(result)
         return result
 

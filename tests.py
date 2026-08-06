@@ -5527,7 +5527,63 @@ def test_best_ten_are_global_across_selected_sports():
     assert len(result.contracts) == 10
     assert tennis_event + "-M" not in result.tickers
     assert result.stats["candidates"] == 11 and result.stats["selected"] == 10
+    assert result.stats["bindable_candidates"] == 0
+    assert result.stats["selected_bindable"] == 0
     print("PASS best ten selection is global across selected Sports")
+
+
+def test_discovery_prefers_scoreboard_bindable_contracts():
+    """Shallow bindable tennis outranks deeper unbound basketball under the flag."""
+    from datetime import datetime, timezone
+    from sports_discovery import discover_game_contracts
+
+    tennis_event = "KXITFMATCH-26JUL26-GAME"
+    basketball_events = tuple("KXBASKET-26JUL26-%02d" % index
+                              for index in range(10))
+    series = ({"series_ticker": "KXITFMATCH", "category": "Sports",
+               "tags": ("Tennis",)},
+              {"series_ticker": "KXBASKET", "category": "Sports",
+               "tags": ("Basketball",)})
+    milestones = {
+        "Tennis League": (_normalized_game(
+            milestone_id="tennis", event_ticker=tennis_event),),
+        "Basketball League": tuple(
+            _normalized_game(
+                milestone_id="basket-%02d" % index, event_ticker=ticker)
+            for index, ticker in enumerate(basketball_events)),
+    }
+    events = {
+        "KXITFMATCH": (_normalized_event(
+            event_ticker=tennis_event, series_ticker="KXITFMATCH",
+            title="Ace vs Break",
+            markets=(_normalized_market(
+                ticker=tennis_event + "-M", event_ticker=tennis_event,
+                title="Will Ada Ace win the Ace vs Break match?",
+                bid_size=Decimal(1), ask_size=Decimal(1)),)),),
+        "KXBASKET": tuple(_normalized_event(
+            event_ticker=ticker, series_ticker="KXBASKET",
+            markets=(_normalized_market(
+                ticker=ticker + "-M", event_ticker=ticker,
+                bid_size=Decimal(50), ask_size=Decimal(50)),))
+            for ticker in basketball_events),
+    }
+    bindable = {tennis_event + "-M"}
+
+    def predicate(contract):
+        return contract.ticker in bindable
+
+    result = discover_game_contracts(
+        _discover_cfg(sports=("Tennis", "Basketball")),
+        _dynamic_discovery_client(
+            sports=("Tennis", "Basketball"), series=series,
+            milestones=milestones, events=events),
+        now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),
+        bind_predicate=predicate)
+    assert result.tickers[0] == tennis_event + "-M"
+    assert result.stats["bindable_candidates"] == 1
+    assert result.stats["selected_bindable"] == 1
+    assert len(result.contracts) == 10
+    print("PASS discovery prefers scoreboard-bindable contracts")
 
 
 def test_dynamic_contract_cap_allows_siblings_from_one_game():
@@ -5616,13 +5672,13 @@ def test_dynamic_discovery_filters_books_and_reports_stable_stats():
     assert result.tickers == ("ACTIVE",)
     assert result.contracts[0].title == "Yes"
     assert result.stats == {
-        "candidates": 1, "event_pages": 1, "event_rows": 1,
-        "milestone_pages": 1, "milestone_rows": 3, "selected": 1,
-        "series_rows": 2, "skip_market_inactive": 1,
-        "skip_market_missing_quote": 1, "skip_market_no_depth": 2,
-        "skip_market_wide_spread": 1, "skip_milestone_off_category": 1,
-        "skip_milestone_outside_day": 1, "skip_series_off_category": 1,
-        "skip_unsupported_market_scalar": 2,
+        "bindable_candidates": 0, "candidates": 1, "event_pages": 1,
+        "event_rows": 1, "milestone_pages": 1, "milestone_rows": 3,
+        "selected": 1, "selected_bindable": 0, "series_rows": 2,
+        "skip_market_inactive": 1, "skip_market_missing_quote": 1,
+        "skip_market_no_depth": 2, "skip_market_wide_spread": 1,
+        "skip_milestone_off_category": 1, "skip_milestone_outside_day": 1,
+        "skip_series_off_category": 1, "skip_unsupported_market_scalar": 2,
     }
     malformed = _dynamic_discovery_client(
         series=({"series_ticker": "KXATP", "category": "Sports",
@@ -6204,7 +6260,7 @@ class _Task4RunFeed:
         self.discover_calls = 0
         self.subscribe_calls = []
 
-    def discover(self, *, now=None):
+    def discover(self, *, now=None, scoreboard_gate=None):
         self.discover_calls += 1
         return self.result
 
@@ -6464,7 +6520,8 @@ def test_run_session_discovers_and_reports_only_once():
         "1970-01-02T00:00:00+00:00)",
         "  utc=[1970-01-01T00:00:00Z, 1970-01-02T00:00:00Z)",
         "[discover] series_rows=3 milestone_pages=2 milestone_rows=4 "
-        "event_pages=1 event_rows=2 candidates=1 selected=1",
+        "event_pages=1 event_rows=2 candidates=1 bindable_candidates=0 "
+        "selected=1 selected_bindable=0",
         "  skips=skip_a=1, skip_z=2",
         "[discover] Tennis | League | Game | T | "
         "1970-01-01T01:00:00Z | bid=50 ask=52 spread=2 "
@@ -6599,7 +6656,7 @@ def test_keyboard_interrupt_and_system_exit_are_not_swallowed_by_discovery():
                 def __init__(self, config, client):
                     pass
 
-                def discover(self):
+                def discover(self, *, now=None, scoreboard_gate=None):
                     raise raised
 
             bot_module.PriceFeed = Feed
@@ -7515,6 +7572,7 @@ if __name__ == "__main__":
     test_identical_cross_competition_milestone_without_league_dedupes()
     test_incomplete_inventory_prevents_ranking()
     test_best_ten_are_global_across_selected_sports()
+    test_discovery_prefers_scoreboard_bindable_contracts()
     test_dynamic_contract_cap_allows_siblings_from_one_game()
     test_dynamic_discovery_filters_books_and_reports_stable_stats()
     test_discovery_requires_exactly_one_source()
@@ -7711,6 +7769,8 @@ if __name__ == "__main__":
         test_parse_espn_competition_live,
         test_gate_blocks_unbound_and_allows_edge,
         test_parse_live_tennis_match_itf,
+        test_display_player_name_from_kalshi_title,
+        test_rank_contracts_prefer_bind_tiers,
         test_gate_binds_itf_via_live_tennis_secondary,
     )
     test_names_match_surname()
@@ -7718,5 +7778,7 @@ if __name__ == "__main__":
     test_parse_espn_competition_live()
     test_gate_blocks_unbound_and_allows_edge()
     test_parse_live_tennis_match_itf()
+    test_display_player_name_from_kalshi_title()
+    test_rank_contracts_prefer_bind_tiers()
     test_gate_binds_itf_via_live_tennis_secondary()
-    print("\nALL TESTS PASS (214 tests)")
+    print("\nALL TESTS PASS (217 tests)")
