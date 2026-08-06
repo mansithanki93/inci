@@ -26,6 +26,7 @@ from inci_tennis_expert.pilot_dynamic_model import (
     DynamicPointModel,
     DynamicPointModelError,
     compute_dynamic_point_artifact_sha256,
+    evaluate_dynamic_state,
 )
 from inci_tennis_expert.pilot_static_model import evaluate_static_outcome
 from inci_tennis_expert.tennis_score import apply_point
@@ -206,6 +207,19 @@ def _model(
 
 
 class DynamicPointModelTests(unittest.TestCase):
+    def test_completed_event_api_delegates_to_identical_state_evaluation(self) -> None:
+        event = _point()
+        model = _model()
+
+        self.assertEqual(
+            model.evaluate(event),
+            evaluate_dynamic_state(
+                model=model,
+                canonical_match_id=event.canonical_match_id,
+                state=event.after_state,
+            ),
+        )
+
     def test_candidate_rejects_tiny_excess_initial_mass_exactly(self) -> None:
         with self.assertRaisesRegex(
             DynamicPointModelError,

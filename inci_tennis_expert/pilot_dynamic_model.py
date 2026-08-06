@@ -9,7 +9,7 @@ from fractions import Fraction
 from re import ASCII as RE_ASCII
 from re import compile as pattern_compile
 
-from inci_tennis_expert.contracts import PlayerSide
+from inci_tennis_expert.contracts import PlayerSide, TennisState
 from inci_tennis_expert.pilot_contracts import (
     DynamicBeliefSnapshot,
     PilotOutcomeEstimate,
@@ -32,6 +32,7 @@ __all__ = (
     "DynamicPointModelError",
     "EffectivenessState",
     "compute_dynamic_point_artifact_sha256",
+    "evaluate_dynamic_state",
     "unsupported_dynamic",
 )
 
@@ -284,6 +285,32 @@ def _event_matches_artifacts(
         return False
 
 
+def _state_matches_artifacts(
+    *,
+    canonical_match_id: str,
+    state: TennisState,
+    serve_artifact: ServeStrengthArtifact,
+    dynamic_artifact: DynamicPointArtifact,
+) -> bool:
+    try:
+        scheduled_start = state.scheduled_start_wall_ns
+        return (
+            canonical_match_id == serve_artifact.target_canonical_match_id
+            == dynamic_artifact.target_canonical_match_id
+            and scheduled_start == serve_artifact.target_scheduled_start_wall_ns
+            == dynamic_artifact.target_scheduled_start_wall_ns
+            and serve_artifact.cutoff_wall_ns < scheduled_start
+            and dynamic_artifact.cutoff_wall_ns < scheduled_start
+            and canonical_match_id not in serve_artifact.training_match_ids
+            and canonical_match_id not in dynamic_artifact.training_match_ids
+            and canonical_match_id not in dynamic_artifact.validation_match_ids
+            and _serve_artifact_is_authentic(serve_artifact)
+            and _dynamic_artifact_is_authentic(dynamic_artifact)
+        )
+    except Exception:
+        return False
+
+
 def _state_probability(baseline: Decimal, offset: Decimal) -> Decimal:
     """Apply an offset in log-odds space without producing scorer endpoints."""
     if (
@@ -524,6 +551,49 @@ class DynamicPointModel:
                 return +(Decimal("1") - away_win)
         _fail("player_side")
 
+    def observe_state_point(
+        self,
+        *,
+        canonical_match_id: str,
+        point_id: str,
+        belief_point_event_sha256: str,
+        server: PlayerSide,
+        winner: PlayerSide,
+    ) -> tuple[DynamicPointModel, DynamicBeliefSnapshot]:
+        """Update one server posterior using live-paper transition identity."""
+        if point_id in self.observed_point_ids:
+            _fail("duplicate_point")
+        if (
+            canonical_match_id != self.dynamic_artifact.target_canonical_match_id
+            or type(server) is not PlayerSide
+            or type(winner) is not PlayerSide
+        ):
+            _fail("artifact_mismatch")
+        candidate = self.dynamic_artifact.selected
+        probabilities = self.state_serve_probabilities(server)
+        server_won = winner is server
+        likelihoods = tuple(
+            probability if server_won else Decimal("1") - probability
+            for probability in probabilities
+        )
+        home_weights = self.belief.home_weights
+        away_weights = self.belief.away_weights
+        if server is PlayerSide.HOME:
+            home_weights = _forward_update(home_weights, candidate.transition_matrix, likelihoods)  # type: ignore[arg-type]
+        else:
+            away_weights = _forward_update(away_weights, candidate.transition_matrix, likelihoods)  # type: ignore[arg-type]
+        belief = _belief_snapshot(
+            canonical_match_id=canonical_match_id,
+            point_event_sha256=belief_point_event_sha256,
+            dynamic_artifact_sha256=self.dynamic_artifact.artifact_sha256,
+            home_weights=home_weights,
+            away_weights=away_weights,
+        )
+        return replace(
+            self, belief=belief,
+            observed_point_ids=(*self.observed_point_ids, point_id),
+        ), belief
+
     def observe(
         self,
         event: PilotPointEvent,
@@ -537,42 +607,13 @@ class DynamicPointModel:
             self.dynamic_artifact,
         ):
             _fail("artifact_mismatch")
-        candidate = self.dynamic_artifact.selected
-        probabilities = self.state_serve_probabilities(event.server)
-        server_won = event.winner is event.server
-        likelihoods = tuple(
-            probability if server_won else Decimal("1") - probability
-            for probability in probabilities
-        )
-        home_weights = self.belief.home_weights
-        away_weights = self.belief.away_weights
-        if event.server is PlayerSide.HOME:
-            home_weights = _forward_update(
-                home_weights,
-                candidate.transition_matrix,
-                likelihoods,  # type: ignore[arg-type]
-            )
-        elif event.server is PlayerSide.AWAY:
-            away_weights = _forward_update(
-                away_weights,
-                candidate.transition_matrix,
-                likelihoods,  # type: ignore[arg-type]
-            )
-        else:
-            _fail("player_side")
-        belief = _belief_snapshot(
+        return self.observe_state_point(
             canonical_match_id=event.canonical_match_id,
-            point_event_sha256=pilot_contract_sha256(event),
-            dynamic_artifact_sha256=self.dynamic_artifact.artifact_sha256,
-            home_weights=home_weights,
-            away_weights=away_weights,
+            point_id=event.point_id,
+            belief_point_event_sha256=pilot_contract_sha256(event),
+            server=event.server,
+            winner=event.winner,
         )
-        next_model = replace(
-            self,
-            belief=belief,
-            observed_point_ids=(*self.observed_point_ids, event.point_id),
-        )
-        return next_model, belief
 
     def evaluate(self, event: PilotPointEvent) -> PilotOutcomeEstimate:
         """Integrate all 3 x 3 latent-state pairs through exact scoring."""
@@ -582,7 +623,22 @@ class DynamicPointModel:
             self.dynamic_artifact,
         ):
             return unsupported_dynamic(PilotSupportReason.ARTIFACT_MISMATCH)
-        next_server = event.after_state.server_for_next_point
+        return self.evaluate_state(
+            canonical_match_id=event.canonical_match_id, state=event.after_state
+        )
+
+    def evaluate_state(
+        self, *, canonical_match_id: str, state: TennisState
+    ) -> PilotOutcomeEstimate:
+        """Integrate latent-state pairs over a current live-paper score."""
+        if not _state_matches_artifacts(
+            canonical_match_id=canonical_match_id,
+            state=state,
+            serve_artifact=self.serve_artifact,
+            dynamic_artifact=self.dynamic_artifact,
+        ):
+            return unsupported_dynamic(PilotSupportReason.ARTIFACT_MISMATCH)
+        next_server = state.server_for_next_point
         if next_server not in (PlayerSide.HOME, PlayerSide.AWAY):
             return unsupported_dynamic(PilotSupportReason.ARTIFACT_MISMATCH)
         try:
@@ -595,7 +651,7 @@ class DynamicPointModel:
                 for home_index, home_weight in enumerate(self.belief.home_weights):
                     for away_index, away_weight in enumerate(self.belief.away_weights):
                         value = standard_bo3_live_probabilities(
-                            event.after_state,
+                            state,
                             home_probabilities[home_index],
                             away_probabilities[away_index],
                         )
@@ -647,3 +703,10 @@ class DynamicPointModel:
             upper_home_match_probability=upper,
             abstention_reason=None,
         )
+
+
+def evaluate_dynamic_state(
+    *, model: DynamicPointModel, canonical_match_id: str, state: TennisState
+) -> PilotOutcomeEstimate:
+    """Functional state-based facade used by the paper-only live bridge."""
+    return model.evaluate_state(canonical_match_id=canonical_match_id, state=state)

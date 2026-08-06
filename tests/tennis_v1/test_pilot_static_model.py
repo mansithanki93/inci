@@ -21,7 +21,10 @@ from inci_tennis_expert.pilot_contracts import (
     compute_serve_strength_artifact_sha256,
     compute_training_match_ids_sha256,
 )
-from inci_tennis_expert.pilot_static_model import evaluate_static_outcome
+from inci_tennis_expert.pilot_static_model import (
+    evaluate_static_outcome,
+    evaluate_static_state,
+)
 from inci_tennis_expert.tennis_score import apply_point
 from inci_tennis_expert.win_probability import standard_bo3_live_probabilities
 
@@ -195,6 +198,19 @@ def _match_clinching_event() -> PilotPointEvent:
 
 
 class StaticPilotModelTests(unittest.TestCase):
+    def test_completed_event_api_delegates_to_identical_state_evaluation(self) -> None:
+        event = _point_event()
+        artifact = _serve_artifact()
+
+        self.assertEqual(
+            evaluate_static_outcome(event, artifact),
+            evaluate_static_state(
+                canonical_match_id=event.canonical_match_id,
+                state=event.after_state,
+                artifact=artifact,
+            ),
+        )
+
     def test_matches_existing_exact_live_probability(self) -> None:
         state = _point_event().after_state
         artifact = _serve_artifact(Decimal("0.64"), Decimal("0.61"))
