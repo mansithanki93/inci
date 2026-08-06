@@ -229,6 +229,12 @@ def _kalshi_transport(material: object, tickers: tuple[str, str]) -> object:
     )
 
 
+def _accept_collection_identity(
+    match_id: str, tickers: tuple[str, str]
+) -> None:
+    del match_id, tickers
+
+
 @dataclass(frozen=True, slots=True)
 class LiveShadowCliDependencies:
     credential_loader: Callable[..., object] = load_shadow_credential_material
@@ -255,6 +261,10 @@ class LiveShadowCliDependencies:
     wall_ns: Callable[[], int] = shadow_wall_ns
     monotonic_ns: Callable[[], int] = shadow_monotonic_ns
     pause: Callable[..., object] = shadow_pause
+    capture_observer: object | None = None
+    collection_identity_validator: Callable[
+        [str, tuple[str, str]], None
+    ] = _accept_collection_identity
 
 
 def _parser() -> _Parser:
@@ -1120,6 +1130,7 @@ async def _run_collection(
     evidence: object | None = None
     kalshi: object | None = None
     try:
+        services.collection_identity_validator(match_id, tickers)
         with services.evidence_store_factory() as evidence:
             try:
                 if resolution is not None:
@@ -1151,6 +1162,7 @@ async def _run_collection(
                     stop_requested=stop,
                     render=output,
                     mapping_mode=mapping_mode,
+                    capture_observer=services.capture_observer,
                 )
                 return await collector.run(
                     duration_seconds=duration_seconds,

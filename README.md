@@ -116,6 +116,115 @@ The Kalshi key must have exactly the `read` scope. Startup verifies it with the
 read-only `GET /api_keys` endpoint and refuses full-access or write-scoped keys
 before opening the WebSocket.
 
+## Live Models 1+2 paper bridge
+
+This separate command always prints the following line before opening a
+capture source:
+
+```text
+LIVE MODELS 1+2 / PAPER ONLY / NO REAL ORDERS
+```
+
+For a deterministic, network-free run over two growing files:
+
+```bash
+python -m inci_tennis_runtime.live_two_model_paper_cli \
+  --manifest /absolute/path/live-paper-match.json \
+  --score-stream /absolute/path/growing-score-captures.jsonl \
+  --kalshi-stream /absolute/path/growing-kalshi-frames.jsonl \
+  --session-log /absolute/path/live-paper-session.jsonl \
+  --checkpoint /absolute/path/live-paper-checkpoint.json \
+  --bootstrap-home-serve 0.64 \
+  --bootstrap-away-serve 0.61 \
+  --duration-seconds 600
+```
+
+Use `--stop-at-eof` for a bounded fixture/dry run. Without it, the command
+tails both files until the duration expires, emits a durable heartbeat at
+least every 60 seconds, and appends a typed terminal on duration, SIGINT, or
+SIGTERM. `--replay-only --stop-at-eof` authenticates an already-terminal log
+and checkpoint without credentials or network access and does not rewrite the
+session log.
+
+Live read-only mode delegates match discovery, chooser UI, Sportradar capture,
+and Kalshi WebSocket handling to the existing shadow collector:
+
+```bash
+python -m inci_tennis_runtime.live_two_model_paper_cli \
+  --live-readonly \
+  --manifest /absolute/path/live-paper-match.json \
+  --session-log /absolute/path/live-paper-session.jsonl \
+  --checkpoint /absolute/path/live-paper-checkpoint.json \
+  --bootstrap-home-serve 0.64 \
+  --bootstrap-away-serve 0.61 \
+  --duration-seconds 600
+```
+
+The selected Sportradar match ID and exact HOME/AWAY Kalshi tickers must equal
+the frozen manifest before subscription. The existing read-only catalog does
+not expose provider player IDs or Kalshi market UUIDs: player IDs are therefore
+verified on the first raw Sportradar capture, and lowercase market UUIDs plus
+YES orientation are verified on the first complete raw L2 projection. Both
+checks halt before any paper action. The Kalshi credential must have the exact
+scope set `{"read"}`; `{"read","write"}`, `{"write"}`, empty, unknown, and
+malformed scope sets halt before the WebSocket opens. No write/order transport
+is imported by this command.
+
+Current live network score coverage is exactly Sportradar through the existing
+trial capture transport. API-Tennis, GoalServe, and Live Tennis API have strict
+raw parsers but no live network transport in this command; any of those
+sources can join the same paper session through the growing score JSONL input.
+
+The manifest is strict JSON with exactly these top-level fields:
+`schema`, `version`, `canonical_match_id`, `scheduled_start_wall_ns`,
+`match_format`, `home_player_id`, `away_player_id`, `providers`, `markets`,
+`fee_schedule`, and `fee_series_ticker`. `schema` is
+`inci.live-paper-match-manifest`, `version` is `1`, and `match_format` is
+`STANDARD_ADVANTAGE_BO3_TB7_ALL_SETS`. Every provider row has exactly
+`slot`, `source_id`, `provider_match_id`, `home_player_id`, `away_player_id`,
+`independent_lineage_id`, `source_lineage_sha256`, `independence_proven`, and
+`independence_proof_sha256`. A source can contribute to consensus only when
+the envelope repeats the exact frozen proof digest and all identity fields.
+
+Each score JSONL row has exactly this raw-capture envelope (values abbreviated):
+
+```json
+{"kind":"score_capture","provider_slot":"api_tennis","provider_source_id":"api-tennis-primary","provider_match_id":"101","home_player_id":"201","away_player_id":"202","independent_lineage_id":"lineage-a","source_lineage_sha256":"<64 lowercase hex>","independence_proven":true,"independence_proof_sha256":"<64 lowercase hex>","raw_capture_id":"capture-1","captured_wall_ns":1,"captured_monotonic_ns":1,"clock_uncertainty_ns":0,"payload_base64":"<raw provider bytes>"}
+```
+
+Each Kalshi JSONL row has exactly:
+
+```json
+{"kind":"kalshi_frame","physical_connection_generation":1,"captured_wall_ns":1,"captured_monotonic_ns":1,"clock_uncertainty_ns":0,"payload_base64":"<raw WebSocket frame>"}
+```
+
+The score payload is always parsed by `parse_live_score`; the Kalshi payload
+is always parsed by `parse_unqualified_book_message` and applied to
+`UnqualifiedTwoTickerBookReducer`. Normalized probabilities, top-of-book
+projections, or caller-supplied books are not accepted envelope fields.
+
+Bootstrap mode requires both `--bootstrap-home-serve` and
+`--bootstrap-away-serve`. Trained mode replaces both priors with both
+`--static-artifact` and `--dynamic-artifact`; the two modes are exclusive.
+The five-second score/book freshness, one-second decision latency, $50 debit
+cap, $5 entry/exit thresholds, 300-second maximum hold, and 60-second heartbeat
+are frozen code/session constants and have no CLI overrides.
+
+All inputs must already exist as absolute regular non-symlink files. The log
+and checkpoint must be absolute, distinct from every input and each other,
+and non-symlink paths. Evidence rows append with flush/fsync ordering; the
+checkpoint uses temp-write, fsync, atomic replace, and parent-directory fsync.
+An existing log/checkpoint is authenticated by the session replay APIs before
+resume and is never truncated or silently replaced.
+
+Authority labels are intentionally narrow: provider score revisions are
+`PAPER_LOCAL_REVISION_TRANSPORT_ONLY`; score trust is `SINGLE_SOURCE_PAPER`,
+`CONSENSUS_PAPER`, or `ABSTAINED`; operator priors are
+`OPERATOR_BOOTSTRAP / NO_EDGE_CLAIM`; trained artifacts remain
+`TRAINED_ARTIFACT / RESEARCH_ONLY`; paper edge is
+`SETTLEMENT_VALUE_PROXY`. None is execution authorization or a real-order
+signal.
+
 Collection ledgers and raw Kalshi captures are under
 `~/.local/state/inci/tennis-shadow/`; provider trial usage and raw discovery
 captures are under `~/.local/state/inci/sportradar-trial/`. These roots use the

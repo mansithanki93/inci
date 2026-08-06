@@ -398,6 +398,38 @@ class LivePaperSessionTests(unittest.TestCase):
         raw = api.encode_live_paper_records(score_rows + action_rows + stale_rows)
         self.assertEqual(api.replay_live_paper_records(raw).state, state)
 
+    def test_generation_rollover_invalidates_and_reissues_pending_action_causally(self) -> None:
+        """Catches an old-generation action blocking the paper portfolio forever."""
+        api = _api()
+        state = api.open_live_paper_session(_config(api))
+        state, _ = api.reduce_live_paper_input(state, _score_input(api))
+        state, _ = api.reduce_live_paper_input(
+            state, _l2_input(api, 1, 3_000_000_000, "1" * 64)
+        )
+        old_action = state.portfolio.pending_action
+        self.assertIsNotNone(old_action)
+        reconnect = _l2_input(api, 1, 3_500_000_000, "2" * 64)
+        reconnect = replace(
+            reconnect,
+            frame=replace(
+                reconnect.frame,
+                physical_connection_generation=2,
+                subscription_id=3,
+            ),
+        )
+        state, rows = api.reduce_live_paper_input(state, reconnect)
+        self.assertNotIn("fill", tuple(row.kind.value for row in rows))
+        self.assertTrue(
+            any(
+                row.kind.value == "rejection"
+                and row.payload.body.reason == "book_generation_changed"
+                for row in rows
+            )
+        )
+        self.assertIsNotNone(state.portfolio.pending_action)
+        self.assertNotEqual(state.portfolio.pending_action, old_action)
+        self.assertEqual(state.portfolio.pending_action.decision_generation, 2)
+
     def test_book_capture_must_follow_score_even_when_observed_later(self) -> None:
         """Catches an old decision frame being relabelled as causal by a later observation clock."""
         api = _api()

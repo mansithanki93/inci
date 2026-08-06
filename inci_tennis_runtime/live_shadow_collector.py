@@ -255,6 +255,37 @@ class _EvidenceStore(Protocol):
     def ensure_halted_terminal(self, **values: object) -> None: ...
 
 
+class LivePaperCaptureObserver(Protocol):
+    """Post-commit raw capture hook for an additive paper-only consumer."""
+
+    async def after_provider_commit(
+        self,
+        *,
+        capture: TrialCapture,
+        durable_receipt: object,
+        captured_wall_ns: int,
+        captured_monotonic_ns: int,
+        clock_uncertainty_ns: int,
+    ) -> None: ...
+
+    async def after_kalshi_commit(
+        self,
+        *,
+        frame: object,
+        durable_receipt: object,
+        captured_wall_ns: int,
+        captured_monotonic_ns: int,
+        clock_uncertainty_ns: int,
+    ) -> None: ...
+
+    async def after_heartbeat_commit(
+        self,
+        *,
+        captured_wall_ns: int,
+        captured_monotonic_ns: int,
+    ) -> None: ...
+
+
 class _MarketProjector(Protocol):
     def begin_subscription(self, receipt: object) -> None: ...
 
@@ -579,6 +610,7 @@ class LiveShadowCollector:
         stop_requested: Callable[[], bool],
         render: Callable[[str], None],
         mapping_mode: str = "operator_supplied",
+        capture_observer: LivePaperCaptureObserver | None = None,
     ) -> None:
         if (
             type(provider_match_id) is not str
@@ -602,6 +634,16 @@ class LiveShadowCollector:
                 )
             )
             or mapping_mode not in {"operator_supplied", "auto_matched"}
+            or (
+                capture_observer is not None
+                and any(
+                    not callable(getattr(capture_observer, name, None))
+                    for name in (
+                        "after_provider_commit",
+                        "after_kalshi_commit",
+                    )
+                )
+            )
             or any(
                 not callable(getattr(market_projector, name, None))
                 for name in (
@@ -626,6 +668,7 @@ class LiveShadowCollector:
         self._stop_requested = stop_requested
         self._render = render
         self._mapping_mode = mapping_mode
+        self._capture_observer = capture_observer
         self._score: sportradar_trial_v3.SportradarScoreSnapshot | None = None
         self._timeline: (
             sportradar_trial_v3.SportradarTimelineSnapshot | None
@@ -674,24 +717,28 @@ class LiveShadowCollector:
         capture: TrialCapture,
         score: sportradar_trial_v3.SportradarScoreSnapshot,
         progression: str,
-    ) -> None:
-        await _durable_to_thread(
-            self._trial_ledger.record_observation,
-            TrialObservationRecord(
-                command="shadow",
-                reservation=capture.reservation,
-                provider_match_id=score.provider_match_id,
-                generated_wall_ns=score.generated_wall_ns,
-                captured_wall_ns=capture.captured_wall_ns,
-                status=score.status,
-                match_status=score.match_status,
-                payload_sha256=sha256(capture.payload).hexdigest(),
-                raw_path=capture.raw_path,
-                progression=progression,
-                last_event_id=self._last_event_id,
-                terminal_reason=_terminal_status(score),
-            )
+    ) -> object:
+        record = TrialObservationRecord(
+            command="shadow",
+            reservation=capture.reservation,
+            provider_match_id=score.provider_match_id,
+            generated_wall_ns=score.generated_wall_ns,
+            captured_wall_ns=capture.captured_wall_ns,
+            status=score.status,
+            match_status=score.match_status,
+            payload_sha256=sha256(capture.payload).hexdigest(),
+            raw_path=capture.raw_path,
+            progression=progression,
+            last_event_id=self._last_event_id,
+            terminal_reason=_terminal_status(score),
         )
+        durable_receipt, cancellation = await _durable_to_thread_result(
+            self._trial_ledger.record_observation,
+            record,
+        )
+        if cancellation is not None:
+            raise cancellation
+        return record if durable_receipt is None else durable_receipt
 
     async def _capture_summary(self) -> None:
         started_wall, started_monotonic = self._clock()
@@ -742,7 +789,17 @@ class LiveShadowCollector:
         self._score = score
         self._provider_capture = capture
         self._progression = "initial"
-        await self._record_trial_observation(capture, score, self._progression)
+        durable_receipt = await self._record_trial_observation(
+            capture, score, self._progression
+        )
+        if self._capture_observer is not None:
+            await self._capture_observer.after_provider_commit(
+                capture=capture,
+                durable_receipt=durable_receipt,
+                captured_wall_ns=capture.captured_wall_ns,
+                captured_monotonic_ns=completed_monotonic,
+                clock_uncertainty_ns=self._provider_clock_uncertainty_ns,
+            )
 
     async def _capture_timeline(self) -> None:
         started_wall, started_monotonic = self._clock()
@@ -810,7 +867,17 @@ class LiveShadowCollector:
         self._last_event_id = None if last is None else last.event_id
         self._last_event_type = None if last is None else last.event_type
         self._last_event_result = None if last is None else last.result
-        await self._record_trial_observation(capture, timeline.score, progression)
+        durable_receipt = await self._record_trial_observation(
+            capture, timeline.score, progression
+        )
+        if self._capture_observer is not None:
+            await self._capture_observer.after_provider_commit(
+                capture=capture,
+                durable_receipt=durable_receipt,
+                captured_wall_ns=capture.captured_wall_ns,
+                captured_monotonic_ns=completed_monotonic,
+                clock_uncertainty_ns=self._provider_clock_uncertainty_ns,
+            )
 
     async def _append_observation(self, reason: str) -> None:
         score = self._score
@@ -1024,6 +1091,18 @@ class LiveShadowCollector:
         self._kalshi_frames += 1
         if persistence_cancellation is not None:
             raise persistence_cancellation
+        if self._capture_observer is not None:
+            await self._capture_observer.after_kalshi_commit(
+                frame=frame,
+                durable_receipt=reference,
+                captured_wall_ns=getattr(frame, "captured_wall_ns", 0),
+                captured_monotonic_ns=getattr(
+                    frame, "captured_monotonic_ns", 0
+                ),
+                clock_uncertainty_ns=getattr(
+                    frame, "clock_uncertainty_ns", 0
+                ),
+            )
         try:
             projection = self._projector.apply(frame)
         except asyncio.CancelledError:
@@ -1083,7 +1162,7 @@ class LiveShadowCollector:
         next_heartbeat = self._next_heartbeat_monotonic_ns
         if next_heartbeat is None:
             return
-        _, now = self._clock()
+        wall, now = self._clock()
         if now < next_heartbeat:
             return
         heartbeat_ns = _HEARTBEAT_SECONDS * 1_000_000_000
@@ -1095,8 +1174,22 @@ class LiveShadowCollector:
                 self._render,
                 self._waiting_dashboard("kalshi_receive_timeout_heartbeat", now),
             )
-            return
-        await self._append_observation("kalshi_receive_timeout_heartbeat")
+        else:
+            await self._append_observation("kalshi_receive_timeout_heartbeat")
+        callback = (
+            None
+            if self._capture_observer is None
+            else getattr(
+                self._capture_observer,
+                "after_heartbeat_commit",
+                None,
+            )
+        )
+        if callable(callback):
+            await callback(
+                captured_wall_ns=wall,
+                captured_monotonic_ns=now,
+            )
 
     async def _reconnect(self) -> None:
         last_error: Exception | None = None

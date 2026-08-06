@@ -191,6 +191,11 @@ def _decode_contract(data: bytes, expected: type[object]) -> object:
     return result
 
 
+def decode_pilot_contract(data: bytes, expected: type[object]) -> object:
+    """Decode one exact canonical pilot artifact of the expected contract type."""
+    return _decode_contract(data, expected)
+
+
 def _absolute(path: Path, name: str) -> Path:
     if not path.is_absolute():
         _halt(name)

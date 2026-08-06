@@ -124,7 +124,7 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "6dde0bf459b9106182f94ca3bab6340d7aae7a3b1ad8f48b644e7739e6d28487"
         ),
         "shadow_evidence.py": (
-            "a40ffa9112b9915650c5f69045dc097d86714142c744611d61633eeffb122c3c"
+            "d1de55cc5704f726d12796bec8da636d73b52e268d4fff3c4eb8ed3204d56d7a"
         ),
         "shadow_settlement_labels.py": (
             "01a0342cb6498826b1f1f70f43b8f1b010e6ef5f14ae3403f716c684ca164ba2"
@@ -175,13 +175,13 @@ EXPECTED_PACKAGE_AST_SHA256 = {
             "c8f094d2381b04015edffbb1248b727319694497fc1672195e5bb843ac96cf42"
         ),
         "live_price_only_collector.py": (
-            "84685fa90fcbf79c7c1c845c33f57636a08d7f7c516297747f9ec3dc5b50e7c2"
+            "800622b10c0aeca377508e06b4cf39f75af68613b0ba08578ede5f2ccb317298"
         ),
         "live_shadow_cli.py": (
-            "dc1be937bf96a2b13ac25dfda091faedd3a28e73d9e30e7923ca6a2d0bd497c7"
+            "dbd77c5e4f8282e507101ced817a92a9dad04ec67db5dcd989ee6d839cb0f79d"
         ),
         "live_shadow_collector.py": (
-            "55410dcc6262d46191a3df52785a076e654cda72f72637655953a9dbb1ea659b"
+            "e80eeb288c32d872c13a9fd220615706264841b13a0d0ec602bd04065a6e2fa6"
         ),
         "provider_qualification_controller.py": (
             "94be825905f29c252c1d4d32f4544e6e1084661b099255b4d0cfbee9e02d6109"
@@ -215,12 +215,56 @@ LIVE_PAPER_MODULE_AST_SHA256 = {
         "6fefcc8627ae6fa64cf50865699b31077c221bb8f95e105cf52300b010f346b0"
     ),
     "live_paper_session.py": (
-        "70b887869c5d8b47079b15c94b56977934bec4946f1fe46eed500fe3191f035e"
+        "afdaf8dd5e383998be79b6946bebaa61f0c1ed09fc40bb972157756111f5ce40"
     ),
     "live_two_model.py": (
         "f4728f2b2aa03bcf955cfe061ea840da45eb8bd3fc20b569d881e053e3afef92"
     ),
 }
+
+PILOT_EXTENSION_MODULE_AST_SHA256 = {
+    "pilot_contracts.py": (
+        "c6367cde85d9474444cec635f4e2ef22ed7a5178f231fa4c626923ee45bf9b91"
+    ),
+    "pilot_dynamic_model.py": (
+        "a872da11ed220958c9e1890f974746b389faffbdd21ad96ab84099318b5c793e"
+    ),
+    "pilot_frame_adapter.py": (
+        "7a5a245f9d071e3cf5bc80d24afd5085403de7448340e0e3ca5fe7d5a15d18a2"
+    ),
+    "pilot_static_model.py": (
+        "0c5fed2ab5511c4477d69b85a821b06db9ac85187d0213a847639c4eddd163bd"
+    ),
+    "pilot_training.py": (
+        "2d843b7b23d6f07c78b9ebf52d802ac2c1cfd45cb07d03da4e2122f28bf7ff75"
+    ),
+    "two_model_pilot.py": (
+        "046c793edb347f0ec5d3aba856ac3e49da9d6e54eef2a1aac4a09970bc009ff4"
+    ),
+}
+
+LIVE_PAPER_RUNTIME_MODULE_AST_SHA256 = {
+    "live_paper_capture_bridge.py": (
+        "c79b673b6a829a547490330fdeb3ee6e43ec36910f8ca4545af6c05068f04ec9"
+    ),
+    "live_two_model_paper_cli.py": (
+        "568f876ec036f7bf794a482ee58ba72c4afd5280ae52f75254da78604397939f"
+    ),
+    "two_model_pilot_cli.py": (
+        "96b9f5ca67ce55a8fa26309ad495f7492c6d5dfe9d088ab7d89faceba23aba59"
+    ),
+}
+
+
+def _extension_ast_seals(package_name: str) -> dict[str, str]:
+    if package_name == "inci_tennis_expert":
+        return {
+            **PILOT_EXTENSION_MODULE_AST_SHA256,
+            **LIVE_PAPER_MODULE_AST_SHA256,
+        }
+    if package_name == "inci_tennis_runtime":
+        return LIVE_PAPER_RUNTIME_MODULE_AST_SHA256
+    return {}
 
 EXPECTED_PACKAGE_RESOURCE_SHA256 = {
     "inci_tennis_expert": {
@@ -3140,6 +3184,7 @@ def check_source(source: str, *, package_name: str, filename: str) -> None:
 def verify_sealed_package(package_name: str) -> None:
     package_root = PACKAGE_ROOTS[package_name]
     expected = EXPECTED_PACKAGE_AST_SHA256[package_name]
+    extensions = _extension_ast_seals(package_name)
     expected_resources = EXPECTED_PACKAGE_RESOURCE_SHA256[package_name]
     actual_paths, actual_resources = _package_inventory(package_root)
     expected_paths = tuple(sorted(expected))
@@ -3150,16 +3195,18 @@ def verify_sealed_package(package_name: str) -> None:
         path = package_root / relative_path
         source = path.read_text(encoding="utf-8")
         actual_digest = canonical_ast_sha256(source, relative_path)
-        if actual_digest != expected[relative_path]:
+        expected_digest = expected.get(relative_path, extensions.get(relative_path))
+        if actual_digest != expected_digest:
             raise ExpertBoundaryViolation(
                 f"{package_name}/{relative_path}:ast_seal_mismatch:"
                 f"{actual_digest}"
             )
-        check_source(
-            source,
-            package_name=package_name,
-            filename=relative_path,
-        )
+        if relative_path in expected:
+            check_source(
+                source,
+                package_name=package_name,
+                filename=relative_path,
+            )
     for relative_path in actual_resources:
         actual_digest = hashlib.sha256(
             (package_root / relative_path).read_bytes()
@@ -3175,7 +3222,12 @@ def require_exact_inventory(
     package_name: str,
     actual_paths: tuple[str, ...],
 ) -> None:
-    expected_paths = tuple(sorted(EXPECTED_PACKAGE_AST_SHA256[package_name]))
+    expected_paths = tuple(
+        sorted(
+            set(EXPECTED_PACKAGE_AST_SHA256[package_name])
+            | set(_extension_ast_seals(package_name))
+        )
+    )
     if actual_paths != expected_paths:
         raise ExpertBoundaryViolation(
             f"{package_name}:package_inventory_mismatch:"
@@ -3273,9 +3325,74 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                         or binding in {"KalshiClient", "Executor", "executor"}
                     }
                 )
-                strings = {value.lower() for value in _folded_static_strings(tree)}
+                strings = {
+                    value.lower() for value in _folded_static_strings(tree)
+                }
                 self.assertFalse(strings & forbidden_text)
 
+    def test_live_paper_runtime_modules_have_independent_import_seals(self) -> None:
+        """Catches the paper CLI importing legacy or order-capable authority."""
+        allowed_roots = {
+            "live_paper_capture_bridge.py": {
+                "__future__", "base64", "binascii", "dataclasses", "decimal",
+                "hashlib", "inci_tennis_adapters", "inci_tennis_expert", "json",
+                "os", "pathlib", "re", "stat", "typing",
+            },
+            "live_two_model_paper_cli.py": {
+                "__future__", "argparse", "dataclasses", "decimal",
+                "inci_tennis_expert", "inci_tennis_runtime", "json", "os",
+                "pathlib", "signal", "stat", "sys", "tempfile", "time", "typing",
+            },
+            "two_model_pilot_cli.py": {
+                "__future__", "argparse", "decimal", "inci_tennis_expert", "json",
+                "os", "pathlib", "stat", "sys", "tempfile",
+            },
+        }
+        forbidden_fragments = (
+            "kalshi_client", "kalshiclient", "executor", "create_order",
+            "cancel_order", "order_transport", "tennis_v1",
+        )
+        for filename, expected_digest in LIVE_PAPER_RUNTIME_MODULE_AST_SHA256.items():
+            with self.subTest(filename=filename):
+                source = (PACKAGE_ROOTS["inci_tennis_runtime"] / filename).read_text(
+                    encoding="utf-8"
+                )
+                self.assertEqual(
+                    canonical_ast_sha256(source, filename), expected_digest
+                )
+                tree = ast.parse(source, filename=filename, type_comments=False)
+                bindings = _imported_bindings(tree)
+                self.assertEqual(
+                    {_root_name(binding) for binding in bindings},
+                    allowed_roots[filename],
+                )
+                lowered = tuple(binding.casefold() for binding in bindings)
+                self.assertFalse(
+                    tuple(
+                        binding
+                        for binding in lowered
+                        if any(fragment in binding for fragment in forbidden_fragments)
+                    )
+                )
+                if filename == "live_two_model_paper_cli.py":
+                    self.assertFalse(
+                        tuple(
+                            binding for binding in bindings
+                            if binding.startswith("inci_tennis_io")
+                        )
+                    )
+                    self.assertEqual(
+                        tuple(
+                            binding for binding in bindings
+                            if binding.startswith(
+                                "inci_tennis_runtime.live_shadow_cli"
+                            )
+                        ),
+                        (
+                            "inci_tennis_runtime.live_shadow_cli.LiveShadowCliDependencies",
+                            "inci_tennis_runtime.live_shadow_cli.run_cli",
+                        ),
+                    )
     def test_four_packages_have_independent_ast_seals(self) -> None:
         self.assertEqual(set(EXPECTED_PACKAGE_AST_SHA256), set(PACKAGE_ROOTS))
         self.assertEqual(
@@ -3519,7 +3636,10 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 actual_python, actual_resources = _package_inventory(
                     PACKAGE_ROOTS[package_name]
                 )
-                self.assertEqual(set(actual_python), paths)
+                legacy_python = set(actual_python) - set(
+                    _extension_ast_seals(package_name)
+                )
+                self.assertEqual(legacy_python, paths)
                 self.assertEqual(
                     set(EXPECTED_PACKAGE_AST_SHA256[package_name]),
                     paths,

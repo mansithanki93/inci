@@ -449,6 +449,117 @@ class ShadowEvidenceStoreTests(unittest.TestCase):
 
 
 class LiveShadowCollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_capture_observer_runs_only_after_durable_commits(self) -> None:
+        """Catches paper projection observing raw inputs before shadow durability."""
+        from inci_tennis_runtime.live_shadow_collector import LiveShadowCollector
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = _Clock()
+            capture = _capture(Path(directory))
+            ledger = _SportradarLedger()
+            committed = {"kalshi": False}
+            observed: list[tuple[str, object, object]] = []
+
+            class Evidence:
+                def persist_kalshi_frame(self, frame: object) -> object:
+                    committed["kalshi"] = True
+                    return SimpleNamespace(
+                        raw_sha256=frame.raw_sha256,
+                        physical_connection_generation=frame.physical_connection_generation,
+                        captured_wall_ns=frame.captured_wall_ns,
+                        captured_monotonic_ns=frame.captured_monotonic_ns,
+                        clock_uncertainty_ns=frame.clock_uncertainty_ns,
+                        raw_path="/tmp/raw-kalshi-frame",
+                    )
+
+                def append_observation(self, record: object) -> None:
+                    del record
+
+                def append_terminal(self, **values: object) -> None:
+                    del values
+
+            class Observer:
+                async def after_provider_commit(self, *, capture: object, durable_receipt: object, captured_wall_ns: int, captured_monotonic_ns: int, clock_uncertainty_ns: int) -> None:
+                    self.assertion = bool(ledger.observations)
+                    observed.append(("provider", capture, durable_receipt))
+
+                async def after_kalshi_commit(self, *, frame: object, durable_receipt: object, captured_wall_ns: int, captured_monotonic_ns: int, clock_uncertainty_ns: int) -> None:
+                    self.assertion = committed["kalshi"]
+                    observed.append(("kalshi", frame, durable_receipt))
+
+                async def after_heartbeat_commit(self, *, captured_wall_ns: int, captured_monotonic_ns: int) -> None:
+                    observed.append(("heartbeat", captured_wall_ns, captured_monotonic_ns))
+
+            observer = Observer()
+            frame = _Frame(b"raw-kalshi-frame", clock)
+            collector = LiveShadowCollector(
+                provider_match_id=MATCH_ID,
+                market_tickers=TICKERS,
+                sportradar_transport=_SportradarTransport(capture),
+                sportradar_ledger=ledger,
+                kalshi_transport=_KalshiTransport(clock, [frame]),
+                market_projector=_Projector(lambda _: _candidate_projection()),
+                evidence_store=Evidence(),
+                wall_ns=clock.wall_ns,
+                monotonic_ns=clock.monotonic_ns,
+                pause=clock.pause,
+                stop_requested=lambda: False,
+                render=lambda _: None,
+                capture_observer=observer,
+            )
+
+            await collector._capture_summary()
+            await collector._receive(1.0)
+            clock.advance(60)
+            collector._next_heartbeat_monotonic_ns = clock.monotonic_ns()
+            await collector._emit_timeout_heartbeat_if_due()
+
+        self.assertTrue(observer.assertion)
+        self.assertEqual(
+            tuple(kind for kind, _, _ in observed),
+            ("provider", "kalshi", "heartbeat"),
+        )
+        self.assertIs(observed[0][1], capture)
+        self.assertIs(observed[1][1], frame)
+
+    async def test_capture_observer_failure_halts_without_relabelling_prior_evidence(self) -> None:
+        """Catches observer failure being swallowed or rewriting committed shadow rows."""
+        from inci_tennis_runtime.live_shadow_collector import LiveShadowCollector
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = _Clock()
+            capture = _capture(Path(directory))
+            ledger = _SportradarLedger()
+
+            class Observer:
+                async def after_provider_commit(self, **values: object) -> None:
+                    del values
+                    raise RuntimeError("paper_bridge_halted")
+
+                async def after_kalshi_commit(self, **values: object) -> None:
+                    del values
+
+            collector = LiveShadowCollector(
+                provider_match_id=MATCH_ID,
+                market_tickers=TICKERS,
+                sportradar_transport=_SportradarTransport(capture),
+                sportradar_ledger=ledger,
+                kalshi_transport=_KalshiTransport(clock, []),
+                market_projector=_Projector(lambda _: None),
+                evidence_store=SimpleNamespace(),
+                wall_ns=clock.wall_ns,
+                monotonic_ns=clock.monotonic_ns,
+                pause=clock.pause,
+                stop_requested=lambda: False,
+                render=lambda _: None,
+                capture_observer=Observer(),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "paper_bridge_halted"):
+                await collector._capture_summary()
+
+        self.assertEqual(len(ledger.observations), 1)
+
     async def test_provider_wait_with_receive_timeouts_still_publishes_heartbeat(
         self,
     ) -> None:

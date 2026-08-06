@@ -996,6 +996,25 @@ def _reduce_l2(state: LivePaperSessionState, item: LivePaperL2Input) -> tuple[Li
         _fail("market_binding")
     records: list[LivePaperRecord] = []
     state = _emit(state, records, LivePaperRecordKind.RAW_L2_RECEIPT, item)
+    pending = state.portfolio.pending_action
+    if pending is not None and (
+        pending.decision_generation != item.frame.physical_connection_generation
+        or pending.decision_subscription_id != item.frame.subscription_id
+    ):
+        state = replace(
+            state,
+            portfolio=replace(state.portfolio, pending_action=None),
+        )
+        state = _emit(
+            state,
+            records,
+            LivePaperRecordKind.REJECTION,
+            _LivePaperRejection(
+                "paper_action",
+                "book_generation_changed",
+                pending,
+            ),
+        )
     blocked_buy = False
     pending = state.portfolio.pending_action
     if pending is not None and pending.kind is PaperActionKind.BUY:
