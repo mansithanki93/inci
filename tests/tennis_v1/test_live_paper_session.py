@@ -19,6 +19,7 @@ from inci_tennis_expert.fee_schedule import FrozenFeeSchedule
 from inci_tennis_expert.live_paper_contracts import (
     LivePaperMarketBinding,
     LivePaperSourceObservation,
+    PaperScoreTrust,
 )
 from inci_tennis_expert.live_paper_execution import (
     LivePaperL2Frame,
@@ -238,6 +239,42 @@ def _skewed_consensus_score_input(api: object) -> object:
         now_ns,
         now_ns,
     )
+
+
+def _consensus_score_input(
+    api: object,
+    now_ns: int,
+    *,
+    receipt_a: str = SHA_D,
+    receipt_b: str = "e" * 64,
+) -> object:
+    base = _score_input(api).observations[0]
+    source_a = replace(
+        base,
+        raw_receipt_sha256=receipt_a,
+        captured_wall_ns=now_ns,
+        captured_monotonic_ns=now_ns,
+    )
+    source_b = replace(
+        base,
+        source_id="source-b",
+        independent_lineage_id="lineage-b",
+        lineage_sha256=SHA_C,
+        independence_proof_sha256=SHA_D,
+        raw_receipt_sha256=receipt_b,
+        state=replace(
+            base.state,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_C,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+        ),
+        captured_wall_ns=now_ns,
+        captured_monotonic_ns=now_ns,
+    )
+    return api.LivePaperScoreBatchInput((source_a, source_b), now_ns, now_ns)
 
 
 def _l2_input(api: object, sequence: int, now: int, receipt: str) -> object:
@@ -513,6 +550,89 @@ class LivePaperSessionTests(unittest.TestCase):
         raw = api.encode_live_paper_records(score_rows + action_rows + stale_rows)
         self.assertEqual(api.replay_live_paper_records(raw).state, state)
 
+    def test_terminal_score_invalidates_pending_buy_before_later_book_can_fill(self) -> None:
+        """Catches a delayed entry filling after an accepted terminal score."""
+        api = _api()
+        base_observation = _score_input(api).observations[0]
+        match_point = replace(
+            base_observation.state,
+            games_home=5,
+            games_away=0,
+            points_home=ScoreValue.FORTY,
+            points_away=ScoreValue.LOVE,
+        )
+        initial_score = api.LivePaperScoreBatchInput(
+            (replace(base_observation, state=match_point),),
+            2_000_000_000,
+            2_000_000_000,
+        )
+        terminal_state = apply_point(
+            match_point,
+            ProviderPoint(
+                provider_source_id=match_point.provider_source_id,
+                revision_domain_id=match_point.revision_domain_id,
+                source_lineage_sha256=match_point.source_lineage_sha256,
+                provider_event_id="capture-terminal",
+                provider_match_id=match_point.provider_match_id,
+                home_player_id=match_point.home_player_id,
+                away_player_id=match_point.away_player_id,
+                scheduled_start_wall_ns=match_point.scheduled_start_wall_ns,
+                match_format=match_point.match_format,
+                correction_epoch=match_point.correction_epoch,
+                revision=match_point.revision + 1,
+                point_winner=PlayerSide.HOME,
+                server_before_point=match_point.server_for_next_point,
+                source_wall_ns=3_500_000_000,
+                source_generated_wall_ns=3_500_000_000,
+                received_monotonic_ns=3_500_000_000,
+                clock_uncertainty_ns=0,
+            ),
+        ).state
+        terminal_score = api.LivePaperScoreBatchInput(
+            (
+                replace(
+                    base_observation,
+                    state=terminal_state,
+                    raw_receipt_sha256="8" * 64,
+                    captured_wall_ns=3_500_000_000,
+                    captured_monotonic_ns=3_500_000_000,
+                ),
+            ),
+            3_500_000_000,
+            3_500_000_000,
+        )
+        state = api.open_live_paper_session(_config(api))
+        state, score_rows = api.reduce_live_paper_input(state, initial_score)
+        state, action_rows = api.reduce_live_paper_input(
+            state,
+            _l2_input(api, 1, 3_000_000_000, "1" * 64),
+        )
+        self.assertIsNotNone(state.portfolio.pending_action)
+
+        state, terminal_rows = api.reduce_live_paper_input(state, terminal_score)
+
+        self.assertFalse(state.portfolio.match_live)
+        self.assertIsNone(state.portfolio.pending_action)
+        self.assertIsNone(state.portfolio.position)
+        invalidations = tuple(
+            row.payload.body
+            for row in terminal_rows
+            if row.kind.value == "rejection"
+            and row.payload.body.source == "paper_action"
+        )
+        self.assertEqual(len(invalidations), 1)
+        self.assertEqual(invalidations[0].reason, "match_not_live")
+        state, later_rows = api.reduce_live_paper_input(
+            state,
+            _l2_input(api, 2, 4_500_000_000, "2" * 64),
+        )
+        self.assertNotIn("fill", tuple(row.kind.value for row in later_rows))
+        self.assertIsNone(state.portfolio.position)
+        raw = api.encode_live_paper_records(
+            score_rows + action_rows + terminal_rows + later_rows
+        )
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
     def test_generation_rollover_invalidates_and_reissues_pending_action_causally(self) -> None:
         """Catches an old-generation action blocking the paper portfolio forever."""
         api = _api()
@@ -544,6 +664,92 @@ class LivePaperSessionTests(unittest.TestCase):
         self.assertIsNotNone(state.portfolio.pending_action)
         self.assertNotEqual(state.portfolio.pending_action, old_action)
         self.assertEqual(state.portfolio.pending_action.decision_generation, 2)
+
+    def test_horizon_exit_supersedes_partial_buy_residual_and_replays(self) -> None:
+        """Catches a residual entry filling before a mandatory delayed exit."""
+        api = _api()
+        state = api.open_live_paper_session(_config(api))
+        state, score_rows = api.reduce_live_paper_input(state, _score_input(api))
+        state, action_rows = api.reduce_live_paper_input(
+            state,
+            _l2_input(api, 1, 3_000_000_000, "1" * 64),
+        )
+        partial_input = _l2_input(api, 2, 4_000_000_001, "2" * 64)
+        partial_input = replace(
+            partial_input,
+            frame=replace(
+                partial_input.frame,
+                home=replace(
+                    partial_input.frame.home,
+                    yes_asks=(LivePaperL2Level(Decimal(".30"), Decimal("10")),),
+                ),
+            ),
+        )
+        state, partial_rows = api.reduce_live_paper_input(state, partial_input)
+        self.assertEqual(state.portfolio.position.quantity, Decimal("10"))
+        self.assertEqual(state.portfolio.pending_action.remaining_quantity, Decimal("90"))
+
+        refreshed_observation = replace(
+            _score_input(api).observations[0],
+            raw_receipt_sha256="9" * 64,
+            captured_wall_ns=303_500_000_000,
+            captured_monotonic_ns=303_500_000_000,
+        )
+        state, refresh_rows = api.reduce_live_paper_input(
+            state,
+            api.LivePaperScoreBatchInput(
+                (refreshed_observation,),
+                303_500_000_000,
+                303_500_000_000,
+            ),
+        )
+        residual_buy = state.portfolio.pending_action
+        self.assertEqual(residual_buy.remaining_quantity, Decimal("90"))
+        horizon_input = _l2_input(api, 3, 304_000_000_001, "3" * 64)
+
+        state, horizon_rows = api.reduce_live_paper_input(state, horizon_input)
+
+        self.assertNotIn("fill", tuple(row.kind.value for row in horizon_rows))
+        self.assertEqual(state.portfolio.position.quantity, Decimal("10"))
+        self.assertEqual(state.portfolio.pending_action.kind.value, "SELL")
+        self.assertEqual(state.portfolio.pending_action.quantity, Decimal("10"))
+        supersessions = tuple(
+            row.payload.body
+            for row in horizon_rows
+            if row.kind.value == "rejection"
+            and row.payload.body.source == "paper_action"
+        )
+        self.assertEqual(len(supersessions), 1)
+        self.assertEqual(
+            supersessions[0].reason,
+            "pending_buy_superseded_by_exit",
+        )
+        self.assertEqual(supersessions[0].detail, residual_buy)
+        self.assertIn("action", tuple(row.kind.value for row in horizon_rows))
+
+        state, exit_rows = api.reduce_live_paper_input(
+            state,
+            _l2_input(api, 4, 305_100_000_001, "4" * 64),
+        )
+        fills = tuple(
+            row.payload.body.fill
+            for row in exit_rows
+            if row.kind.value == "fill"
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].action_kind.value, "SELL")
+        self.assertEqual(fills[0].quantity, Decimal("10"))
+        self.assertIsNone(state.portfolio.position)
+        self.assertIsNone(state.portfolio.pending_action)
+        raw = api.encode_live_paper_records(
+            score_rows
+            + action_rows
+            + partial_rows
+            + refresh_rows
+            + horizon_rows
+            + exit_rows
+        )
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
 
     def test_l2_parent_receipt_generation_must_match_the_paper_frame(self) -> None:
         """Catches a collector-local generation masquerading as session authority."""
@@ -633,6 +839,47 @@ class LivePaperSessionTests(unittest.TestCase):
         raw = api.encode_live_paper_records(anchor_rows + unchanged_rows + book_rows)
         self.assertEqual(api.replay_live_paper_records(raw).state, state)
 
+    def test_exact_duplicate_score_evidence_does_not_refresh_model_authority(self) -> None:
+        """Catches an idempotent capture advancing authority or model state twice."""
+        api = _api()
+        state = api.open_live_paper_session(_config(api))
+        state, anchor_rows = api.reduce_live_paper_input(state, _score_input(api))
+        fresh = replace(
+            _score_input(api).observations[0],
+            raw_receipt_sha256="5" * 64,
+            captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000,
+        )
+        refresh_input = api.LivePaperScoreBatchInput(
+            (fresh,),
+            3_000_000_000,
+            3_000_000_000,
+        )
+        state, refresh_rows = api.reduce_live_paper_input(state, refresh_input)
+        coordinator = state.score_coordinator
+        model = state.live_model
+        forecast = state.latest_forecast
+
+        state, duplicate_rows = api.reduce_live_paper_input(state, refresh_input)
+
+        self.assertIs(state.score_coordinator, coordinator)
+        self.assertIs(state.live_model, model)
+        self.assertIs(state.latest_forecast, forecast)
+        self.assertEqual(state.live_model.state_sha256, model.state_sha256)
+        self.assertEqual(
+            state.live_model.dynamic_model.belief.belief_sha256,
+            model.dynamic_model.belief.belief_sha256,
+        )
+        self.assertEqual(
+            tuple(row.kind.value for row in duplicate_rows),
+            ("raw_score_receipt", "rejection"),
+        )
+        self.assertEqual(duplicate_rows[-1].payload.body.reason, "score_unchanged")
+        raw = api.encode_live_paper_records(
+            anchor_rows + refresh_rows + duplicate_rows
+        )
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
     def test_consensus_clock_skew_cannot_extend_score_actionability(self) -> None:
         """Catches component-wise maxima creating a young clock no source observed."""
         api = _api()
@@ -675,6 +922,8 @@ class LivePaperSessionTests(unittest.TestCase):
         api = _api()
         state = api.open_live_paper_session(_consensus_config(api))
         state, anchor_rows = api.reduce_live_paper_input(state, _score_input(api))
+        prior_model = state.live_model
+        prior_forecast = state.latest_forecast
 
         state, unchanged_rows = api.reduce_live_paper_input(
             state,
@@ -688,6 +937,47 @@ class LivePaperSessionTests(unittest.TestCase):
         self.assertEqual(state.last_score_wall_ns, 10_000_000_000)
         self.assertEqual(state.last_score_monotonic_ns, 10_000_000_000)
         self.assertEqual(state.last_score_clock_uncertainty_ns, 5_000_000_000)
+        self.assertTrue(state.score_actionable)
+        self.assertIs(state.score_coordinator.anchor.trust, PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertIs(state.latest_forecast.trust, PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertEqual(
+            state.live_model.anchor_sha256,
+            state.score_coordinator.anchor.anchor_sha256,
+        )
+        self.assertEqual(
+            state.latest_forecast.anchor_sha256,
+            state.score_coordinator.anchor.anchor_sha256,
+        )
+        self.assertEqual(
+            state.score_coordinator.anchor.supporting_lineage_sha256s,
+            (SHA_A, SHA_C),
+        )
+        self.assertEqual(
+            state.score_coordinator.anchor.parent_receipt_sha256s,
+            (SHA_D, "e" * 64),
+        )
+        self.assertEqual(state.live_model.local_point_ordinal, prior_model.local_point_ordinal)
+        self.assertEqual(state.live_model.rebase_epoch, prior_model.rebase_epoch)
+        self.assertEqual(
+            state.live_model.dynamic_model.belief.belief_sha256,
+            prior_model.dynamic_model.belief.belief_sha256,
+        )
+        self.assertEqual(
+            state.latest_forecast.model_1,
+            prior_forecast.model_1,
+        )
+        self.assertEqual(
+            state.latest_forecast.model_2,
+            prior_forecast.model_2,
+        )
+        self.assertEqual(
+            state.latest_forecast.forecast_label,
+            "AUTHORITY_REFRESHED_PAPER",
+        )
+        self.assertEqual(
+            tuple(record.kind.value for record in unchanged_rows),
+            ("raw_score_receipt", "anchor", "forecast", "checkpoint"),
+        )
         self.assertIsNone(state.portfolio.pending_action)
         self.assertEqual(book_rows[-1].payload.body.reason, "score_stale")
         self.assertNotIn("action", tuple(record.kind.value for record in book_rows))
@@ -695,6 +985,95 @@ class LivePaperSessionTests(unittest.TestCase):
             anchor_rows + unchanged_rows + book_rows
         )
         self.assertEqual(api.replay_live_paper_records(raw).state, state)
+
+    def test_unchanged_authority_downgrade_and_upgrade_agree_after_replay_and_resume(self) -> None:
+        """Catches retained score evidence disagreeing across coordinator/model/forecast."""
+        api = _api()
+        state = api.open_live_paper_session(_consensus_config(api))
+        state, initial_rows = api.reduce_live_paper_input(
+            state,
+            _consensus_score_input(api, 2_000_000_000),
+        )
+        initial_model = state.live_model
+        initial_anchor_sha = state.score_coordinator.anchor.anchor_sha256
+        source_a = replace(
+            _score_input(api).observations[0],
+            raw_receipt_sha256="5" * 64,
+            captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000,
+        )
+
+        state, downgrade_rows = api.reduce_live_paper_input(
+            state,
+            api.LivePaperScoreBatchInput(
+                (source_a,),
+                3_000_000_000,
+                3_000_000_000,
+            ),
+        )
+
+        downgraded_anchor = state.score_coordinator.anchor
+        self.assertIs(downgraded_anchor.trust, PaperScoreTrust.SINGLE_SOURCE_PAPER)
+        self.assertIs(state.latest_forecast.trust, PaperScoreTrust.SINGLE_SOURCE_PAPER)
+        self.assertEqual(downgraded_anchor.parent_receipt_sha256s, ("5" * 64,))
+        self.assertEqual(downgraded_anchor.supporting_lineage_sha256s, (SHA_A,))
+        self.assertEqual(downgraded_anchor.accepted_wall_ns, 3_000_000_000)
+        self.assertEqual(downgraded_anchor.accepted_monotonic_ns, 3_000_000_000)
+        self.assertNotEqual(downgraded_anchor.anchor_sha256, initial_anchor_sha)
+        self.assertEqual(state.live_model.anchor_sha256, downgraded_anchor.anchor_sha256)
+        self.assertEqual(state.latest_forecast.anchor_sha256, downgraded_anchor.anchor_sha256)
+        self.assertEqual(state.live_model.local_point_ordinal, initial_model.local_point_ordinal)
+        self.assertEqual(state.live_model.rebase_epoch, initial_model.rebase_epoch)
+        self.assertEqual(
+            state.live_model.dynamic_model.belief.belief_sha256,
+            initial_model.dynamic_model.belief.belief_sha256,
+        )
+        self.assertEqual(
+            tuple(record.kind.value for record in downgrade_rows),
+            ("raw_score_receipt", "anchor", "forecast", "checkpoint"),
+        )
+        checkpoint = api.encode_live_paper_checkpoint(state)
+
+        state, upgrade_rows = api.reduce_live_paper_input(
+            state,
+            _consensus_score_input(
+                api,
+                4_000_000_000,
+                receipt_a="6" * 64,
+                receipt_b="7" * 64,
+            ),
+        )
+
+        upgraded_anchor = state.score_coordinator.anchor
+        self.assertIs(upgraded_anchor.trust, PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertIs(state.latest_forecast.trust, PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertEqual(
+            upgraded_anchor.parent_receipt_sha256s,
+            ("6" * 64, "7" * 64),
+        )
+        self.assertEqual(upgraded_anchor.supporting_lineage_sha256s, (SHA_A, SHA_C))
+        self.assertEqual(upgraded_anchor.accepted_wall_ns, 4_000_000_000)
+        self.assertEqual(upgraded_anchor.accepted_monotonic_ns, 4_000_000_000)
+        self.assertEqual(state.live_model.anchor_sha256, upgraded_anchor.anchor_sha256)
+        self.assertEqual(state.latest_forecast.anchor_sha256, upgraded_anchor.anchor_sha256)
+        self.assertEqual(state.live_model.local_point_ordinal, initial_model.local_point_ordinal)
+        self.assertEqual(state.live_model.consensus_epoch, initial_model.consensus_epoch)
+        self.assertEqual(state.live_model.rebase_epoch, initial_model.rebase_epoch)
+        self.assertEqual(
+            state.live_model.dynamic_model.belief.belief_sha256,
+            initial_model.dynamic_model.belief.belief_sha256,
+        )
+        self.assertEqual(
+            tuple(record.kind.value for record in upgrade_rows),
+            ("raw_score_receipt", "anchor", "forecast", "checkpoint"),
+        )
+        raw = api.encode_live_paper_records(
+            initial_rows + downgrade_rows + upgrade_rows
+        )
+        self.assertEqual(api.replay_live_paper_records(raw).state, state)
+        resumed = api.load_live_paper_checkpoint(checkpoint, raw)
+        self.assertTrue(resumed.checkpoint_used)
+        self.assertEqual(resumed.state, state)
 
     def test_consensus_rebase_clock_skew_cannot_extend_score_actionability(self) -> None:
         """Catches a rebase anchor carrying the same synthetic young clock."""

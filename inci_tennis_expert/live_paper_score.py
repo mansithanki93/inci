@@ -222,10 +222,19 @@ def reduce_live_paper_scores(state: LivePaperScoreCoordinatorState, observations
         next_state = replace(state, anchor=anchor, consensus_epoch=epoch)
         return next_state, _decision(LivePaperScoreDecisionKind.ANCHORED, trust=trust, anchor=anchor, reason="initial_anchor")
     if score_coordinates(accepted) == score_coordinates(state.anchor.state):
-        return state, _decision(
+        anchor = _anchor(state, selected)
+        if anchor == state.anchor:
+            return state, _decision(
+                LivePaperScoreDecisionKind.UNCHANGED,
+                trust=state.anchor.trust,
+                anchor=state.anchor,
+                reason="score_unchanged",
+            )
+        next_state = replace(state, anchor=anchor)
+        return next_state, _decision(
             LivePaperScoreDecisionKind.UNCHANGED,
-            trust=state.anchor.trust,
-            anchor=state.anchor,
+            trust=anchor.trust,
+            anchor=anchor,
             reason="score_unchanged",
         )
     resolved = _successor(state.anchor.state, accepted)

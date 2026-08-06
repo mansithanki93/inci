@@ -45,6 +45,7 @@ __all__ = (
     "build_operator_bootstrap_artifacts",
     "open_live_two_model",
     "apply_live_paper_transition",
+    "refresh_live_two_model_anchor",
     "rebase_live_two_model",
 )
 
@@ -66,6 +67,7 @@ class LiveEdgeClaim(str, Enum):
 class LiveForecastLabel(str, Enum):
     ANCHORED_PAPER = "ANCHORED_PAPER"
     UPDATED_PAPER = "UPDATED_PAPER"
+    AUTHORITY_REFRESHED_PAPER = "AUTHORITY_REFRESHED_PAPER"
     REBASED_PAPER = "REBASED_PAPER"
 
 
@@ -626,6 +628,51 @@ def apply_live_paper_transition(
     return next_state, _forecast(
         next_state, trust=transition.trust, label=LiveForecastLabel.UPDATED_PAPER,
         prior_belief_sha256=prior,
+    )
+
+
+def refresh_live_two_model_anchor(
+    state: LiveTwoModelState, anchor: LivePaperScoreAnchor,
+) -> tuple[LiveTwoModelState, LiveTwoModelForecast]:
+    """Refresh same-score authority without observing a point or resetting belief."""
+    if (
+        type(state) is not LiveTwoModelState
+        or type(anchor) is not LivePaperScoreAnchor
+        or anchor.canonical_match_id != state.canonical_match_id
+        or score_coordinates(anchor.state) != score_coordinates(state.current_state)
+        or anchor.consensus_epoch != state.consensus_epoch
+        or anchor.correction_epoch != state.correction_epoch
+        or anchor.rebase_epoch != state.rebase_epoch
+        or not _artifact_bound_to_anchor(
+            state.static_artifact, state.dynamic_artifact, anchor
+        )
+        or not _matches_binding(anchor.state, state.match_binding)
+    ):
+        _fail("authority_refresh")
+    belief_sha256 = state.dynamic_model.belief.belief_sha256
+    next_state = _make_state(
+        static_artifact=state.static_artifact,
+        dynamic_artifact=state.dynamic_artifact,
+        current_state=anchor.state,
+        dynamic_model=state.dynamic_model,
+        local_point_ordinal=state.local_point_ordinal,
+        consensus_epoch=state.consensus_epoch,
+        correction_epoch=state.correction_epoch,
+        rebase_epoch=state.rebase_epoch,
+        source_sha256=_source_digest(
+            supporting_lineage_sha256s=anchor.supporting_lineage_sha256s,
+            parent_receipt_sha256s=anchor.parent_receipt_sha256s,
+        ),
+        anchor_sha256=anchor.anchor_sha256,
+        transition_sha256=state.transition_sha256,
+        match_binding=state.match_binding,
+        authority=state.artifact_authority,
+    )
+    return next_state, _forecast(
+        next_state,
+        trust=anchor.trust,
+        label=LiveForecastLabel.AUTHORITY_REFRESHED_PAPER,
+        prior_belief_sha256=belief_sha256,
     )
 
 

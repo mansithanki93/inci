@@ -1336,6 +1336,229 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             ):
                 self.assertIn(field, dashboard)
 
+    def test_live_requires_one_sportradar_before_disclosure_writer_or_transport(self) -> None:
+        from inci_tennis_runtime.live_two_model_paper_cli import run
+        import inci_tennis_runtime.live_shadow_cli as live_shadow_cli
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            session = root / "session.jsonl"
+            checkpoint = root / "checkpoint.json"
+            document = _manifest()
+            primary = document["providers"][0]  # type: ignore[index]
+            primary["slot"] = "sportradar"
+            primary["source_id"] = "sportradar-primary"
+            _append_proven_provider(document, lineage_sha256="c" * 64)
+            secondary = document["providers"][1]  # type: ignore[index]
+            secondary["slot"] = "sportradar"
+            secondary["source_id"] = "sportradar-secondary"
+            manifest.write_text(
+                json.dumps(document, sort_keys=True, separators=(",", ":")),
+                encoding="ascii",
+            )
+            calls: list[str] = []
+
+            class RecordingWriter:
+                def __init__(self, *args: object, **kwargs: object) -> None:
+                    del args, kwargs
+                    calls.append("writer")
+
+                def commit(self, *args: object, **kwargs: object) -> None:
+                    del args, kwargs
+                    calls.append("commit")
+
+                def close(self) -> None:
+                    calls.append("close")
+
+            def transport(*args: object, **kwargs: object) -> int:
+                del args, kwargs
+                calls.append("transport")
+                return 1
+
+            output = io.StringIO()
+            errors = io.StringIO()
+            with mock.patch(
+                "inci_tennis_runtime.live_two_model_paper_cli._DurableSessionWriter",
+                RecordingWriter,
+            ), mock.patch.object(live_shadow_cli, "run_cli", side_effect=transport):
+                status = run([
+                    "--live-readonly", "--manifest", str(manifest),
+                    "--session-log", str(session), "--checkpoint", str(checkpoint),
+                    "--bootstrap-home-serve", "0.80",
+                    "--bootstrap-away-serve", "0.20",
+                    "--duration-seconds", "10",
+                ], stdout=output, stderr=errors)
+
+            self.assertEqual(status, 1)
+            self.assertIn("sportradar_manifest_binding", errors.getvalue())
+            self.assertEqual(
+                output.getvalue().splitlines(),
+                ["LIVE MODELS 1+2 / PAPER ONLY / NO REAL ORDERS"],
+            )
+            self.assertNotIn("CONSENSUS_PAPER", output.getvalue())
+            self.assertEqual(calls, [])
+            self.assertFalse(session.exists())
+            self.assertFalse(checkpoint.exists())
+
+    def test_dashboard_trust_expires_and_fails_closed_on_clock_regression(self) -> None:
+        from inci_tennis_runtime.live_paper_capture_bridge import (
+            GrowingJsonlCaptureBridge,
+            manifest_from_document,
+        )
+        from inci_tennis_runtime.live_two_model_paper_cli import _dashboard
+
+        bridge = GrowingJsonlCaptureBridge.bootstrap(
+            manifest_from_document(_manifest()),
+            home_serve_probability=Decimal("0.80"),
+            away_serve_probability=Decimal("0.20"),
+            opened_wall_ns=900_000_000,
+            opened_monotonic_ns=900_000_000,
+        )
+        bridge.accept_score_envelope(
+            _score_envelope(
+                _score_payload(),
+                wall=1_000_000_000,
+                mono=1_000_000_000,
+            )
+        )
+
+        stale = io.StringIO()
+        _dashboard(
+            stale,
+            bridge,
+            LivePaperRecordKind.ANCHOR.value,
+            now_wall_ns=7_000_000_000,
+            now_monotonic_ns=7_000_000_000,
+        )
+        self.assertIn("trust=ABSTAINED", stale.getvalue())
+
+        for wall_ns, monotonic_ns in (
+            (999_999_999, 1_000_000_000),
+            (1_000_000_000, 999_999_999),
+        ):
+            with self.subTest(wall_ns=wall_ns, monotonic_ns=monotonic_ns):
+                regressed = io.StringIO()
+                _dashboard(
+                    regressed,
+                    bridge,
+                    LivePaperRecordKind.ANCHOR.value,
+                    now_wall_ns=wall_ns,
+                    now_monotonic_ns=monotonic_ns,
+                )
+                self.assertIn("trust=ABSTAINED", regressed.getvalue())
+
+    def test_dashboard_tracks_material_unchanged_consensus_upgrade_and_downgrade(self) -> None:
+        from inci_tennis_runtime.live_paper_capture_bridge import (
+            GrowingJsonlCaptureBridge,
+            manifest_from_document,
+        )
+        from inci_tennis_runtime.live_two_model_paper_cli import _dashboard
+
+        document = _manifest()
+        primary = document["providers"][0]  # type: ignore[index]
+        secondary = dict(primary)
+        secondary.update({
+            "source_id": "api-tennis-secondary",
+            "provider_match_id": "102",
+            "home_player_id": "203",
+            "away_player_id": "204",
+            "independent_lineage_id": "api-tennis-lineage-b",
+            "source_lineage_sha256": "c" * 64,
+            "independence_proof_sha256": "d" * 64,
+        })
+        document["providers"].append(secondary)  # type: ignore[union-attr]
+        bridge = GrowingJsonlCaptureBridge.bootstrap(
+            manifest_from_document(document),
+            home_serve_probability=Decimal("0.80"),
+            away_serve_probability=Decimal("0.20"),
+            opened_wall_ns=900_000_000,
+            opened_monotonic_ns=900_000_000,
+        )
+        bridge.accept_score_envelope(
+            _score_envelope(
+                _score_payload(),
+                wall=1_000_000_000,
+                mono=1_000_000_000,
+            )
+        )
+        second_payload = json.loads(_score_payload())
+        second_payload["result"][0].update({  # type: ignore[index]
+            "event_key": "102",
+            "first_player_key": "203",
+            "second_player_key": "204",
+        })
+        second_raw = json.dumps(
+            second_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        second_envelope = _score_envelope(
+            second_raw,
+            ordinal=2,
+            wall=2_000_000_000,
+            mono=2_000_000_000,
+        )
+        second_envelope.update({
+            "provider_source_id": "api-tennis-secondary",
+            "provider_match_id": "102",
+            "home_player_id": "203",
+            "away_player_id": "204",
+            "independent_lineage_id": "api-tennis-lineage-b",
+            "source_lineage_sha256": "c" * 64,
+            "independence_proof_sha256": "d" * 64,
+        })
+        bridge.accept_score_envelope(second_envelope)
+
+        consensus = io.StringIO()
+        _dashboard(
+            consensus,
+            bridge,
+            LivePaperRecordKind.CHECKPOINT.value,
+            now_wall_ns=2_000_000_000,
+            now_monotonic_ns=2_000_000_000,
+        )
+        self.assertEqual(
+            bridge.state.score_coordinator.anchor.trust.value,
+            "CONSENSUS_PAPER",
+        )
+        self.assertEqual(bridge.state.latest_forecast.trust.value, "CONSENSUS_PAPER")
+        self.assertEqual(
+            bridge.state.live_model.anchor_sha256,
+            bridge.state.score_coordinator.anchor.anchor_sha256,
+        )
+        self.assertIn("trust=CONSENSUS_PAPER", consensus.getvalue())
+
+        bridge.accept_score_envelope(
+            _score_envelope(
+                _score_payload(),
+                ordinal=3,
+                wall=8_000_000_000,
+                mono=8_000_000_000,
+            )
+        )
+        single = io.StringIO()
+        _dashboard(
+            single,
+            bridge,
+            LivePaperRecordKind.CHECKPOINT.value,
+            now_wall_ns=8_000_000_000,
+            now_monotonic_ns=8_000_000_000,
+        )
+        self.assertEqual(
+            bridge.state.score_coordinator.anchor.trust.value,
+            "SINGLE_SOURCE_PAPER",
+        )
+        self.assertEqual(
+            bridge.state.latest_forecast.trust.value,
+            "SINGLE_SOURCE_PAPER",
+        )
+        self.assertEqual(
+            bridge.state.live_model.anchor_sha256,
+            bridge.state.score_coordinator.anchor.anchor_sha256,
+        )
+        self.assertIn("trust=SINGLE_SOURCE_PAPER", single.getvalue())
+
     def test_dashboard_counters_retain_kind_and_stage_without_count_collisions(self) -> None:
         from inci_tennis_runtime.live_paper_capture_bridge import (
             GrowingJsonlCaptureBridge,

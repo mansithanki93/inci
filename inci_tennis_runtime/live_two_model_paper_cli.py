@@ -674,14 +674,74 @@ def _dashboard(
     bridge: GrowingJsonlCaptureBridge,
     last_kind: str,
     *,
+    now_wall_ns: int | None = None,
     now_monotonic_ns: int | None = None,
 ) -> None:
     state = bridge.state
     records = bridge.records
+    if any(
+        value is not None and (type(value) is not int or value < 0)
+        for value in (now_wall_ns, now_monotonic_ns)
+    ):
+        _fail("dashboard_clock")
+    observed_wall = now_wall_ns
+    observed_now = now_monotonic_ns
+    if observed_wall is None:
+        observed_wall = max(
+            (
+                value
+                for record in records
+                for value in (
+                    getattr(record.payload.body, "observed_wall_ns", None),
+                    getattr(
+                        getattr(record.payload.body, "frame", None),
+                        "captured_wall_ns",
+                        None,
+                    ),
+                )
+                if type(value) is int
+            ),
+            default=None,
+        )
+    if observed_now is None:
+        observed_now = max(
+            (
+                value
+                for record in records
+                for value in (
+                    getattr(record.payload.body, "observed_monotonic_ns", None),
+                    getattr(
+                        getattr(record.payload.body, "frame", None),
+                        "captured_monotonic_ns",
+                        None,
+                    ),
+                )
+                if type(value) is int
+            ),
+            default=None,
+        )
     anchor = state.score_coordinator.anchor
+    score_wall = state.last_score_wall_ns
+    score_monotonic = state.last_score_monotonic_ns
+    score_uncertainty = state.last_score_clock_uncertainty_ns
+    score_fresh = (
+        anchor is not None
+        and state.score_actionable
+        and score_wall is not None
+        and score_monotonic is not None
+        and score_uncertainty is not None
+        and observed_wall is not None
+        and observed_now is not None
+        and observed_wall >= score_wall
+        and observed_now >= score_monotonic
+        and max(
+            observed_wall - score_wall,
+            observed_now - score_monotonic,
+        ) + score_uncertainty <= state.config.score_freshness_ns
+    )
     trust = (
         "ABSTAINED"
-        if anchor is None or not state.score_actionable
+        if not score_fresh
         else anchor.trust.value
     )
     forecast = state.latest_forecast
@@ -723,24 +783,6 @@ def _dashboard(
             else anchor.state.server_for_next_point.value
         )
     latest_book = bridge.last_book_monotonic_ns
-    observed_now = now_monotonic_ns
-    if observed_now is None:
-        observed_now = max(
-            (
-                value
-                for record in records
-                for value in (
-                    getattr(record.payload.body, "observed_monotonic_ns", None),
-                    getattr(
-                        getattr(record.payload.body, "frame", None),
-                        "captured_monotonic_ns",
-                        None,
-                    ),
-                )
-                if type(value) is int
-            ),
-            default=None,
-        )
     book_age = "--" if latest_book is None or observed_now is None else f"{max(0, observed_now - latest_book) / 1_000_000_000:.3f}s"
     elapsed = (
         "--" if observed_now is None
@@ -1002,6 +1044,7 @@ def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdou
                 writer.commit(tuple(bridge.records), bridge.state)
                 _dashboard(
                     stdout, bridge, records[-1].kind.value,
+                    now_wall_ns=wall,
                     now_monotonic_ns=mono,
                 )
     try:
@@ -1034,6 +1077,7 @@ def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdou
                     writer.commit(tuple(bridge.records), bridge.state)
                     _dashboard(
                         stdout, bridge, records[-1].kind.value,
+                        now_wall_ns=wall,
                         now_monotonic_ns=now,
                     )
                     last_wall = wall
@@ -1048,16 +1092,32 @@ def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdou
             if args.stop_at_eof
             else "duration_elapsed"
         )
-        records = _terminal(bridge, reason, last_wall + 1, last_mono + 1)
+        terminal_wall = last_wall + 1
+        terminal_mono = last_mono + 1
+        records = _terminal(bridge, reason, terminal_wall, terminal_mono)
         writer.commit(tuple(bridge.records), bridge.state)
-        _dashboard(stdout, bridge, records[-1].kind.value)
+        _dashboard(
+            stdout,
+            bridge,
+            records[-1].kind.value,
+            now_wall_ns=terminal_wall,
+            now_monotonic_ns=terminal_mono,
+        )
     except (LivePaperBridgeError, ValueError):
         if not bridge.state.terminal:
+            terminal_wall = max(0, last_wall + 1)
+            terminal_mono = max(0, last_mono + 1)
             records = _terminal(
-                bridge, "halted", max(0, last_wall + 1), max(0, last_mono + 1)
+                bridge, "halted", terminal_wall, terminal_mono
             )
             writer.commit(tuple(bridge.records), bridge.state)
-            _dashboard(stdout, bridge, records[-1].kind.value)
+            _dashboard(
+                stdout,
+                bridge,
+                records[-1].kind.value,
+                now_wall_ns=terminal_wall,
+                now_monotonic_ns=terminal_mono,
+            )
         raise
     finally:
         for selected, previous in installed:
@@ -1067,6 +1127,12 @@ def _run_growing(args: LivePaperCliArguments, manifest: LivePaperManifest, stdou
 
 
 def _run_live(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: TextIO, stderr: TextIO) -> int:
+    providers = tuple(
+        row for row in manifest.providers if row.slot == "sportradar"
+    )
+    if len(providers) != 1:
+        _fail("sportradar_manifest_binding")
+    sportradar = providers[0]
     from inci_tennis_runtime.live_shadow_cli import (
         LiveShadowCliDependencies,
         run_cli as run_shadow_cli,
@@ -1090,8 +1156,7 @@ def _run_live(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: 
     writer = _DurableSessionWriter(args.session_log, args.checkpoint, existing)
 
     def validate(match_id: str, tickers: tuple[str, str]) -> None:
-        providers = tuple(row for row in manifest.providers if row.slot == "sportradar")
-        if len(providers) != 1 or match_id != providers[0].provider_match_id or tickers != (manifest.binding.home_ticker, manifest.binding.away_ticker):
+        if match_id != sportradar.provider_match_id or tickers != (manifest.binding.home_ticker, manifest.binding.away_ticker):
             raise LivePaperCliError("live_selection_manifest_mismatch")
 
     def persist_observer_records(_: tuple[LivePaperRecord, ...]) -> None:
@@ -1119,13 +1184,22 @@ def _run_live(args: LivePaperCliArguments, manifest: LivePaperManifest, stdout: 
                 if status == 0
                 else "halted"
             )
+            terminal_wall = time.time_ns()
+            terminal_mono = time.monotonic_ns()
             records = _terminal(
                 bridge,
                 terminal_reason,
-                time.time_ns(), time.monotonic_ns(),
+                terminal_wall,
+                terminal_mono,
             )
             writer.commit(tuple(bridge.records), bridge.state)
-            _dashboard(stdout, bridge, records[-1].kind.value)
+            _dashboard(
+                stdout,
+                bridge,
+                records[-1].kind.value,
+                now_wall_ns=terminal_wall,
+                now_monotonic_ns=terminal_mono,
+            )
         return status
     finally:
         writer.close()

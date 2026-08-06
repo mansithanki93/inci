@@ -492,9 +492,184 @@ class LivePaperScoreCoordinatorTests(unittest.TestCase):
 
         self.assertIs(unchanged.kind, contracts.LivePaperScoreDecisionKind.UNCHANGED)
         self.assertIs(duplicate.kind, contracts.LivePaperScoreDecisionKind.UNCHANGED)
-        self.assertIs(next_state, initial)
-        self.assertIs(duplicate_state, initial)
+        self.assertEqual(next_state.local_point_ordinal, initial.local_point_ordinal)
+        self.assertEqual(duplicate_state.local_point_ordinal, initial.local_point_ordinal)
+        self.assertEqual(next_state.rebase_epoch, initial.rebase_epoch)
+        self.assertEqual(duplicate_state.rebase_epoch, initial.rebase_epoch)
+        self.assertEqual(next_state.anchor.accepted_monotonic_ns, 1_001)
+        self.assertEqual(duplicate_state.anchor.accepted_monotonic_ns, 1_001)
+        self.assertIs(duplicate_state, next_state)
         self.assertEqual(duplicate_state.local_point_ordinal, 0)
+
+    def test_fresh_unchanged_single_source_downgrades_consensus_anchor_authority(self) -> None:
+        api = _api()
+        contracts, score = api
+        source_a = _state()
+        source_b = replace(
+            source_a,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+        )
+        initial, initial_decision = _reduce(
+            api,
+            score.initial_live_paper_score_coordinator_state("match-1"),
+            (
+                _observation(api, source_a, raw_receipt_sha256=SHA_C),
+                _observation(
+                    api,
+                    source_b,
+                    source_id="source-b",
+                    lineage_id="lineage-b",
+                    lineage_sha256=SHA_B,
+                    raw_receipt_sha256=SHA_D,
+                    independence_proof_sha256=SHA_C,
+                ),
+            ),
+        )
+
+        refreshed, decision = _reduce(
+            api,
+            initial,
+            (
+                _observation(
+                    api,
+                    source_a,
+                    raw_receipt_sha256=SHA_A,
+                    captured_wall_ns=2_000,
+                    captured_monotonic_ns=2_000,
+                ),
+            ),
+            now=2_000,
+        )
+
+        self.assertIs(initial_decision.trust, contracts.PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.UNCHANGED)
+        self.assertIs(decision.trust, contracts.PaperScoreTrust.SINGLE_SOURCE_PAPER)
+        self.assertIs(refreshed.anchor, decision.anchor)
+        self.assertEqual(decision.anchor.supporting_lineage_sha256s, (SHA_A,))
+        self.assertEqual(decision.anchor.parent_receipt_sha256s, (SHA_A,))
+        self.assertEqual(decision.anchor.supporting_independent_lineage_ids, ("lineage-a",))
+        self.assertEqual(decision.anchor.supporting_sources[0].raw_receipt_sha256, SHA_A)
+        self.assertEqual(decision.anchor.accepted_wall_ns, 2_000)
+        self.assertEqual(decision.anchor.accepted_monotonic_ns, 2_000)
+        self.assertNotEqual(decision.anchor.anchor_sha256, initial.anchor.anchor_sha256)
+        self.assertEqual(refreshed.local_point_ordinal, initial.local_point_ordinal)
+        self.assertEqual(refreshed.consensus_epoch, initial.consensus_epoch)
+        self.assertEqual(refreshed.rebase_epoch, initial.rebase_epoch)
+
+    def test_fresh_unchanged_independent_support_upgrades_single_anchor_authority(self) -> None:
+        api = _api()
+        contracts, score = api
+        source_a = _state()
+        source_b = replace(
+            source_a,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+        )
+        initial, initial_decision = _reduce(
+            api,
+            score.initial_live_paper_score_coordinator_state("match-1"),
+            (_observation(api, source_a, raw_receipt_sha256=SHA_C),),
+        )
+
+        refreshed, decision = _reduce(
+            api,
+            initial,
+            (
+                _observation(
+                    api,
+                    source_a,
+                    raw_receipt_sha256=SHA_A,
+                    captured_wall_ns=2_000,
+                    captured_monotonic_ns=2_000,
+                ),
+                _observation(
+                    api,
+                    source_b,
+                    source_id="source-b",
+                    lineage_id="lineage-b",
+                    lineage_sha256=SHA_B,
+                    raw_receipt_sha256=SHA_D,
+                    independence_proof_sha256=SHA_C,
+                    captured_wall_ns=2_000,
+                    captured_monotonic_ns=2_000,
+                ),
+            ),
+            now=2_000,
+        )
+
+        self.assertIs(initial_decision.trust, contracts.PaperScoreTrust.SINGLE_SOURCE_PAPER)
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.UNCHANGED)
+        self.assertIs(decision.trust, contracts.PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertIs(refreshed.anchor, decision.anchor)
+        self.assertEqual(decision.anchor.supporting_lineage_sha256s, (SHA_A, SHA_B))
+        self.assertEqual(decision.anchor.parent_receipt_sha256s, (SHA_A, SHA_D))
+        self.assertEqual(
+            decision.anchor.supporting_independent_lineage_ids,
+            ("lineage-a", "lineage-b"),
+        )
+        self.assertEqual(
+            tuple(support.raw_receipt_sha256 for support in decision.anchor.supporting_sources),
+            (SHA_A, SHA_D),
+        )
+        self.assertEqual(decision.anchor.accepted_wall_ns, 2_000)
+        self.assertEqual(decision.anchor.accepted_monotonic_ns, 2_000)
+        self.assertNotEqual(decision.anchor.anchor_sha256, initial.anchor.anchor_sha256)
+        self.assertEqual(refreshed.local_point_ordinal, initial.local_point_ordinal)
+        self.assertEqual(refreshed.consensus_epoch, initial.consensus_epoch)
+        self.assertEqual(refreshed.rebase_epoch, initial.rebase_epoch)
+
+    def test_fresh_unchanged_cross_provider_anchor_handoff_preserves_point_ordinal(self) -> None:
+        api = _api()
+        contracts, score = api
+        source_a = _state()
+        source_b = replace(
+            source_a,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+            last_provider_event_id="provider-b-same-score",
+            correction_lineage_sha256=SHA_D,
+        )
+        initial, _ = _reduce(
+            api,
+            score.initial_live_paper_score_coordinator_state("match-1"),
+            (_observation(api, source_a),),
+        )
+
+        refreshed, decision = _reduce(
+            api,
+            initial,
+            (
+                _observation(
+                    api,
+                    source_b,
+                    source_id="source-b",
+                    lineage_id="lineage-b",
+                    lineage_sha256=SHA_B,
+                    raw_receipt_sha256=SHA_C,
+                    independence_proof_sha256=SHA_D,
+                    captured_wall_ns=2_000,
+                    captured_monotonic_ns=2_000,
+                ),
+            ),
+            now=2_000,
+        )
+
+        self.assertIs(decision.kind, contracts.LivePaperScoreDecisionKind.UNCHANGED)
+        self.assertIs(decision.trust, contracts.PaperScoreTrust.SINGLE_SOURCE_PAPER)
+        self.assertEqual(decision.anchor.state, source_b)
+        self.assertEqual(refreshed.anchor.state.provider_match_id, "provider-b-match")
+        self.assertEqual(refreshed.local_point_ordinal, initial.local_point_ordinal)
+        self.assertEqual(refreshed.consensus_epoch, initial.consensus_epoch)
+        self.assertEqual(refreshed.rebase_epoch, initial.rebase_epoch)
 
     def test_rejects_observation_bound_to_other_canonical_match(self) -> None:
         api = _api()

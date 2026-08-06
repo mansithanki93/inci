@@ -209,16 +209,16 @@ LIVE_PAPER_MODULE_AST_SHA256 = {
         "d53991f2ec7134dc0de6294ebdffe1758d376d3495ad09aafe1f216cb739ac8f"
     ),
     "live_paper_execution.py": (
-        "85c598e79ae0e79951dfc9561153b49d12e1cb9f10229cab6fdf22d1b24f6c22"
+        "b06cd93f4f19196780b0dfe139ecc443e1097e2cb386d22fa9e36b292205cc9c"
     ),
     "live_paper_score.py": (
-        "282b55df45f5cae12831c05a90f681b822e443ef326dd44cd4581443179ef2ab"
+        "8b114a2debbc42e58a22bcd128792ed42c271807e652b6a13effbe1493e42fdc"
     ),
     "live_paper_session.py": (
-        "0a6ff6b16fb62f6a9fb72c4169572436071533cdeba841a3972d46da4f735997"
+        "6fdd993ad4f8b8cd6f68985d4a2890257ac93505356ce4b8a071949e71795bea"
     ),
     "live_two_model.py": (
-        "4a7c98caab1f61c8cdbc395f0e2bf69534a7317e3ff54761ce91604638f33695"
+        "679f41c235c96636de1f7b8d0e0d707cdf88902283120fb9dab9789e1423aa40"
     ),
 }
 
@@ -248,7 +248,7 @@ LIVE_PAPER_RUNTIME_MODULE_AST_SHA256 = {
         "6e96a0294039ad81fc01dbd95ee6b7b8e0fb802b39a0e70d87799a34adcaceff"
     ),
     "live_two_model_paper_cli.py": (
-        "1509ecc666215110bb77652699417d414a5c008f80b4a610084ffbfd30c37776"
+        "9a4489234f81b32a52260dc095b8923d1b29f77ec541d457e9cc16aa651ded2f"
     ),
     "two_model_pilot_cli.py": (
         "96b9f5ca67ce55a8fa26309ad495f7492c6d5dfe9d088ab7d89faceba23aba59"

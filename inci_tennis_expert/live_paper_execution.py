@@ -630,6 +630,17 @@ def reduce_paper_book(
     _integer(observed_monotonic_ns, "observed_monotonic_ns")
     if _frame_reason(book, state, observed_wall_ns, observed_monotonic_ns) is not None:
         return state, ()
+    pending = state.pending_action
+    if pending is not None and pending.kind is PaperActionKind.BUY:
+        if not state.match_live:
+            state = replace(state, pending_action=None)
+        elif state.position is not None:
+            without_residual = replace(state, pending_action=None)
+            exit_action = _exit_action(
+                without_residual, book, observed_wall_ns, observed_monotonic_ns
+            )
+            if exit_action is not None:
+                return replace(without_residual, pending_action=exit_action), ()
     if state.pending_action is not None:
         if not _eligible(state.pending_action, book, observed_wall_ns, observed_monotonic_ns):
             return state, ()

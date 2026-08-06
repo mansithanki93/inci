@@ -543,6 +543,113 @@ class LiveTwoModelTests(unittest.TestCase):
         self.assertEqual(forecast.anchor_sha256, anchor.anchor_sha256)
         self.assertEqual(forecast.transition_sha256, accepted.transition_sha256)
 
+    def test_unchanged_score_refreshes_authority_without_advancing_model_belief(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        initial_anchor = _anchor(_state())
+        initial, _ = api.open_live_two_model(
+            static_artifact=static, dynamic_artifact=dynamic, anchor=initial_anchor,
+            artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
+        )
+        transitioned, _ = api.apply_live_paper_transition(
+            initial, _transition(initial.current_state, ordinal=1)
+        )
+        provider_b_state = replace(
+            transitioned.current_state,
+            provider_source_id="provider-b",
+            revision_domain_id="provider-b-local",
+            source_lineage_sha256=SHA_B,
+            provider_match_id="provider-b-match",
+            home_player_id="provider-b-home",
+            away_player_id="provider-b-away",
+            last_provider_event_id="provider-b-same-score",
+            correction_lineage_sha256=SHA_D,
+        )
+        refreshed_anchor = make_live_paper_anchor(
+            canonical_match_id="match-1",
+            state=provider_b_state,
+            trust=PaperScoreTrust.CONSENSUS_PAPER,
+            supporting_lineage_sha256s=(SHA_A, SHA_B),
+            parent_receipt_sha256s=(SHA_A, SHA_C),
+            consensus_epoch=transitioned.consensus_epoch,
+            correction_epoch=transitioned.correction_epoch,
+            rebase_epoch=transitioned.rebase_epoch,
+            accepted_wall_ns=2_000,
+            accepted_monotonic_ns=2_000,
+            supporting_independent_lineage_ids=("lineage-a", "lineage-b"),
+            supporting_sources=(
+                LivePaperSupport(SHA_A, SHA_A, "lineage-a", True, SHA_B),
+                LivePaperSupport(SHA_C, SHA_B, "lineage-b", True, SHA_D),
+            ),
+        )
+
+        refreshed, forecast = api.refresh_live_two_model_anchor(
+            transitioned, refreshed_anchor
+        )
+
+        self.assertIs(refreshed.dynamic_model, transitioned.dynamic_model)
+        self.assertEqual(refreshed.current_state, provider_b_state)
+        self.assertNotEqual(refreshed.current_state, transitioned.current_state)
+        self.assertEqual(
+            refreshed.dynamic_model.belief.belief_sha256,
+            transitioned.dynamic_model.belief.belief_sha256,
+        )
+        self.assertEqual(refreshed.local_point_ordinal, transitioned.local_point_ordinal)
+        self.assertEqual(refreshed.consensus_epoch, transitioned.consensus_epoch)
+        self.assertEqual(refreshed.correction_epoch, transitioned.correction_epoch)
+        self.assertEqual(refreshed.rebase_epoch, transitioned.rebase_epoch)
+        self.assertEqual(refreshed.transition_sha256, transitioned.transition_sha256)
+        self.assertEqual(refreshed.anchor_sha256, refreshed_anchor.anchor_sha256)
+        self.assertNotEqual(refreshed.anchor_sha256, transitioned.anchor_sha256)
+        self.assertNotEqual(refreshed.source_sha256, transitioned.source_sha256)
+        self.assertNotEqual(refreshed.state_sha256, transitioned.state_sha256)
+        self.assertIs(forecast.trust, PaperScoreTrust.CONSENSUS_PAPER)
+        self.assertEqual(forecast.forecast_label, "AUTHORITY_REFRESHED_PAPER")
+        self.assertEqual(forecast.anchor_sha256, refreshed_anchor.anchor_sha256)
+        self.assertEqual(forecast.transition_sha256, transitioned.transition_sha256)
+        self.assertEqual(
+            forecast.model_2_prior_belief_sha256,
+            forecast.model_2_posterior_belief_sha256,
+        )
+
+    def test_authority_refresh_rejects_score_epoch_and_match_binding_drift(self) -> None:
+        api = _api()
+        static, dynamic = api.build_operator_bootstrap_artifacts(
+            canonical_match_id="match-1", scheduled_start_wall_ns=9_000,
+            cutoff_wall_ns=8_999, home_serve_point_probability=Decimal(".64"),
+            away_serve_point_probability=Decimal(".61"),
+        )
+        state, _ = api.open_live_two_model(
+            static_artifact=static,
+            dynamic_artifact=dynamic,
+            anchor=_anchor(_state()),
+            artifact_authority=api.LiveArtifactAuthority.OPERATOR_BOOTSTRAP,
+        )
+        score_drift = _anchor(
+            _transition(state.current_state, ordinal=1).after_state,
+            consensus_epoch=state.consensus_epoch,
+        )
+        epoch_drift = _anchor(
+            state.current_state,
+            consensus_epoch=state.consensus_epoch + 1,
+        )
+        binding_drift = _anchor(
+            replace(state.current_state, scheduled_start_wall_ns=9_001),
+            consensus_epoch=state.consensus_epoch,
+        )
+
+        for anchor in (score_drift, epoch_drift, binding_drift):
+            with self.subTest(anchor=anchor):
+                with self.assertRaisesRegex(
+                    api.LiveTwoModelError,
+                    "^authority_refresh$",
+                ):
+                    api.refresh_live_two_model_anchor(state, anchor)
+
     def test_discontinuous_ordinal_fails_closed_and_rebase_resets_dynamic_belief(self) -> None:
         api = _api()
         static, dynamic = api.build_operator_bootstrap_artifacts(

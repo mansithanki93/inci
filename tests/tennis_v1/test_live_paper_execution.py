@@ -281,6 +281,141 @@ class LivePaperExecutionTests(unittest.TestCase):
         self.assertEqual(filled.position.entry_fees, Decimal("3.8600"))
         self.assertEqual(filled.pending_action.remaining_quantity, Decimal("58"))
 
+    def test_non_live_state_cancels_pending_buy_but_still_allows_sell_exit(self) -> None:
+        """Catches an entry fill after terminal score authority while preserving exits."""
+        binding = _binding()
+        decision_book = project_paper_l2(
+            _raw_book(), binding=binding, raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), decision_book, _state(),
+            decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        arrival = project_paper_l2(
+            _raw_book(sequence=2), binding=binding,
+            raw_parent_receipt_sha256="4" * 64,
+            captured_wall_ns=2_000_000_000,
+            captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+
+        cancelled, events = reduce_paper_book(
+            replace(decision.state, match_live=False),
+            arrival,
+            observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+
+        self.assertFalse(events)
+        self.assertIsNone(cancelled.pending_action)
+        self.assertIsNone(cancelled.position)
+
+        entered, fills = reduce_paper_book(
+            decision.state,
+            arrival,
+            observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertTrue(fills)
+        horizon = project_paper_l2(
+            _raw_book(sequence=3), binding=binding,
+            raw_parent_receipt_sha256="5" * 64,
+            captured_wall_ns=302_000_000_000,
+            captured_monotonic_ns=302_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        exiting, events = reduce_paper_book(
+            replace(entered, match_live=False),
+            horizon,
+            observed_wall_ns=302_000_000_000,
+            observed_monotonic_ns=302_000_000_000,
+        )
+        self.assertFalse(events)
+        self.assertIs(exiting.pending_action.kind, PaperActionKind.SELL)
+
+    def test_horizon_exit_supersedes_residual_buy_before_any_later_fill(self) -> None:
+        """Catches a partial entry residual suppressing the mandatory timed exit."""
+        binding = _binding()
+        decision_book = project_paper_l2(
+            _raw_book_with_home_ask(1, Decimal("0.10")), binding=binding,
+            raw_parent_receipt_sha256="3" * 64,
+            captured_wall_ns=1_000_000_000,
+            captured_monotonic_ns=1_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        decision = evaluate_live_paper_entry(
+            _forecast(), decision_book, _state(),
+            decision_wall_ns=1_000_000_000,
+            decision_monotonic_ns=1_000_000_000,
+        )
+        partial_book = project_paper_l2(
+            _raw_book_with_home_ask(2, Decimal("0.10"), Decimal("10")),
+            binding=binding, raw_parent_receipt_sha256="4" * 64,
+            captured_wall_ns=2_000_000_000,
+            captured_monotonic_ns=2_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        partial, fills = reduce_paper_book(
+            decision.state,
+            partial_book,
+            observed_wall_ns=2_000_000_000,
+            observed_monotonic_ns=2_000_000_000,
+        )
+        self.assertEqual(fills[0].fill.quantity, Decimal("10"))
+        self.assertIs(partial.pending_action.kind, PaperActionKind.BUY)
+        self.assertEqual(partial.pending_action.remaining_quantity, Decimal("90"))
+
+        profit_raw = _raw_book_with_home_ask(
+            3, Decimal("0.90"), Decimal("100")
+        )
+        profit_home = replace(
+            profit_raw.markets[0],
+            yes_levels=((Decimal("0.90"), Decimal("10")),),
+        )
+        profit_book = project_paper_l2(
+            replace(
+                profit_raw,
+                markets=(profit_home, profit_raw.markets[1]),
+            ),
+            binding=binding, raw_parent_receipt_sha256="6" * 64,
+            captured_wall_ns=3_000_000_000,
+            captured_monotonic_ns=3_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        profitable_exit, events = reduce_paper_book(
+            partial,
+            profit_book,
+            observed_wall_ns=3_000_000_000,
+            observed_monotonic_ns=3_000_000_000,
+        )
+        self.assertFalse(events)
+        self.assertEqual(profitable_exit.position, partial.position)
+        self.assertIs(profitable_exit.pending_action.kind, PaperActionKind.SELL)
+
+        horizon_book = project_paper_l2(
+            _raw_book_with_home_ask(3, Decimal("0.10"), Decimal("100")),
+            binding=binding, raw_parent_receipt_sha256="5" * 64,
+            captured_wall_ns=302_000_000_000,
+            captured_monotonic_ns=302_000_000_000, clock_uncertainty_ns=0,
+            home_ticker=binding.home_ticker, away_ticker=binding.away_ticker,
+        )
+        exiting, events = reduce_paper_book(
+            partial,
+            horizon_book,
+            observed_wall_ns=302_000_000_000,
+            observed_monotonic_ns=302_000_000_000,
+        )
+
+        self.assertFalse(events)
+        self.assertEqual(exiting.position, partial.position)
+        self.assertIs(exiting.pending_action.kind, PaperActionKind.SELL)
+        self.assertEqual(exiting.pending_action.quantity, partial.position.quantity)
+        self.assertEqual(exiting.pending_action.remaining_quantity, partial.position.quantity)
+
     def test_worse_arrival_zero_fill_retains_action_for_strictly_later_frame(self) -> None:
         """Catches losing causality or the pending action after an adverse zero fill."""
         binding = _binding()

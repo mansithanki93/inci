@@ -37,7 +37,6 @@ from inci_tennis_expert.live_paper_contracts import (
     LivePaperSourceObservation,
     LivePaperSupport,
     PaperScoreTrust,
-    score_coordinates,
 )
 from inci_tennis_expert.live_paper_execution import (
     LivePaperL2Frame,
@@ -67,6 +66,7 @@ from inci_tennis_expert.live_two_model import (
     LiveTwoModelState,
     apply_live_paper_transition,
     open_live_two_model,
+    refresh_live_two_model_anchor,
     rebase_live_two_model,
 )
 from inci_tennis_expert.pilot_contracts import (
@@ -1051,81 +1051,72 @@ def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) 
         _fail("canonical_match_id")
     records: list[LivePaperRecord] = []
     state = _emit(state, records, LivePaperRecordKind.RAW_SCORE_RECEIPT, item)
+    previous_coordinator = state.score_coordinator
     coordinator, decision = reduce_live_paper_scores(
-        state.score_coordinator,
+        previous_coordinator,
         item.observations,
         now_wall_ns=item.observed_wall_ns,
         now_monotonic_ns=item.observed_monotonic_ns,
     )
-    state = replace(state, score_coordinator=coordinator, portfolio=_portfolio_at_score(state.portfolio, decision))
+    authority_refreshed = (
+        decision.kind is LivePaperScoreDecisionKind.UNCHANGED
+        and coordinator is not previous_coordinator
+    )
+    portfolio = _portfolio_at_score(state.portfolio, decision)
+    invalidated_action: PaperAction | None = None
+    invalidation_reason = "pending_buy_invalidated"
+    if (
+        portfolio.pending_action is not None
+        and portfolio.pending_action.kind is PaperActionKind.BUY
+        and not portfolio.match_live
+    ):
+        invalidated_action = portfolio.pending_action
+        invalidation_reason = PaperDecisionReason.MATCH_NOT_LIVE.value
+        portfolio = replace(portfolio, pending_action=None)
+    state = replace(
+        state,
+        score_coordinator=coordinator,
+        portfolio=portfolio,
+    )
     actionable_kinds = {
         LivePaperScoreDecisionKind.ANCHORED,
         LivePaperScoreDecisionKind.POINT_ACCEPTED,
         LivePaperScoreDecisionKind.REBASED,
         LivePaperScoreDecisionKind.UNCHANGED,
     }
-    invalidated_action: PaperAction | None = None
     if decision.kind in actionable_kinds:
-        clock_actionable = True
-        if decision.kind is LivePaperScoreDecisionKind.UNCHANGED:
-            if decision.anchor is None:
-                _fail("score_anchor")
-            eligible = tuple(
-                observation
-                for observation in item.observations
-                if observation.captured_monotonic_ns <= item.observed_monotonic_ns
-                and observation.captured_wall_ns <= item.observed_wall_ns
-                and max(
-                    item.observed_wall_ns - observation.captured_wall_ns,
-                    item.observed_monotonic_ns
-                    - observation.captured_monotonic_ns,
-                ) + observation.state.last_clock_uncertainty_ns
-                <= state.config.score_freshness_ns
-                and score_coordinates(observation.state)
-                == score_coordinates(decision.anchor.state)
-            )
-            if not eligible:
-                state = replace(state, score_actionable=False)
-                clock_actionable = False
-                wall_ns = state.last_score_wall_ns
-                monotonic_ns = state.last_score_monotonic_ns
-                uncertainty_ns = state.last_score_clock_uncertainty_ns
-            else:
-                wall_ns, monotonic_ns, uncertainty_ns = _score_clock_basis(
-                    eligible
-                )
-        else:
-            if decision.anchor is None:
-                _fail("score_anchor")
-            parent_receipts = set(decision.anchor.parent_receipt_sha256s)
-            supporting = tuple(
-                observation
-                for observation in item.observations
-                if observation.raw_receipt_sha256 in parent_receipts
-            )
-            if {
-                observation.raw_receipt_sha256 for observation in supporting
-            } != parent_receipts:
-                _fail("score_clock")
-            wall_ns, monotonic_ns, uncertainty_ns = _score_clock_basis(
-                supporting
-            )
-            if (
-                wall_ns != decision.anchor.accepted_wall_ns
-                or monotonic_ns != decision.anchor.accepted_monotonic_ns
-            ):
-                _fail("score_clock")
-        if clock_actionable and wall_ns is not None and monotonic_ns is not None and uncertainty_ns is not None:
-            state = replace(
-                state,
-                score_actionable=True,
-                last_score_wall_ns=wall_ns,
-                last_score_monotonic_ns=monotonic_ns,
-                last_score_clock_uncertainty_ns=uncertainty_ns,
-            )
+        if decision.anchor is None:
+            _fail("score_anchor")
+        parent_receipts = set(decision.anchor.parent_receipt_sha256s)
+        supporting = tuple(
+            observation
+            for observation in item.observations
+            if observation.raw_receipt_sha256 in parent_receipts
+        )
+        if {
+            observation.raw_receipt_sha256 for observation in supporting
+        } != parent_receipts:
+            _fail("score_clock")
+        wall_ns, monotonic_ns, uncertainty_ns = _score_clock_basis(supporting)
+        if (
+            wall_ns != decision.anchor.accepted_wall_ns
+            or monotonic_ns != decision.anchor.accepted_monotonic_ns
+        ):
+            _fail("score_clock")
+        state = replace(
+            state,
+            score_actionable=True,
+            last_score_wall_ns=wall_ns,
+            last_score_monotonic_ns=monotonic_ns,
+            last_score_clock_uncertainty_ns=uncertainty_ns,
+        )
     else:
         pending = state.portfolio.pending_action
-        if pending is not None and pending.kind is PaperActionKind.BUY:
+        if (
+            invalidated_action is None
+            and pending is not None
+            and pending.kind is PaperActionKind.BUY
+        ):
             invalidated_action = pending
             state = replace(state, portfolio=replace(state.portfolio, pending_action=None))
         state = replace(state, score_actionable=False)
@@ -1153,6 +1144,13 @@ def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) 
             )
         else:
             model, forecast = rebase_live_two_model(state.live_model, decision.anchor)
+    elif authority_refreshed:
+        state = _emit(state, records, LivePaperRecordKind.ANCHOR, decision)
+        if state.live_model is None:
+            _fail("model_not_open")
+        model, forecast = refresh_live_two_model_anchor(
+            state.live_model, decision.anchor
+        )
     else:
         kind = LivePaperRecordKind.ABSTENTION if decision.kind in {
             LivePaperScoreDecisionKind.ABSTAINED,
@@ -1164,11 +1162,22 @@ def _reduce_score(state: LivePaperSessionState, item: LivePaperScoreBatchInput) 
                 state,
                 records,
                 LivePaperRecordKind.REJECTION,
-                _LivePaperRejection("paper_action", "pending_buy_invalidated", invalidated_action),
+                _LivePaperRejection(
+                    "paper_action", invalidation_reason, invalidated_action
+                ),
             )
         return state, tuple(records)
     state = replace(state, live_model=model, latest_forecast=forecast)
     state = _emit(state, records, LivePaperRecordKind.FORECAST, forecast)
+    if invalidated_action is not None:
+        state = _emit(
+            state,
+            records,
+            LivePaperRecordKind.REJECTION,
+            _LivePaperRejection(
+                "paper_action", invalidation_reason, invalidated_action
+            ),
+        )
     projection = _checkpoint_projection(state)
     state = _emit(state, records, LivePaperRecordKind.CHECKPOINT, projection)
     return state, tuple(records)
@@ -1289,6 +1298,8 @@ def _position_mark(state: LivePaperSessionState, item: LivePaperL2Input, portfol
 def _score_gate_reason(state: LivePaperSessionState, item: LivePaperL2Input) -> str | None:
     if state.score_coordinator.quarantined or not state.score_actionable:
         return "score_untrusted"
+    if not state.portfolio.match_live:
+        return PaperDecisionReason.MATCH_NOT_LIVE.value
     score_wall = state.last_score_wall_ns
     score_monotonic = state.last_score_monotonic_ns
     score_uncertainty = state.last_score_clock_uncertainty_ns
@@ -1359,6 +1370,26 @@ def _reduce_l2(state: LivePaperSessionState, item: LivePaperL2Input) -> tuple[Li
         observed_monotonic_ns=item.observed_monotonic_ns,
     )
     state = replace(state, portfolio=portfolio)
+    superseded_buy = (
+        before.pending_action
+        if before.pending_action is not None
+        and before.pending_action.kind is PaperActionKind.BUY
+        and before.position is not None
+        and portfolio.pending_action is not None
+        and portfolio.pending_action.kind is PaperActionKind.SELL
+        else None
+    )
+    if superseded_buy is not None:
+        state = _emit(
+            state,
+            records,
+            LivePaperRecordKind.REJECTION,
+            _LivePaperRejection(
+                "paper_action",
+                "pending_buy_superseded_by_exit",
+                superseded_buy,
+            ),
+        )
     for event in events:
         state = _emit(state, records, LivePaperRecordKind.FILL, event)
     if not _same_action_identity(before.pending_action, portfolio.pending_action) and portfolio.pending_action is not None:
