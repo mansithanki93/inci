@@ -17,11 +17,17 @@ from dataclasses import dataclass
 from typing import Callable
 
 
+# site.api.espn.com is often 403 from datacenter IPs; site.web.api works with a
+# normal browser UA (still unauthenticated / free).
 ESPN_SCOREBOARD = (
-    "https://site.api.espn.com/apis/site/v2/sports/tennis/{league}/scoreboard"
+    "https://site.web.api.espn.com/apis/site/v2/sports/tennis/{league}/scoreboard"
 )
 DEFAULT_LEAGUES = ("atp", "wta")
-_USER_AGENT = "inci-paper-research/espn-scoreboard"
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 @dataclass(frozen=True)
@@ -51,7 +57,14 @@ class EspnMatch:
 
 def _http_get_json(url: str, timeout_s: float = 10.0) -> dict:
     req = urllib.request.Request(
-        url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
+        url,
+        headers={
+            "User-Agent": _USER_AGENT,
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.espn.com/tennis/scoreboard",
+        },
+    )
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
