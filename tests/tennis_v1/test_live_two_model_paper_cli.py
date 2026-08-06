@@ -381,6 +381,7 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
         parent = latest_l2.payload.body.durable_parent_receipt
         self.assertEqual(parent.raw_reference, "/tmp/live-paper-1900000000.bin")
         self.assertEqual(parent.raw_sha256, latest_l2.payload.body.frame.raw_parent_receipt_sha256)
+        self.assertEqual(parent.physical_connection_generation, 3)
         cursor_parents = tuple(
             record.payload.body.durable_parent_receipt
             for record in bridge.records
@@ -392,6 +393,13 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             }
         )
         self.assertEqual(len(cursor_parents), 2)
+        self.assertEqual(
+            tuple(
+                parent.physical_connection_generation
+                for parent in cursor_parents
+            ),
+            (3, 3),
+        )
         resumed = GrowingJsonlCaptureBridge(manifest, bridge.state)
         resumed.restore_records(tuple(bridge.records))
         for payload, wall, cursor_parent in (
@@ -408,6 +416,121 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
                     ),
                     durable_parent_receipt=cursor_parent,
                 )
+
+    def test_observer_restart_advances_generation_after_only_pre_l2_receipts(self) -> None:
+        from inci_tennis_io.shadow_evidence import PersistedKalshiFrame
+        from inci_tennis_runtime.live_paper_capture_bridge import (
+            GrowingJsonlCaptureBridge,
+            LivePaperBridgeError,
+            LivePaperCaptureObserver,
+            _kalshi_receipt_sha256,
+            manifest_from_document,
+        )
+
+        manifest = manifest_from_document(_manifest())
+        bridge = GrowingJsonlCaptureBridge.bootstrap(
+            manifest,
+            home_serve_probability=Decimal("0.80"),
+            away_serve_probability=Decimal("0.20"),
+            opened_wall_ns=900_000_000,
+            opened_monotonic_ns=900_000_000,
+        )
+        observer = LivePaperCaptureObserver(bridge)
+
+        async def observe(
+            target: object,
+            payload: bytes,
+            wall: int,
+            *,
+            generation: int = 1,
+        ) -> PersistedKalshiFrame:
+            receipt = PersistedKalshiFrame(
+                raw_path=f"/tmp/live-paper-restart-{wall}.bin",
+                raw_sha256=sha256(payload).hexdigest(),
+                captured_wall_ns=wall,
+                captured_monotonic_ns=wall,
+                clock_uncertainty_ns=0,
+                physical_connection_generation=generation,
+            )
+            await target.after_kalshi_commit(
+                frame=SimpleNamespace(
+                    payload=payload,
+                    physical_connection_generation=generation,
+                ),
+                durable_receipt=receipt,
+                captured_wall_ns=wall,
+                captured_monotonic_ns=wall,
+                clock_uncertainty_ns=0,
+            )
+            return receipt
+
+        ack = _wire({
+            "id": 1,
+            "type": "subscribed",
+            "msg": {"channel": "orderbook_delta", "sid": 2},
+        })
+        home = _wire({
+            "type": "orderbook_snapshot",
+            "sid": 2,
+            "seq": 1,
+            "msg": {
+                "market_ticker": "KXTENNIS-HOME",
+                "market_id": HOME_MARKET_ID,
+                "yes_dollars_fp": [["0.10", "100.00"]],
+                "no_dollars_fp": [["0.20", "100.00"]],
+            },
+        })
+        asyncio.run(observe(observer, ack, 1_100_000_000))
+        asyncio.run(observe(observer, home, 1_200_000_000))
+        self.assertFalse(
+            any(
+                row.kind is LivePaperRecordKind.RAW_L2_RECEIPT
+                for row in bridge.records
+            )
+        )
+
+        resumed = GrowingJsonlCaptureBridge(manifest, bridge.state)
+        resumed.restore_records(tuple(bridge.records))
+        restarted = LivePaperCaptureObserver(resumed)
+        restarted_ack = _wire({
+            "id": 2,
+            "type": "subscribed",
+            "msg": {"channel": "orderbook_delta", "sid": 3},
+        })
+        with self.assertRaisesRegex(
+            LivePaperBridgeError,
+            "collector_kalshi_frame",
+        ):
+            asyncio.run(
+                observe(
+                    restarted,
+                    restarted_ack,
+                    1_250_000_000,
+                    generation=0,
+                )
+            )
+        local_receipt = asyncio.run(
+            observe(restarted, restarted_ack, 1_300_000_000)
+        )
+        parent = next(
+            row.payload.body.durable_parent_receipt
+            for row in reversed(resumed.records)
+            if row.kind is LivePaperRecordKind.RAW_CAPTURE_RECEIPT
+        )
+        self.assertEqual(parent.physical_connection_generation, 2)
+        self.assertEqual(
+            parent.durable_receipt_sha256,
+            _kalshi_receipt_sha256(local_receipt),
+        )
+        self.assertNotEqual(
+            parent.durable_receipt_sha256,
+            _kalshi_receipt_sha256(
+                replace(
+                    local_receipt,
+                    physical_connection_generation=2,
+                )
+            ),
+        )
 
     def test_live_restore_reconstructs_latest_score_revision_cursor(self) -> None:
         from inci_tennis_runtime.live_paper_capture_bridge import (
@@ -522,7 +645,7 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
         )
 
         def score(
-            match_status: str, *, status: str = "ended"
+            match_status: str, *, status: str = "closed"
         ) -> SimpleNamespace:
             return SimpleNamespace(
                 home_id="sr:competitor:201",
@@ -607,7 +730,8 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
             ("live", "defaulted"),
             ("live", "cancelled"),
             ("ended", "closed"),
-            ("closed", "ended"),
+            ("ended", "ended"),
+            ("closed", "closed"),
             ("suspended", "suspended"),
         ):
             with self.subTest(status=status, match_status=match_status), mock.patch.object(
@@ -630,6 +754,64 @@ class LiveTwoModelPaperCliTests(unittest.TestCase):
         self.assertEqual(
             bridge.state.score_coordinator.anchor.state.status.value,
             "ended",
+        )
+        official_bridge = GrowingJsonlCaptureBridge.bootstrap(
+            manifest_from_document(document),
+            home_serve_probability=Decimal("0.64"),
+            away_serve_probability=Decimal("0.61"),
+            opened_wall_ns=1_000_000_000,
+            opened_monotonic_ns=1_000_000_000,
+        )
+        official_payload = json.dumps({
+            "generated_at": "1970-01-01T00:00:03+00:00",
+            "sport_event": {
+                "id": "sr:sport_event:101",
+                "start_time": "1970-01-01T00:00:02+00:00",
+                "start_time_confirmed": True,
+                "competitors": [
+                    {
+                        "id": "sr:competitor:201",
+                        "name": "Home",
+                        "qualifier": "home",
+                    },
+                    {
+                        "id": "sr:competitor:202",
+                        "name": "Away",
+                        "qualifier": "away",
+                    },
+                ],
+                "sport_event_context": {"mode": {"best_of": 3}},
+            },
+            "sport_event_status": {
+                "status": "closed",
+                "match_status": "ended",
+                "home_score": 2,
+                "away_score": 0,
+                "period_scores": [
+                    {
+                        "number": 1,
+                        "type": "set",
+                        "home_score": 6,
+                        "away_score": 4,
+                    },
+                    {
+                        "number": 2,
+                        "type": "set",
+                        "home_score": 6,
+                        "away_score": 3,
+                    },
+                ],
+            },
+        }, separators=(",", ":")).encode("ascii")
+        official_rows = official_bridge.accept_sportradar_capture(
+            official_payload,
+            captured_wall_ns=3_000_000_020,
+            captured_monotonic_ns=3_000_000_020,
+            clock_uncertainty_ns=0,
+        )
+        self.assertIn(
+            LivePaperRecordKind.ANCHOR,
+            tuple(row.kind for row in official_rows),
         )
         tiebreak_bridge = GrowingJsonlCaptureBridge.bootstrap(
             manifest_from_document(document),

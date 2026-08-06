@@ -481,6 +481,38 @@ class LivePaperSessionTests(unittest.TestCase):
         self.assertNotEqual(state.portfolio.pending_action, old_action)
         self.assertEqual(state.portfolio.pending_action.decision_generation, 2)
 
+    def test_l2_parent_receipt_generation_must_match_the_paper_frame(self) -> None:
+        """Catches a collector-local generation masquerading as session authority."""
+        api = _api()
+        item = _l2_input(api, 1, 3_000_000_000, "1" * 64)
+        parent_generation = 2
+        parent_digest = api.compute_live_paper_parent_receipt_sha256(
+            source_kind="shadow_kalshi_capture",
+            capture_id="/tmp/kalshi-generation-2.bin",
+            raw_reference="/tmp/kalshi-generation-2.bin",
+            raw_sha256=item.frame.raw_parent_receipt_sha256,
+            durable_receipt_sha256=SHA_B,
+            captured_wall_ns=item.frame.captured_wall_ns,
+            captured_monotonic_ns=item.frame.captured_monotonic_ns,
+            clock_uncertainty_ns=item.frame.clock_uncertainty_ns,
+            physical_connection_generation=parent_generation,
+        )
+        parent = api.LivePaperDurableParentReceipt(
+            "shadow_kalshi_capture",
+            "/tmp/kalshi-generation-2.bin",
+            "/tmp/kalshi-generation-2.bin",
+            item.frame.raw_parent_receipt_sha256,
+            SHA_B,
+            parent_digest,
+            item.frame.captured_wall_ns,
+            item.frame.captured_monotonic_ns,
+            item.frame.clock_uncertainty_ns,
+            parent_generation,
+        )
+
+        with self.assertRaises(api.LivePaperSessionError):
+            replace(item, durable_parent_receipt=parent)
+
     def test_book_capture_must_follow_score_even_when_observed_later(self) -> None:
         """Catches an old decision frame being relabelled as causal by a later observation clock."""
         api = _api()

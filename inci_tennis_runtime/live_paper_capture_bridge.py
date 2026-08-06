@@ -847,10 +847,10 @@ class GrowingJsonlCaptureBridge:
                 )
         except Exception as error:
             raise LivePaperBridgeError("sportradar_parse") from error
-        natural_end = (score.status, score.match_status) in {
-            ("ended", "ended"),
-            ("closed", "closed"),
-        }
+        natural_end = (score.status, score.match_status) == (
+            "closed",
+            "ended",
+        )
         active = score.status == "live" and score.match_status in {
             "live",
             "1st_set",
@@ -1102,6 +1102,8 @@ class GrowingJsonlCaptureBridge:
                 != row["captured_monotonic_ns"]
                 or durable_parent_receipt.clock_uncertainty_ns
                 != row["clock_uncertainty_ns"]
+                or durable_parent_receipt.physical_connection_generation
+                != generation
             ):
                 _fail("kalshi_parent_receipt")
             self._check_capture_reuse(
@@ -1182,11 +1184,20 @@ class LivePaperCaptureObserver:
         if record_sink is not None and not callable(record_sink):
             _fail("observer_configuration")
         self._record_sink = record_sink
-        prior_generations = tuple(
-            getattr(record.payload.body.frame, "physical_connection_generation", 0)
-            for record in bridge.records
-            if record.kind is LivePaperRecordKind.RAW_L2_RECEIPT
-        )
+        prior_generations: list[int] = []
+        for record in bridge.records:
+            body = record.payload.body
+            if record.kind is LivePaperRecordKind.RAW_L2_RECEIPT:
+                prior_generations.append(
+                    body.frame.physical_connection_generation
+                )
+            elif record.kind is LivePaperRecordKind.RAW_CAPTURE_RECEIPT:
+                parent = body.durable_parent_receipt
+                if parent.source_kind == "shadow_kalshi_capture":
+                    generation = parent.physical_connection_generation
+                    if type(generation) is not int:
+                        _fail("observer_generation_history")
+                    prior_generations.append(generation)
         self._generation_base = max(prior_generations, default=0)
 
     def _sink(self, records: tuple[LivePaperRecord, ...]) -> None:
@@ -1269,6 +1280,7 @@ class LivePaperCaptureObserver:
         if (
             type(raw) is not bytes
             or type(generation) is not int
+            or generation <= 0
             or type(durable_receipt) is not PersistedKalshiFrame
             or durable_receipt.raw_sha256 != sha256(raw).hexdigest()
             or durable_receipt.captured_wall_ns != captured_wall_ns
@@ -1279,6 +1291,7 @@ class LivePaperCaptureObserver:
             or not os.path.isabs(durable_receipt.raw_path)
         ):
             _fail("collector_kalshi_frame")
+        paper_generation = generation + self._generation_base
         parent = _parent_receipt(
             source_kind="shadow_kalshi_capture",
             capture_id=durable_receipt.raw_path,
@@ -1290,13 +1303,12 @@ class LivePaperCaptureObserver:
             captured_wall_ns=captured_wall_ns,
             captured_monotonic_ns=captured_monotonic_ns,
             clock_uncertainty_ns=clock_uncertainty_ns,
-            physical_connection_generation=generation,
+            physical_connection_generation=paper_generation,
         )
-        generation += self._generation_base
         records = self.bridge.accept_kalshi_envelope(
             {
                 "kind": "kalshi_frame",
-                "physical_connection_generation": generation,
+                "physical_connection_generation": paper_generation,
                 "captured_wall_ns": captured_wall_ns,
                 "captured_monotonic_ns": captured_monotonic_ns,
                 "clock_uncertainty_ns": clock_uncertainty_ns,

@@ -509,6 +509,8 @@ class LivePaperL2Input:
             or parent.captured_monotonic_ns
             != self.frame.captured_monotonic_ns
             or parent.clock_uncertainty_ns != self.frame.clock_uncertainty_ns
+            or parent.physical_connection_generation
+            != self.frame.physical_connection_generation
         ):
             _fail("l2_parent_receipt")
 

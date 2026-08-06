@@ -215,7 +215,7 @@ LIVE_PAPER_MODULE_AST_SHA256 = {
         "69d1b3cf66332ab1e1ee5c5fe374f7a13aa91dc196d16b846a5d6f879a6aad3c"
     ),
     "live_paper_session.py": (
-        "5a647013e1ba2b6bf99019f0e068758637716aff5bd5d98d5bd140bb755b06cf"
+        "5d9d0884c9987703a31afdfafd9762078e2a7785cbfcb6aa215bd100742c60f8"
     ),
     "live_two_model.py": (
         "4a7c98caab1f61c8cdbc395f0e2bf69534a7317e3ff54761ce91604638f33695"
@@ -245,7 +245,7 @@ PILOT_EXTENSION_MODULE_AST_SHA256 = {
 
 LIVE_PAPER_RUNTIME_MODULE_AST_SHA256 = {
     "live_paper_capture_bridge.py": (
-        "fe9e697cff5209c1321d351ec47a3b629db5fbb1eef04452b6e3e23da0fcfbda"
+        "6e96a0294039ad81fc01dbd95ee6b7b8e0fb802b39a0e70d87799a34adcaceff"
     ),
     "live_two_model_paper_cli.py": (
         "7b6e06bca82e862cf891cc6c22b5671716972abe5e1e803e0e444e40e24f9f67"
