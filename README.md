@@ -5,9 +5,12 @@ Kalshi Sports markets. Paper execution is delayed IOC / taker-at-touch (aligned
 with `time_in_force=immediate_or_cancel`): one fill attempt after simulated
 latency, depth-capped, remainder canceled — not maker GTC. Take-profit is
 variable: `take_profit` is the fee-covering arm floor, then `tp_trail_cents`
-lets a spike run and exits on pullback from the peak (`0` = fixed TP). It also
-models spread, stop-loss slippage, fees, position limits, and shutdown
-behavior. Research evidence does not prove live profitability.
+lets a spike run and exits on pullback from the peak (`0` = fixed TP). Paper
+entries are also gated by a free ESPN ATP/WTA scoreboard feed plus a
+score-based match-win probability model: no ESPN bind (common for ITF) or no
+model edge means no buy. It also models spread, stop-loss slippage, fees,
+position limits, and shutdown behavior. Research evidence does not prove live
+profitability.
 
 The bot does not submit orders; demo/live remain disabled in `bot.py`, and
 real-order mutation is independently locked off inside `Executor`. No flag,

@@ -24,6 +24,7 @@ from config import Config
 from kalshi_client import KalshiClient, format_market_skips
 from market_data import PriceFeed, MarketUnavailable
 from strategy import ScalpStrategy
+from espn_prob_gate import EspnProbGate
 from executor import Executor, HaltError
 from research_log import ResearchLog, write_startup_halt
 from order_journal import OrderJournal
@@ -524,7 +525,14 @@ def run_session(cfg, client):
         journal = OrderJournal(cfg.order_journal_path)
         executor = Executor(cfg, client, feed, journal=journal)
         safety = Safety(cfg)
-        ctx = Context(cfg, feed, strategy, executor, log, safety)
+        espn_gate = (EspnProbGate(cfg) if cfg.espn_gate_enabled else None)
+        if espn_gate is not None:
+            print("[espn] score+prob entry gate enabled "
+                  f"(leagues={','.join(cfg.espn_leagues)}; "
+                  f"min_p={cfg.espn_min_model_prob}; "
+                  f"min_edge={cfg.espn_min_edge})")
+        ctx = Context(cfg, feed, strategy, executor, log, safety,
+                      espn_gate=espn_gate)
 
         reconciler = None
         if not cfg.paper_trading:

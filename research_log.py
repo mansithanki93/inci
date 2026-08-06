@@ -32,6 +32,8 @@ RESEARCH_CONFIG_FIELDS = (
     "sim_latency_s", "sim_slippage_cents", "balance_precision_usd",
     "poll_interval", "stale_data_s", "max_consec_errors",
     "close_buffer_seconds",
+    "espn_gate_enabled", "espn_leagues", "espn_cache_s",
+    "espn_min_model_prob", "espn_min_edge",
 )
 REPLAY_CODE_FILES = (
     "analyze.py", "bot.py", "config.py", "engine.py", "executor.py",

@@ -20,7 +20,7 @@ def _exit_priority(reason):
 
 class Context:
     def __init__(self, cfg, feed, strategy, executor, log, safety,
-                 clock=_time.time):
+                 clock=_time.time, espn_gate=None):
         self.cfg = cfg
         self.feed = feed
         self.strategy = strategy
@@ -28,6 +28,7 @@ class Context:
         self.log = log
         self.safety = safety
         self.clock = clock
+        self.espn_gate = espn_gate
         self.latest_bid = {}
         self.bid_ts = {}          # ticker -> time of last usable bid
         self.entry_status = {}    # ticker -> stable lifecycle gate status
@@ -175,6 +176,26 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
     entry_sig = ctx.strategy.check_entry(ticker, hist, now,
                                          mid, bid, ask, ask_qty=ask_qty)
     if entry_sig:
+        gate = getattr(ctx, "espn_gate", None)
+        if gate is not None and gate.enabled():
+            player_name = ticker
+            event_title = ""
+            contracts = getattr(ctx.feed, "contracts_by_ticker", None) or {}
+            contract = contracts.get(ticker) if hasattr(contracts, "get") else None
+            if contract is not None:
+                player_name = getattr(contract, "title", player_name) or player_name
+                event_title = getattr(contract, "game_title", "") or ""
+            decision = gate.decide(
+                ticker=ticker, player_name=player_name,
+                event_title=event_title, ask_cents=ask)
+            if not decision.allow:
+                set_entry_status(
+                    ctx, ticker, f"blocked:espn:{decision.reason[:40]}",
+                    f"[entry] BLOCKED {ticker}: {decision.reason}")
+                return
+            entry_sig = dict(entry_sig)
+            entry_sig["reason"] = (
+                f"{entry_sig['reason']}; {decision.reason}")
         print(f"[signal] BUY {ticker}: {entry_sig['reason']}")
         size = entry_sig.get("contracts", ctx.cfg.contracts_per_trade)
         if ctx.cfg.paper_trading:
