@@ -28,6 +28,8 @@ class PriceFeed:
         self.last_book = {}     # ticker -> (bid, bid_qty, ask, ask_qty)
         self.contracts_by_ticker = MappingProxyType({})
         self.provenance_by_ticker = MappingProxyType({})
+        self.trade_tickers = frozenset()
+        self.watch_tickers = frozenset()
         self._discovery_installed = False
         self.close_times = {}
         self.can_close_early = {}
@@ -42,6 +44,8 @@ class PriceFeed:
         selected_sports = frozenset(discovery.selected_sports)
         contracts = {}
         provenance = {}
+        trade = set()
+        watch = set()
         for contract in discovery.contracts:
             if not isinstance(contract, SelectedContract):
                 raise ValueError(
@@ -55,9 +59,25 @@ class PriceFeed:
                     f"{contract.provenance.sport!r} is not selected")
             contracts[ticker] = contract
             provenance[ticker] = contract.provenance
+            trade.add(ticker)
+        for contract in getattr(discovery, "watch_contracts", ()) or ():
+            if not isinstance(contract, SelectedContract):
+                raise ValueError(
+                    "watch contracts must contain SelectedContract values")
+            ticker = contract.ticker
+            if ticker in provenance:
+                raise ValueError(f"duplicate discovery ticker {ticker!r}")
+            if contract.provenance.sport not in selected_sports:
+                raise ValueError(
+                    f"watch contract {ticker!r} Sport "
+                    f"{contract.provenance.sport!r} is not selected")
+            provenance[ticker] = contract.provenance
+            watch.add(ticker)
 
         self.contracts_by_ticker = MappingProxyType(contracts)
         self.provenance_by_ticker = MappingProxyType(provenance)
+        self.trade_tickers = frozenset(trade)
+        self.watch_tickers = frozenset(watch)
         self._discovery_installed = True
 
     def discover(self, *, now=None, scoreboard_gate=None):
@@ -162,6 +182,38 @@ class PriceFeed:
 
     def top_of_book(self, ticker):
         return self.last_book.get(ticker, (None, None, None, None))
+
+    def sibling_tickers(self, ticker):
+        """Other YES contracts on the same Event (watch or trade)."""
+        event = self.group_id(ticker)
+        out = []
+        for other, provenance in self.provenance_by_ticker.items():
+            if other == ticker:
+                continue
+            if provenance.event_ticker == event:
+                out.append(other)
+        return tuple(out)
+
+    def mid_rise_in_lookback(self, ticker, now, lookback_s):
+        """Latest mid minus minimum mid in ``[now-lookback, now]``.
+
+        Returns 0 when fewer than two samples are available.
+        """
+        from decimal import Decimal
+        history = list(self.history.get(ticker) or ())
+        if not history:
+            return Decimal(0)
+        lookback_s = float(lookback_s)
+        window = [(ts, mid) for ts, mid in history
+                  if now - lookback_s <= float(ts) <= float(now)]
+        if len(window) < 2:
+            return Decimal(0)
+        latest = window[-1][1]
+        floor = min(mid for _, mid in window)
+        rise = latest - floor
+        if rise < 0:
+            return Decimal(0)
+        return rise
 
     def provenance(self, ticker):
         if not isinstance(ticker, str) or not ticker:

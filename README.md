@@ -65,7 +65,9 @@ export LIVETENNISAPI_KEY="twjp_…"
   favors executable two-sided depth, tighter spread, greater depth, earlier
   start, then ticker. With `one_contract_per_event` (default on), at most
   one YES contract per Event is monitored (better model edge among siblings
-  when scored), and entry refuses the other side while exposed.
+  when scored), and entry refuses the other side while exposed. Opposite YES
+  contracts are still quoted as watches; a sibling mid spike
+  (`sibling_spike_cents`, default 15c in 45s) blocks entry.
 - `Config.tickers` is an explicit alternative to `--sports`: the sources are
   mutually exclusive, configured order is preserved, and the list is capped at ten.
   Every ticker must prove the complete relationship

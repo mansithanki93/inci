@@ -200,7 +200,8 @@ def format_discovery_telemetry(discovery):
     count_keys = (
         "series_rows", "milestone_pages", "milestone_rows",
         "event_pages", "event_rows", "candidates", "bindable_candidates",
-        "skipped_event_siblings", "selected", "selected_bindable",
+        "skipped_event_siblings", "watch_siblings", "selected",
+        "selected_bindable",
     )
     skip_items = sorted(
         (key, value) for key, value in stats.items()
@@ -384,21 +385,31 @@ def safe_shutdown(ctx, reconciler):
     return True
 
 
-def run_loop(ctx, reconciler, tickers, sleep=time.sleep):
-    """Run monitoring and route every stop reason through safe shutdown."""
+def run_loop(ctx, reconciler, tickers, sleep=time.sleep, quote_tickers=None):
+    """Run monitoring and route every stop reason through safe shutdown.
+
+    ``tickers`` are tradeable markets. ``quote_tickers`` may also include
+    watch-only siblings (quoted for spike checks, never process_tick'd).
+    """
     safety = ctx.safety
+    trade_tickers = tuple(tickers)
+    trade_set = set(trade_tickers)
+    if quote_tickers is None:
+        quote_tickers = trade_tickers
+    else:
+        quote_tickers = tuple(quote_tickers)
 
     def critical_tickers():
         critical = set(ctx.strategy.positions)
         if hasattr(ctx.executor, "has_pending"):
-            critical.update(t for t in tickers
+            critical.update(t for t in trade_tickers
                             if ctx.executor.has_pending(t))
         return critical
 
     try:
         while not safety.tripped:
             sweep_had_error = False
-            for ticker in tickers:
+            for ticker in quote_tickers:
                 if ticker in safety.quarantined:
                     continue
                 try:
@@ -433,16 +444,19 @@ def run_loop(ctx, reconciler, tickers, sleep=time.sleep):
                             ticker, "quarantined", ts=ctx.clock(),
                             detail=str(e))
                     safety.check_staleness(
-                        ctx.feed, tickers, critical_tickers())
+                        ctx.feed, quote_tickers, critical_tickers())
                     if safety.tripped:
                         break
                     continue
                 # A slow request for this market may have made another
                 # market stale. Check before this quote can trigger an order
                 # or the sweep can block on another request.
-                safety.check_staleness(ctx.feed, tickers, critical_tickers())
+                safety.check_staleness(
+                    ctx.feed, quote_tickers, critical_tickers())
                 if safety.tripped:
                     break
+                if ticker not in trade_set:
+                    continue
                 try:
                     process_tick(ctx, ticker, mid, bid, ask,
                                  observed_at=observed_at)
@@ -451,9 +465,10 @@ def run_loop(ctx, reconciler, tickers, sleep=time.sleep):
                 except (HaltError, UnknownOrderState) as e:
                     safety.trip(str(e))
                     break
-            if safety.all_quarantined(tickers):
+            if safety.all_quarantined(trade_tickers):
                 safety.trip("every monitored market quarantined")
-            safety.check_staleness(ctx.feed, tickers, critical_tickers())
+            safety.check_staleness(
+                ctx.feed, quote_tickers, critical_tickers())
             if reconciler and not safety.tripped:
                 reconciler.periodic(safety)
             if not sweep_had_error and not safety.tripped:
@@ -541,6 +556,11 @@ def run_session(cfg, client):
                 print("[discover] one_contract_per_event=on "
                       f"(skipped_siblings="
                       f"{discovery.stats.get('skipped_event_siblings', 0)})")
+            if cfg.sibling_spike_enabled:
+                print("[discover] sibling_spike=on "
+                      f"(threshold={cfg.sibling_spike_cents}c / "
+                      f"{cfg.sibling_spike_lookback_s:.0f}s; "
+                      f"watching={discovery.stats.get('watch_siblings', 0)})")
             if cfg.live_tennis_enabled:
                 from live_tennis import resolve_api_key
                 if espn_gate.live_tennis_cache is not None:
@@ -562,6 +582,7 @@ def run_session(cfg, client):
             reconciler.startup()
 
         tickers = discovery.tickers
+        watch_tickers = tuple(getattr(discovery, "watch_tickers", ()) or ())
         if not tickers:
             reason = "no eligible Games contracts for selected Sports"
             try:
@@ -572,7 +593,8 @@ def run_session(cfg, client):
                 return 1
             print("No eligible Games contracts for selected Sports.")
             return 0
-        feed.subscribe(tickers)
+        quote_tickers = tuple(dict.fromkeys(tickers + watch_tickers))
+        feed.subscribe(quote_tickers)
     except Exception as error:
         reason = f"session startup failed: {type(error).__name__}: {error}"
         print(f"STARTUP FAILED ({reason})")
@@ -583,10 +605,15 @@ def run_session(cfg, client):
                   f"{type(log_error).__name__}: {log_error}")
         return 1
 
-    print(f"Monitoring {len(tickers)} markets. Ctrl-C to stop.\n")
+    if watch_tickers:
+        print(f"Monitoring {len(tickers)} markets "
+              f"(+{len(watch_tickers)} sibling watches). Ctrl-C to stop.\n")
+    else:
+        print(f"Monitoring {len(tickers)} markets. Ctrl-C to stop.\n")
 
     with termination_signals_as_interrupt():
-        shutdown_ok = run_loop(ctx, reconciler, tickers)
+        shutdown_ok = run_loop(
+            ctx, reconciler, tickers, quote_tickers=quote_tickers)
     print(f"\nUTC-day P&L (net of fees): {strategy.realized_pnl:+.2f} USD "
           f"| open positions: {len(strategy.positions)}")
     for t, p in strategy.positions.items():

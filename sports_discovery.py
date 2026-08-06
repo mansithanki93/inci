@@ -105,10 +105,14 @@ class DiscoveryResult:
     session_start_utc: float
     session_end_utc: float
     stats: Mapping[str, int]
+    # Same-event opposite sides quoted for spike checks but not traded.
+    watch_contracts: tuple[SelectedContract, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.contracts, tuple):
             raise ValueError("contracts must be a tuple")
+        if not isinstance(self.watch_contracts, tuple):
+            raise ValueError("watch_contracts must be a tuple")
         tickers = set()
         for contract in self.contracts:
             if not isinstance(contract, SelectedContract):
@@ -116,6 +120,18 @@ class DiscoveryResult:
             if contract.ticker in tickers:
                 raise ValueError(f"duplicate contract ticker {contract.ticker!r}")
             tickers.add(contract.ticker)
+        watch_tickers = set()
+        for contract in self.watch_contracts:
+            if not isinstance(contract, SelectedContract):
+                raise ValueError(
+                    "watch_contracts must contain SelectedContract values")
+            if contract.ticker in tickers:
+                raise ValueError(
+                    f"watch ticker {contract.ticker!r} overlaps traded set")
+            if contract.ticker in watch_tickers:
+                raise ValueError(
+                    f"duplicate watch ticker {contract.ticker!r}")
+            watch_tickers.add(contract.ticker)
         if not isinstance(self.selected_sports, tuple):
             raise ValueError("selected_sports must be a tuple")
         sport_names = set()
@@ -148,8 +164,17 @@ class DiscoveryResult:
         return tuple(contract.ticker for contract in self.contracts)
 
     @property
+    def watch_tickers(self):
+        return tuple(contract.ticker for contract in self.watch_contracts)
+
+    @property
     def provenance_by_ticker(self):
-        return {contract.ticker: contract.provenance for contract in self.contracts}
+        out = {}
+        for contract in self.contracts:
+            out[contract.ticker] = contract.provenance
+        for contract in self.watch_contracts:
+            out[contract.ticker] = contract.provenance
+        return out
 
 
 def _choices(filters):
@@ -1003,6 +1028,25 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
     stats["selected"] = len(contracts)
     stats["selected_bindable"] = sum(
         1 for contract in contracts if contract.ticker in bindable_tickers)
+    watch_contracts = ()
+    if bool(getattr(cfg, "sibling_spike_enabled", True)):
+        selected_tickers = {contract.ticker for contract in contracts}
+        selected_events = {
+            contract.provenance.event_ticker for contract in contracts}
+        watched = []
+        seen_watch = set()
+        for contract in candidates:
+            event = contract.provenance.event_ticker
+            if contract.ticker in selected_tickers:
+                continue
+            if event not in selected_events:
+                continue
+            if contract.ticker in seen_watch:
+                continue
+            seen_watch.add(contract.ticker)
+            watched.append(contract)
+        watch_contracts = tuple(watched)
+    stats["watch_siblings"] = len(watch_contracts)
     return DiscoveryResult(
         contracts=contracts, selected_sports=selected_sports,
         local_timezone=window.local_timezone,
@@ -1010,4 +1054,5 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
         session_end_local=window.session_end_local,
         session_start_utc=window.session_start_utc,
         session_end_utc=window.session_end_utc,
-        stats=dict(sorted(stats.items())))
+        stats=dict(sorted(stats.items())),
+        watch_contracts=watch_contracts)
