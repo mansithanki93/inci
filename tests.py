@@ -2608,25 +2608,23 @@ def test_analyzer_replays_shared_portfolio_exactly_once():
         for ts in range(1, 21):
             quote(float(ts), "ACTIVE", groups["TRAIN"], 60, 59, 61)
             quote(ts + 0.1, "BLOCKED", groups["TEST"], 60, 59, 61)
-        # Conservative maker fills: a resting BUY at the bid fills only once the
-        # ask trades down to it, and a resting SELL at the ask fills only once
-        # the bid trades up to it. ACTIVE dips first and holds the single shared
-        # slot the whole time, so BLOCKED can never submit a resting entry in
-        # the shared replay.
-        quote(21.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)   # A resting BUY@51
+        # Resting BUY pegs at the ask; resting TP SELL pegs at the bid.
+        # ACTIVE dips first and holds the single shared slot the whole time,
+        # so BLOCKED can never submit a resting entry in the shared replay.
+        quote(21.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)   # A resting BUY@53
         quote(21.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked: A pending
-        quote(22.0, "ACTIVE", groups["TRAIN"], 49, 48, 50)   # ask<=51 -> A fills@51
-        quote(22.1, "BLOCKED", groups["TEST"], 49, 48, 50)   # blocked: A holds slot
-        quote(23.0, "ACTIVE", groups["TRAIN"], 49, 48, 50)
-        quote(23.1, "BLOCKED", groups["TEST"], 49, 48, 50)   # blocked
-        quote(24.0, "ACTIVE", groups["TRAIN"], 49, 48, 50)
-        quote(24.1, "BLOCKED", groups["TEST"], 49, 48, 50)   # blocked
-        quote(25.0, "ACTIVE", groups["TRAIN"], 58, 57, 59)   # A take-profit SELL@59
-        quote(25.1, "BLOCKED", groups["TEST"], 58, 57, 59)   # blocked: A still open
-        quote(26.0, "ACTIVE", groups["TRAIN"], 61, 60, 62)   # bid>=59 -> A SELL@59
-        # BLOCKED's recovery arrives only after ACTIVE fully traded. In
-        # isolation this completes BLOCKED's BUY->SELL; in the shared replay
-        # BLOCKED already missed every slot and no longer dips here.
+        quote(22.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)   # ask<=53 -> A fills@53
+        quote(22.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked: A holds slot
+        quote(23.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)
+        quote(23.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked
+        quote(24.0, "ACTIVE", groups["TRAIN"], 52, 51, 53)
+        quote(24.1, "BLOCKED", groups["TEST"], 52, 51, 53)   # blocked
+        quote(25.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # TP: A resting SELL@58
+        quote(25.1, "BLOCKED", groups["TEST"], 59, 58, 60)   # blocked: A still open
+        quote(26.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # bid>=58 -> A SELL@58
+        # BLOCKED's quiet quote arrives only after ACTIVE fully traded. In
+        # isolation BLOCKED completes BUY->SELL on its own dip/TP path; in the
+        # shared replay it already missed every slot and does not dip here.
         quote(26.1, "BLOCKED", groups["TEST"], 61, 60, 62)
         writer.writerow(research_row(
             cfg=cfg, session="SHARED", ts=27, event_ticker="", ticker="",
@@ -2697,8 +2695,9 @@ def test_aggregate_fee_rounding():
     projected = projected_scalp_pnl_usd(
         Decimal(50), Config().take_profit, Config().contracts_per_trade,
         Config().sim_slippage_cents, Config().balance_precision_usd)
-    entry = Decimal(51)
-    exit_fill = entry + Config().take_profit - Config().sim_slippage_cents
+    # Resting path: entry at ask, TP exit at entry+TP (no adverse slippage).
+    entry = Decimal(50)
+    exit_fill = entry + Config().take_profit
     expected = ((exit_fill - entry) * Config().contracts_per_trade / 100
                 - fee_usd(entry, Config().contracts_per_trade, side="BUY",
                           balance_precision_usd=Config().balance_precision_usd)
@@ -2833,12 +2832,12 @@ def test_replay_exact_paper_path_and_residual():
             w.writerow(research_row(
                 cfg=cfg, session="RESIDUAL", ts=t,
                 mid=60, bid=59, ask=61, bid_qty=500, ask_qty=500))
-        # Dip triggers a resting BUY at the bid (51).
+        # Dip triggers a resting BUY pegged at the ask (53).
         w.writerow(research_row(
             cfg=cfg, session="RESIDUAL", ts=t + 1.5,
             mid=52, bid=51, ask=53, bid_qty=500, ask_qty=500))
-        # Market trades down through the resting bid: the maker BUY fills at
-        # its limit (51), depth-limited to the crossing ask size (6).
+        # Ask still at/below the resting limit: BUY fills at 53, depth-limited
+        # to the ask size (6).
         w.writerow(research_row(
             cfg=cfg, session="RESIDUAL", ts=t + 2.6,
             mid=50, bid=49, ask=51, bid_qty=500, ask_qty=6))
@@ -2849,12 +2848,12 @@ def test_replay_exact_paper_path_and_residual():
                 mid=40, bid=39, ask=41, bid_qty=0, ask_qty=500))
     r = replay(path, cfg=cfg)
     buys = [tr for tr in r["trades"] if tr[1] == "BUY"]
-    assert buys and buys[0][2] == Decimal(51)       # maker limit, no slippage
+    assert buys and buys[0][2] == Decimal(53)       # resting ask limit
     assert buys[0][3] == Decimal(6)                 # depth-limited
     assert not any(tr[1] == "SELL" for tr in r["trades"])   # zero bid depth
     assert r["residual_contracts"] == Decimal(6)
     assert r["residual_marked"] < 0                 # loss NOT hidden
-    print("PASS replay: exact paper path (maker fill at limit, depth "
+    print("PASS replay: exact paper path (resting fill at ask limit, depth "
           "limit) and residual inventory counted in P&L")
 
 
@@ -2904,12 +2903,12 @@ def test_pending_paper_order_uses_first_observed_due_quote():
     assert not strat.positions and ex.has_pending("T")
 
     now[0] = 1.1
-    # First observed DUE quote for T that trades through the resting bid (51):
-    # the maker BUY fills at its limit (51), depth-limited to the ask size (7).
-    feed.apply(1.1, "T", Decimal(50), Decimal(49), Decimal(50),
-               Decimal(51), Decimal(7))
-    process_tick(ctx, "T", Decimal(50), Decimal(49), Decimal(51))
-    assert strat.positions["T"].entry_price == Decimal(51)
+    # First observed DUE quote for T with ask still at/below the resting ask
+    # limit (53): BUY fills at 53, depth-limited to the ask size (7).
+    feed.apply(1.1, "T", Decimal(52), Decimal(51), Decimal(50),
+               Decimal(53), Decimal(7))
+    process_tick(ctx, "T", Decimal(52), Decimal(51), Decimal(53))
+    assert strat.positions["T"].entry_price == Decimal(53)
     assert strat.positions["T"].contracts == Decimal(7)
     assert not ex.has_pending("T")
     print("PASS pending paper order fills only on first observed due quote")
@@ -3019,9 +3018,9 @@ def test_replay_eof_never_fabricates_flatten_fills():
         w.writerow(research_row(
             cfg=cfg, session="EOF", ts=21, mid=52, bid=51, ask=53,
             bid_qty=100, ask_qty=100))
-        # Market trades through the resting bid; depth-limited maker fill.
+        # Ask still at/below the resting ask limit; depth-limited fill.
         w.writerow(research_row(
-            cfg=cfg, session="EOF", ts=22, mid=50, bid=49, ask=51,
+            cfg=cfg, session="EOF", ts=22, mid=52, bid=51, ask=53,
             bid_qty=100, ask_qty=5))
     result = replay(path, cfg=cfg)
     assert [trade[1] for trade in result["trades"]] == ["BUY"]
@@ -3040,17 +3039,17 @@ def test_pricefeed_and_replayfeed_produce_identical_paper_fills():
         rows.append((float(ts), "T", Decimal(60), Decimal(59),
                      Decimal(61), Decimal(100), Decimal(100)))
     rows += [
-        # Dip: resting BUY pegged at the bid (51).
+        # Dip: resting BUY pegged at the ask (53).
         (21.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(100)),
-        # Ask trades down through the resting bid; depth-limited maker fill.
-        (22.0, "T", Decimal(50), Decimal(49), Decimal(51),
+        # Ask still at/below limit; depth-limited resting fill at 53.
+        (22.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(6)),
-        # Take-profit: resting SELL pegged at the ask (59).
-        (24.0, "T", Decimal(58), Decimal(57), Decimal(59),
+        # Take-profit: resting SELL pegged at the bid (58).
+        (24.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
-        # Bid trades up through the resting ask; maker SELL fills.
-        (25.0, "T", Decimal(61), Decimal(60), Decimal(62),
+        # Bid still at/above limit; resting SELL fills at 58.
+        (25.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
     ]
 
@@ -3119,17 +3118,17 @@ def test_actual_runtime_driver_matches_replay():
     rows = [(float(ts), "T", Decimal(60), Decimal(59), Decimal(61),
              Decimal(100), Decimal(100)) for ts in range(1, 21)]
     rows += [
-        # Dip: resting BUY pegged at the bid (51).
+        # Dip: resting BUY pegged at the ask (53).
         (21.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(100)),
-        # Ask trades down through the resting bid; depth-limited maker fill.
-        (22.0, "T", Decimal(50), Decimal(49), Decimal(51),
+        # Ask still at/below limit; depth-limited resting fill at 53.
+        (22.0, "T", Decimal(52), Decimal(51), Decimal(53),
          Decimal(100), Decimal(6)),
-        # Take-profit: resting SELL pegged at the ask (59).
-        (24.0, "T", Decimal(58), Decimal(57), Decimal(59),
+        # Take-profit: resting SELL pegged at the bid (58).
+        (24.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
-        # Bid trades up through the resting ask; maker SELL fills.
-        (25.0, "T", Decimal(61), Decimal(60), Decimal(62),
+        # Bid still at/above limit; resting SELL fills at 58.
+        (25.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
     ]
     cfg = Config(sports=["Tennis"]); cfg.sim_latency_s = 1.0
@@ -4731,17 +4730,17 @@ def test_replay_enforces_logged_market_lifecycle():
             writer.writerow(research_row(
                 cfg=cfg, session=name, ts=21, mid=52, bid=51, ask=53,
                 close_ts=close_ts, can_close_early=early))
-            # Ask trades through the resting bid so the maker BUY fills.
+            # Ask still at/below resting ask limit so the BUY fills.
             writer.writerow(research_row(
-                cfg=cfg, session=name, ts=22, mid=50, bid=49, ask=51,
+                cfg=cfg, session=name, ts=22, mid=52, bid=51, ask=53,
                 close_ts=close_ts, can_close_early=early))
-            # Take-profit: resting SELL pegged at the ask.
+            # Take-profit: resting SELL pegged at the bid.
             writer.writerow(research_row(
-                cfg=cfg, session=name, ts=23, mid=58, bid=57, ask=59,
+                cfg=cfg, session=name, ts=23, mid=59, bid=58, ask=60,
                 close_ts=close_ts, can_close_early=early))
-            # Bid trades through the resting ask so the maker SELL fills.
+            # Bid still at/above resting bid limit so the SELL fills.
             writer.writerow(research_row(
-                cfg=cfg, session=name, ts=24, mid=61, bid=60, ask=62,
+                cfg=cfg, session=name, ts=24, mid=59, bid=58, ask=60,
                 close_ts=close_ts, can_close_early=early))
             writer.writerow(research_row(
                 cfg=cfg, session=name, ts=25, event_ticker="", ticker="",
@@ -6539,7 +6538,7 @@ def test_delayed_paper_fill_logs_full_provenance():
             self.history["T"].append((1.0, Decimal(50)))
 
         def top_of_book(self, ticker):
-            # Market trades down to the resting bid so the maker BUY crosses.
+            # Ask still at the resting ask limit so the BUY can fill.
             return Decimal(49), Decimal(10), Decimal(49), Decimal(10)
 
         def lifecycle(self, ticker):

@@ -3,17 +3,16 @@
 Paper: nonblocking pending orders fill only from a same-ticker observation at
 or after their due time, bounded by book depth. Orders are one of two kinds:
 
-* RESTING (maker) — entries and non-stop exits. The order rests at the near
-  touch captured when it was submitted (BUY at the bid, SELL at the ask) and
-  fills at that limit ONLY when a later quote trades through it (a BUY fills
-  when the ask trades down to the resting bid; a SELL fills when the bid
-  trades up to the resting ask). It pays no adverse slippage, but it also may
-  never fill — modelling real maker fill uncertainty / adverse selection.
+* RESTING — entries and non-stop exits. Limits are pegged to the executable
+  side needed for the dip-scalp path, not the passive far touch:
+  BUY rests at the ask (fill when a later ask is still at or below that limit);
+  SELL rests at the bid (fill when a later bid is still at or above that limit).
+  That avoids the adverse-selection trap of resting a bid under a dip (which
+  only fills on further decline) and the unreachable-TP trap of resting an
+  offer after the bid already printed the take-profit. No adverse slippage is
+  applied; an unfilled resting order stays working until it fills or cancels.
 * MARKETABLE (taker) — stop-loss exits. The order crosses the spread on the
-  first due quote at bid/ask -/+ slippage, so risk is exited immediately.
-
-This keeps the conservative "never fabricate a fill" contract: a resting order
-that is not crossed simply stays working until it fills or is canceled.
+  first due quote at bid - slippage, so risk is exited immediately.
 
 Live/demo (disabled both at bot and executor levels): official Create V2 body
 (side=bid|ask, separate price, fp string count, time_in_force,
@@ -105,12 +104,15 @@ class Executor:
             if limit is None:
                 return None
             if side == "BUY":
-                # A resting bid fills only once the ask trades down to it.
+                # Resting BUY is pegged at the ask: fill while the offer is
+                # still at or below that limit (no further-dump requirement).
                 if ask is None or ask > limit:
                     return None
                 price, avail = limit, ask_qty
             else:
-                # A resting offer fills only once the bid trades up to it.
+                # Resting SELL is pegged at the bid: fill while the bid is
+                # still at or above that limit (locks take-profit without
+                # needing another climb through the spread).
                 if bid is None or bid < limit:
                     return None
                 price, avail = limit, bid_qty
@@ -152,9 +154,11 @@ class Executor:
             # must cross immediately to exit risk.
             resting = side == "BUY" or "stop-loss" not in reason
         if resting and limit_price is None:
-            # Peg the maker limit at the near touch observed right now.
+            # Peg to the executable price the scalp needs: BUY at ask, SELL
+            # at bid. Far-touch pegs (bid for buys / ask for sells) systematically
+            # adverse-select dip entries and strand take-profits.
             bid, _, ask, _ = self.feed.top_of_book(ticker)
-            limit_price = bid if side == "BUY" else ask
+            limit_price = ask if side == "BUY" else bid
         submitted_at = self.clock() if now is None else now
         order = PendingPaperOrder(
             ticker=ticker, side=side,

@@ -63,16 +63,19 @@ def net_take_profit(entry_cents, tp_cents):
 def projected_scalp_pnl_usd(ask_cents, tp_cents, contracts,
                             slippage_cents,
                             balance_precision_usd=Decimal("0.01")):
-    """Net paper P&L at the configured exit trigger.
+    """Net paper P&L at the configured take-profit exit.
 
-    Entry fills at ask+slippage. The exit trigger is measured from that fill;
-    its SELL then fills another slippage unit below the observed bid. Fees are
-    rounded once per aggregate execution, matching the paper executor.
+    Matches the resting paper path: BUY fills at the ask (no adverse slippage)
+    and a take-profit SELL fills at the bid that printed entry+TP (also no
+    adverse slippage). ``slippage_cents`` is retained for call-site compatibility
+    (marketable stop-loss exits still use it in the executor) but does not
+    affect this take-profit projection.
+    Fees are rounded once per aggregate execution, matching the paper executor.
     """
+    _ = slippage_cents
     qty = _d(contracts)
-    entry = min(Decimal(99), _d(ask_cents) + _d(slippage_cents))
-    exit_fill = max(
-        Decimal(0), entry + _d(tp_cents) - _d(slippage_cents))
+    entry = min(Decimal(99), _d(ask_cents))
+    exit_fill = min(Decimal(99), entry + _d(tp_cents))
     gross = (exit_fill - entry) * qty / Decimal(100)
     return (gross
             - fee_usd(entry, qty, side="BUY",
