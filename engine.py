@@ -107,8 +107,9 @@ def process_tick(ctx, ticker, mid, bid, ask, observed_at=None):
                     ticker, "SELL", pos.contracts, exit_sig["reason"],
                     now=now, resting=False)
             elif not working_sell:
-                # Rest a maker exit at the offer; it works until it fills or a
-                # stop-loss preempts it.
+                # Rest a take-profit/time exit at the bid so it can fill on the
+                # next due quote without needing another climb through the
+                # spread; a stop-loss can still preempt it.
                 print(f"[signal] SELL {ticker}: {exit_sig['reason']}")
                 ctx.executor.submit_paper(
                     ticker, "SELL", pos.contracts, exit_sig["reason"],
