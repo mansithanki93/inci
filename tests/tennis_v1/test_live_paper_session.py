@@ -297,6 +297,12 @@ class LivePaperSessionTests(unittest.TestCase):
         kinds = tuple(record.kind.value for record in records)
         for kind in ("raw_score_receipt", "raw_l2_receipt", "anchor", "forecast", "action", "fill", "mark", "checkpoint", "heartbeat", "terminal"):
             self.assertIn(kind, kinds)
+        checkpoint_index = kinds.index("checkpoint")
+        checkpoint_projection = records[checkpoint_index].payload.body
+        self.assertEqual(
+            checkpoint_projection.previous_encoded_log_bytes,
+            len(api.encode_live_paper_records(records[:checkpoint_index])),
+        )
         mark = next(record.payload.body for record in records if record.kind.value == "mark")
         self.assertTrue(mark.fully_priced)
         self.assertEqual(mark.priced_quantity, Decimal("100"))
@@ -324,6 +330,16 @@ class LivePaperSessionTests(unittest.TestCase):
         rejected_forgery = api.load_live_paper_checkpoint(forged, log, require_terminal=True)
         self.assertFalse(rejected_forgery.checkpoint_used)
         self.assertEqual(rejected_forgery.state, state)
+        forged_counter = api.encode_live_paper_checkpoint(
+            replace(state, encoded_log_bytes=state.encoded_log_bytes - 1)
+        )
+        rejected_counter = api.load_live_paper_checkpoint(
+            forged_counter,
+            log,
+            require_terminal=True,
+        )
+        self.assertFalse(rejected_counter.checkpoint_used)
+        self.assertEqual(rejected_counter.state, state)
 
     def test_checkpoint_restart_replays_a_verified_suffix(self) -> None:
         """Catches a mid-log checkpoint being ignored or trusted without prefix validation."""
@@ -589,8 +605,46 @@ class LivePaperSessionTests(unittest.TestCase):
         self.assertEqual(rows[0].record_ordinal, 1)
         self.assertTrue(usable.terminal)
 
-    def test_producer_bounds_record_count_total_log_and_checkpoint_tree(self) -> None:
-        """Catches encoders returning oversized blobs or trees rejected by their decoders."""
+    def test_reducer_rejects_append_before_session_log_limit(self) -> None:
+        """Catches a reducer advancing state for a chain its encoder must reject."""
+        api = _api()
+        observation = _score_input(api).observations[0]
+        large_input = api.LivePaperScoreBatchInput(
+            (observation,) * 2_500,
+            2_000_000_000,
+            2_000_000_000,
+        )
+        state = api.open_live_paper_session(_config(api))
+        records = ()
+        for _ in range(5):
+            state, emitted = api.reduce_live_paper_input(state, large_input)
+            records += emitted
+            encoded = api.encode_live_paper_records(records)
+            self.assertEqual(api.replay_live_paper_records(encoded).state, state)
+
+        self.assertGreater(len(encoded), 28 * 1024 * 1024)
+        before = (
+            state,
+            state.record_head_sha256,
+            state.record_count,
+            state.encoded_log_bytes,
+        )
+        with self.assertRaisesRegex(api.LivePaperSessionError, "log_too_large"):
+            api.reduce_live_paper_input(state, large_input)
+        self.assertEqual(state.encoded_log_bytes, len(encoded))
+        self.assertEqual(
+            (
+                state,
+                state.record_head_sha256,
+                state.record_count,
+                state.encoded_log_bytes,
+            ),
+            before,
+        )
+        self.assertEqual(api.replay_live_paper_records(encoded).state, state)
+
+    def test_producer_bounds_record_count_and_checkpoint_tree(self) -> None:
+        """Catches encoders returning oversized record sets or checkpoint trees."""
         api = _api()
         initial = api.open_live_paper_session(_config(api))
         _, one = api.reduce_live_paper_input(
@@ -599,15 +653,6 @@ class LivePaperSessionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(api.LivePaperSessionError, "record_count"):
             api.encode_live_paper_records(one * 100_001)
-
-        state = initial
-        records = []
-        large_body = "x" * (1024 * 1024)
-        for _ in range(33):
-            state, record = api._make_record(state, api.LivePaperRecordKind.REJECTION, large_body)
-            records.append(record)
-        with self.assertRaisesRegex(api.LivePaperSessionError, "log_too_large"):
-            api.encode_live_paper_records(tuple(records))
 
         completed, _ = _complete_session(api)
         consumed = completed.portfolio.consumed_depth[0]

@@ -298,6 +298,7 @@ class _LivePaperCheckpointProjection:
     portfolio: PaperPortfolioState
     previous_record_sha256: str
     previous_record_count: int
+    previous_encoded_log_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +353,7 @@ class LivePaperSessionState:
     last_score_clock_uncertainty_ns: int | None
     record_head_sha256: str
     record_count: int
+    encoded_log_bytes: int
     next_heartbeat_wall_ns: int
     next_heartbeat_monotonic_ns: int
     terminal: bool
@@ -367,6 +369,8 @@ class LivePaperSessionState:
             or not _is_sha(self.record_head_sha256)
             or type(self.record_count) is not int
             or self.record_count < 0
+            or type(self.encoded_log_bytes) is not int
+            or not 0 <= self.encoded_log_bytes <= _MAX_LOG_BYTES
             or type(self.next_heartbeat_wall_ns) is not int
             or self.next_heartbeat_wall_ns < 0
             or type(self.next_heartbeat_monotonic_ns) is not int
@@ -389,6 +393,7 @@ class LivePaperSessionState:
             or self.portfolio.fee_schedule != self.config.fee_schedule
             or self.portfolio.fee_series_ticker != self.config.fee_series_ticker
             or (self.record_count == 0) != (self.record_head_sha256 == _ZERO_SHA256)
+            or (self.record_count == 0) != (self.encoded_log_bytes == 0)
         ):
             _fail("state_binding")
 
@@ -665,8 +670,16 @@ def _make_record(state: LivePaperSessionState, kind: LivePaperRecordKind, body: 
         payload_sha,
         record_sha,
     )
-    _encode_record_line(record)
-    return replace(state, record_head_sha256=record_sha, record_count=ordinal), record
+    line = _encode_record_line(record)
+    encoded_log_bytes = state.encoded_log_bytes + len(line)
+    if encoded_log_bytes > _MAX_LOG_BYTES:
+        _fail("log_too_large")
+    return replace(
+        state,
+        record_head_sha256=record_sha,
+        record_count=ordinal,
+        encoded_log_bytes=encoded_log_bytes,
+    ), record
 
 
 def _emit(state: LivePaperSessionState, records: list[LivePaperRecord], kind: LivePaperRecordKind, body: object) -> LivePaperSessionState:
@@ -697,6 +710,7 @@ def open_live_paper_session(config: LivePaperSessionConfig) -> LivePaperSessionS
         last_score_clock_uncertainty_ns=None,
         record_head_sha256=_ZERO_SHA256,
         record_count=0,
+        encoded_log_bytes=0,
         next_heartbeat_wall_ns=config.opened_wall_ns + config.heartbeat_interval_ns,
         next_heartbeat_monotonic_ns=config.opened_monotonic_ns + config.heartbeat_interval_ns,
         terminal=False,
@@ -722,6 +736,7 @@ def _checkpoint_projection(state: LivePaperSessionState) -> _LivePaperCheckpoint
         state.portfolio,
         state.record_head_sha256,
         state.record_count,
+        state.encoded_log_bytes,
     )
 
 
