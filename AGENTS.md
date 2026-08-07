@@ -12,5 +12,5 @@
 - `sibling_spike_enabled=True` (default): package each trade with exactly one verified watch-only opposite YES contract whose scoreboard identity reverses the same competition's two athlete IDs, keep total trade+watch REST load within `max_monitored_markets`, and **block entry** if the sibling mid rises by `sibling_spike_cents` (default 15) within `sibling_spike_lookback_s` (default 45s). Ambiguous/unavailable sibling evidence fails closed for entries but must never suppress a risk-reducing SELL.
 - Exit priority while a SELL is pending: stop-loss > time exit > take-profit. Never cancel/resubmit an equal-priority pending exit (that slides `due_at`). Upgrade only when priority increases.
 - Entry size/edge uses visible ask depth (`min(contracts_per_trade, ask_qty)`). Unknown/zero ask depth cannot enter.
-- Run paper: `.venv/bin/python bot.py --sports Tennis,Basketball` (long-running; use `timeout -s INT` or tmux). State lives under `~/.local/state/inci/production/subaccount-0/`.
+- Run paper: `.venv/bin/python bot.py --sports Tennis` (long-running; use `timeout -s INT` or tmux). State lives under `~/.local/state/inci/production/subaccount-0/`. This research scope is Tennis-only; do not add Basketball unless explicitly requested.
 - Standard setup/run docs: `README.md`. Env bootstrap: `.cursor/environment.json` + `.cursor/install.sh`.
