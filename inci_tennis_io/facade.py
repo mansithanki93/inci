@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .clip_journal_store import (
+    read_clip_journal_document,
+    write_clip_journal_document,
+)
 from .expert_journal_store import (
     abort_sportradar_candidate_output,
     abort_expert_replay_construction,
@@ -104,6 +108,7 @@ __all__ = (
     "prepare_expert_replay_begin",
     "prove_expert_live_evidence_tail",
     "purge_expert_session",
+    "read_clip_journal_document",
     "read_expert_manifest",
     "read_expert_terminal_and_summary",
     "read_next_expert_group",
@@ -122,6 +127,7 @@ __all__ = (
     "prepare_sportradar_timeline_read",
     "read_sportradar_summary",
     "read_sportradar_timeline",
+    "write_clip_journal_document",
     "SportradarTrialObserverError",
     "SportradarTrialTransport",
     "TrialCapture",

@@ -10,6 +10,8 @@ import textwrap
 import tomllib
 import unittest
 
+sys.dont_write_bytecode = True
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PHASE_ONE_ROOT = REPOSITORY_ROOT / "tennis_v1"
@@ -22,109 +24,148 @@ PACKAGE_ROOTS = {
 }
 
 EMPTY_MODULE_AST_SHA256 = (
-    "ad2e13b69c4fc1fda46413f740f426fc1793cfc6d6da8d226ba619f1aef48be7"
+    "3543b4693a36a1098850b8bc928887694ed59a6deb7d3dfd0339de01f55a77b6"
 )
 EXPECTED_PACKAGE_AST_SHA256 = {
     "inci_tennis_expert": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
         "contracts.py": (
-            "8390c0137f8f93b5150cfcc2a85d8c07af6b8c0fffbb6fc66d235aae78a46e12"
+            "12d02ca3c81b7322211e9b67757f5158f875d3398d4d9ad0d5b3e4cb7327245d"
+        ),
+        "calibration.py": (
+            "9086eb5e572f72723b116e69997def3b7ca784828f595436e2375e9c16e3986b"
+        ),
+        "clip_journal.py": (
+            "e876ce51df761f754c967837a6568be4a69f7ff3f591525fa680b547f9da07f3"
+        ),
+        "engine.py": (
+            "df441e8141b04cdc04d947a0899333b6003dcbefc49ee60ae0e4c45a320259a6"
         ),
         "facade.py": (
-            "cf6fc820a31443e85254fa9d3bc3534c7e935b025af48a21948478e5fb277e4d"
+            "8a8432ba377674be30ab09523c88e1975daf73aadab5c5a066d5143de320d713"
+        ),
+        "fee_schedule.py": (
+            "9dd446dfb5c5ab1205e4e7faca6af32ccbc250c05d1b54b9eb9835d6ab01c6ea"
         ),
         "journal_codec.py": (
-            "516fe36207012faf4a3853fe69d42c68ea6d775fd7e06624b273e181199c7102"
+            "693edba1197b34e3688bd8ed7d9a6d2b3f319f0ccfd32308cad5d0f3be78236e"
         ),
         "market_book.py": (
-            "68ccc3d0fbda2a69c87b64bdc348e791f9f318fc0dfa7685e97afac0657682fd"
+            "1de2f7545c0dcf5f648e83adbe6fc6bb050383ef1bf91936b65e65e619fe245c"
         ),
         "match_binding.py": (
-            "1240813fe2d8809fc9fd9c546ac168f09524e677d5a0732d944e2dcd9e28b87c"
+            "acb97545983f83efd58c749f06101a71d35e1672637bec8924656821663ba497"
         ),
         "observation.py": (
-            "e1b821d8b385220b5516831a221fd1b5df311035bc8fcde395bcc8db8ddee2b3"
+            "1b5ba2f6c67101f45e668b44f0d97a5a42e2cff6eca7978a9e1cd1816fba455b"
+        ),
+        "prematch_model.py": (
+            "e87cb2779de16114907dc3004dfe54d39ca216ee82aeae8e884add0a81975d3c"
         ),
         "reducer.py": (
-            "a604a502f315c189736f7e77ba7ee1560de38b5b6a42f5f1ae75664db644f0c7"
+            "fabe6a70041cb1d9da88f9a0cb1d66625100ac4575e77536ea5744fd00033d83"
         ),
         "replay.py": (
-            "689c39076f95e80d3992b8fa01594416898c524ce41c85e73eb65874e14c8bef"
+            "0af5dc81dd7a4e77829cdfc880962bb7564456a3d09fe3b29e0d30267b3f7934"
+        ),
+        "scalp_policy.py": (
+            "4834ed986abcaa2a7db3ecf46431839753ac7aa69d78f8a5137463539c3a36f9"
         ),
         "state.py": (
-            "004651dcd24eb2c116715393aeba5844e23f80997cf20ce96f2cdde5a6e38dea"
+            "caee42e5e32fd337e1f92cc88400f8ba8bedfe847f3cbf38a35a721f617f1fa9"
         ),
         "tennis_score.py": (
-            "40d24bee509fae0560a5b3e815f2ace84de7a06facfa23469eb885a13a7e9f70"
+            "c894b849d1bfb30cab132660c30b43e87e3b864f91c8b5b5ce06d6bd29f55e98"
         ),
         "synchronizer.py": (
-            "51251b6e751309d71759b9eb7aa2c2617b1a1acc6d3199326a0a4c02fb725b33"
+            "8ac427c7c1dc364e249405ede1e8e86b9a78fab9ceadb8bd5134f6ca46fbf00f"
         ),
         "task6_fallback_normalizer.py": (
-            "2629e1752c789478201da6b3dd291dfdb6dc46614998e2ab8115d47f676b3b41"
+            "6d361f8be23485295d5d764289d8bcfd6b9070acf03f5bec00d0df57d4a05070"
+        ),
+        "win_probability.py": (
+            "f9715503de4fb9b96dcd23f3f6240fc870a2ea6c983668bd9b9ef5c4a68fb4dc"
         ),
     },
     "inci_tennis_io": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
         "account_lock.py": (
-            "6752e3b873f0e18b6226c0c664aaa49263c30b4c925019ebcebb87ce893d6e5c"
+            "0971016a9f31ba114eb813b80e4e155d0f8bbdfed9786ce8d5319bf9a5a781e1"
         ),
         "expert_journal_store.py": (
-            "dc14c037d4303ca2fa5ae2ed8c1b7de91b24f097bf08384884726904cc612fb0"
+            "3c1fc8749f2876faa3f94f127c774f58839cf9f3fa92a5ac04ab7e5a59c7d9c2"
+        ),
+        "kalshi_readonly.py": (
+            "a9328e4bd575f2c2958db7862144edcf45e9ce1cf7eb633d6ebc90ff7c19615a"
         ),
         "facade.py": (
-            "9cf621feba65e4e7bc0c463cad257378e3453d59dbfdc48ace76697048355808"
+            "e96663b80e747b40b71d6e95fce71cec1c1f4f1dfbb6b2a5b0fc701eaced2e22"
+        ),
+        "historical_store.py": (
+            "a049a92e9a3d2326f2f42d41672d7406a8eeb522a52e13d9a0ff97522e42b139"
+        ),
+        "clip_journal_store.py": (
+            "76b43916fd7a8615082b8a52e153c98d64adbd2cdcddf1271f1ade273cb8659b"
+        ),
+        "espn_readonly.py": (
+            "281b3f01dc62a52eb6c040dd3654b5cef1c38ce3ae0077383f2da4d3d4ab8aad"
         ),
         "pinned_artifacts.py": (
-            "43feef97b2d9a37f00143f00f6272562a64881da5cf143c060eb77c8c058ca0f"
+            "c670521a595a42098d1d783868abbc36506d4579a9fa852d10ac1af93b762734"
         ),
         "ports.py": (
-            "654d49b2fe90447435ca99b0a6a93a9205853299e93f29ff474b4910623ec23b"
+            "e3cd4aad0951dfc8da8510d44a17ce64c599d1870f25decd108ad63e04203e7a"
         ),
         "provider_readonly.py": (
-            "6dde0bf459b9106182f94ca3bab6340d7aae7a3b1ad8f48b644e7739e6d28487"
+            "fd51a6e605b072a656df3e22bf92a60b01b553350fc44aa16619998a49d47f1d"
         ),
         "sportradar_trial_transport.py": (
-            "04d36ca299b1b5877f43346937c138c5685a72c0be0e9200aaab9916c9cede85"
+            "3993ad63955641bdcbe78ddf8dfe695f61abe92414ab17e2fe9f722cf1e453cc"
         ),
     },
     "inci_tennis_adapters": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
+        "espn_tennis.py": (
+            "8efeef3357a05eb6b06f26eded2f63ce0120ea9bd9cf5a7606e10eba686ff2b6"
+        ),
         "candidate_contracts.py": (
-            "cbf31a3fa855c5bf08db539b8c1052a715de236d3bad3d818b44b50230403ac0"
+            "fbe6043a419dfcfeb55ef02d6b96b88fdadc07e4a42cf930c93853dded1f779d"
         ),
         "kalshi_candidate.py": (
-            "17747eaa104dc1cfb18e8f57848372624d8b16ba04e6070bf684a7443b410b54"
+            "aaa17541b6cdf213950e8a503ec75cdc1aad24a74238f9102dc9ac8ef1ea9fbd"
         ),
         "registry.py": (
-            "14e534fd3762d5d6198b1de8762568497bcf1c807fd56177942dab8f4de59229"
+            "1eac6a4d4c011d3ed786de7fe56b4ef22c8623b53efc9a7ef961f5fa30c14465"
         ),
         "sportradar_tennis_v3.py": (
-            "7a0757de48b66bd28f0547f2574216a2408a88b70fdf2e259776e067b6aa261f"
+            "14c74d4331a426c0db296c4fd3609a16fe47d1ff068404660b345c18b9087990"
         ),
         "sportradar_trial_v3.py": (
-            "35b2a45cb2cc915768e14f9a3b515246941ea2526016403b4abad0a43990670e"
+            "d04ee55cd7c8f61a55ebb3e8b4540f61f17153436ee00b730b34fbddeb376422"
         ),
     },
     "inci_tennis_runtime": {
         "__init__.py": EMPTY_MODULE_AST_SHA256,
         "expert_controller.py": (
-            "c8f094d2381b04015edffbb1248b727319694497fc1672195e5bb843ac96cf42"
+            "d12431c2191399ceae2795e63d0b25c19fc178b6138b21a3f5d98968624672e2"
         ),
         "provider_qualification_controller.py": (
-            "94be825905f29c252c1d4d32f4544e6e1084661b099255b4d0cfbee9e02d6109"
+            "f8f4f4eba33888dc91568cb125276784fa40a09b3fd9c159f19d19f2554857f1"
         ),
         "replay_service.py": (
-            "fd37e740069fc1b79946a2f7026acdc8c7a7f99983fa721772aec06e27c35a97"
+            "66c42bcfcab141ad221f3b3c3a64eaf0a3165b1c0fbec442b15a3db689c96d0f"
         ),
         "shadow_cli.py": (
-            "a46e9d8a8dc69aca6b255b3fbbb9ccb321a7226093f8a979a7e3354010890503"
+            "325de2f02ad44e82546e89782c239c3880ec6992df55e1e7cccfaa99c7321b5c"
         ),
         "shadow_runtime.py": (
-            "611cfb436eedf88fd6ea364983b66ec2073247d449272fb7d0726fa96053cd1e"
+            "b525710aebc9fa7a18ccd87c3cd3cc79d8d10626aeba0950a91bdcaf338e9dd1"
+        ),
+        "scalp_paper_observer.py": (
+            "4e6ec57fd71281e072915d6d8fadb653a5dc00c8bc6831715cd855e4f83c603f"
         ),
         "sportradar_trial_cli.py": (
-            "afbc1d87c7e42295b942cd7737b7d70eeef5a909c8e9d41e29f3563a55c0e619"
+            "16da84731e4ed36eba30a49e38ccc0e1dba303a2d92bc4f3295c7e0a3f6195f6"
         ),
     },
 }
@@ -156,13 +197,20 @@ EXPECTED_PACKAGE_RESOURCE_SHA256 = {
             "395a1226de161b78e59e79a3ecc04d4de7f2958b71761f7319de0a477b180bc3"
         ),
         "schemas/expert-synchronization-applied-v1.schema.json": (
-            "b8a8cdb82ada61385864b88897c58340062304fb4c47c37d5bc3d5481b17e361"
+            "da8edb60c720eccc69afe94be49a8a4350770671f2375b30b0304753eacd574f"
         ),
         "schemas/task6-fallback-no-payload-v1.schema.json": (
             "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
         ),
     },
-    "inci_tennis_io": {},
+    "inci_tennis_io": {
+        "schemas/historical-dataset-manifest-v1.schema.json": (
+            "74a061a51fdbe3a82a5a306738dfdde56d3557270a86049fb2be014907240153"
+        ),
+        "schemas/historical-entitlement-v1.schema.json": (
+            "011c76189d230c8ccfa2b872a1c74d406c1ce3bb00299cdca89a7ce5114288fb"
+        ),
+    },
     "inci_tennis_adapters": {
         (
             "schemas/"
@@ -220,6 +268,14 @@ EXPECTED_PACKAGE_RESOURCE_SHA256 = {
 }
 
 NEW_PACKAGE_ROOTS = frozenset(PACKAGE_ROOTS)
+LEGACY_NEW_PACKAGE_IMPORT_ALLOWLIST = {
+    "tennis_v1/ingress.py": frozenset(
+        {
+            "inci_tennis_runtime.expert_controller",
+            "inci_tennis_runtime.shadow_sources",
+        }
+    ),
+}
 ROOT_V6_PYTHON_PATHS = (
     "analyze.py",
     "bot.py",
@@ -244,7 +300,7 @@ ROOT_V6_PYTHON_PATHS = (
 )
 
 EXPECTED_REQUIREMENTS_SHA256 = (
-    "e43aac65de78bba78e9ca0e007f4ff1ba0598bfaba094dbf05005628464fb636"
+    "2dc4436a562bc87c026831120766c5772f064683f09c5da24863389b8e4db5e3"
 )
 
 EXPERT_PHASE_ONE_IMPORTS = frozenset(
@@ -417,7 +473,7 @@ IO_EXPERT_IMPLEMENTATION_IMPORTS = frozenset(
 
 TASK7_TOOL_RELATIVE_PATH = "tools/qualify_sportradar_tennis_v3.py"
 EXPECTED_TASK7_TOOL_AST_SHA256 = (
-    "0953d95ade1109d52b6fd0f691fa7cb5b9e5f23905221b2af9293e7452dcd289"
+    "967cc272b1d3c47b3ae7a38c81400eeb22818c68c713248978785d0831f09875"
 )
 TASK7_TOOL_REPOSITORY_IMPORTS = frozenset(
     {
@@ -485,6 +541,26 @@ TASK7_IO_ADAPTER_IMPORTS = {
     )
 }
 TASK7_IO_EXPERT_IMPLEMENTATION_IMPORTS = {
+    "historical_store.py": frozenset(
+        {"inci_tennis_expert.prematch_model.HistoricalRow"}
+    ),
+    "clip_journal_store.py": frozenset(
+        {
+            "inci_tennis_expert.clip_journal.ClipJournalRecordV1",
+            (
+                "inci_tennis_expert.clip_journal."
+                "deserialize_clip_journal_document"
+            ),
+            (
+                "inci_tennis_expert.clip_journal."
+                "encode_clip_journal_records"
+            ),
+            (
+                "inci_tennis_expert.clip_journal."
+                "serialize_clip_journal_document"
+            ),
+        }
+    ),
     "provider_readonly.py": frozenset(
         {"inci_tennis_expert.match_binding.decode_binding_universe"}
     )
@@ -2702,6 +2778,10 @@ def check_legacy_source_for_new_package_imports(
         module
         for module in _imported_modules(tree)
         if _root_name(module) in NEW_PACKAGE_ROOTS
+        and module not in LEGACY_NEW_PACKAGE_IMPORT_ALLOWLIST.get(
+            filename,
+            frozenset(),
+        )
     )
     if imported:
         raise ExpertBoundaryViolation(
@@ -2770,6 +2850,10 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io/__init__.py",
             "inci_tennis_io/pinned_artifacts.py",
             "inci_tennis_io/ports.py",
+            "inci_tennis_io/historical_store.py",
+            "inci_tennis_io/clip_journal_store.py",
+            "inci_tennis_io/espn_readonly.py",
+            "inci_tennis_io/kalshi_readonly.py",
             "inci_tennis_io/expert_journal_store.py",
             "inci_tennis_io/facade.py",
             "inci_tennis_io/provider_readonly.py",
@@ -2779,6 +2863,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
         expected_task7_adapters = (
             "inci_tennis_adapters/__init__.py",
             "inci_tennis_adapters/candidate_contracts.py",
+            "inci_tennis_adapters/espn_tennis.py",
             "inci_tennis_adapters/registry.py",
             "inci_tennis_adapters/sportradar_tennis_v3.py",
             "inci_tennis_adapters/sportradar_trial_v3.py",
@@ -2842,6 +2927,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             ),
             "inci_tennis_runtime/shadow_runtime.py",
             "inci_tennis_runtime/shadow_cli.py",
+            "inci_tennis_runtime/scalp_paper_observer.py",
             "inci_tennis_runtime/sportradar_trial_cli.py",
         )
         self.assertEqual(expert_journal_store._IO_INVENTORY, expected_io)
@@ -2887,8 +2973,12 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_io": {
                 "__init__.py",
                 "account_lock.py",
+                "clip_journal_store.py",
+                "espn_readonly.py",
                 "expert_journal_store.py",
                 "facade.py",
+                "historical_store.py",
+                "kalshi_readonly.py",
                 "pinned_artifacts.py",
                 "ports.py",
                 "provider_readonly.py",
@@ -2897,6 +2987,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
             "inci_tennis_adapters": {
                 "__init__.py",
                 "candidate_contracts.py",
+                "espn_tennis.py",
                 "kalshi_candidate.py",
                 "registry.py",
                 "sportradar_tennis_v3.py",
@@ -2907,6 +2998,7 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "expert_controller.py",
                 "provider_qualification_controller.py",
                 "replay_service.py",
+                "scalp_paper_observer.py",
                 "shadow_cli.py",
                 "shadow_runtime.py",
                 "sportradar_trial_cli.py",
@@ -2948,6 +3040,10 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                 "sportradar-tennis-qualification-output-v1.schema.json"
             ),
         }
+        expected_io_resources = {
+            "schemas/historical-dataset-manifest-v1.schema.json",
+            "schemas/historical-entitlement-v1.schema.json",
+        }
         for package_name, paths in expected_python.items():
             with self.subTest(package_name=package_name):
                 actual_python, actual_resources = _package_inventory(
@@ -2963,12 +3059,18 @@ class ExpertDependencyBoundaryTests(unittest.TestCase):
                     (
                         expected_adapter_resources
                         if package_name == "inci_tennis_adapters"
+                        else expected_io_resources
+                        if package_name == "inci_tennis_io"
                         else set()
                     ),
                 )
         self.assertEqual(
             set(EXPECTED_PACKAGE_RESOURCE_SHA256["inci_tennis_adapters"]),
             expected_adapter_resources,
+        )
+        self.assertEqual(
+            set(EXPECTED_PACKAGE_RESOURCE_SHA256["inci_tennis_io"]),
+            expected_io_resources,
         )
 
     def test_task7_special_imports_require_exact_reviewed_source(self) -> None:

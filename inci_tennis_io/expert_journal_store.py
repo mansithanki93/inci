@@ -233,8 +233,15 @@ _EXPERT_INVENTORY = (
     "inci_tennis_expert/tennis_score.py",
     "inci_tennis_expert/market_book.py",
     "inci_tennis_expert/match_binding.py",
+    "inci_tennis_expert/prematch_model.py",
     "inci_tennis_expert/synchronizer.py",
     "inci_tennis_expert/task6_fallback_normalizer.py",
+    "inci_tennis_expert/win_probability.py",
+    "inci_tennis_expert/calibration.py",
+    "inci_tennis_expert/fee_schedule.py",
+    "inci_tennis_expert/scalp_policy.py",
+    "inci_tennis_expert/engine.py",
+    "inci_tennis_expert/clip_journal.py",
     "inci_tennis_expert/state.py",
     "inci_tennis_expert/observation.py",
     "inci_tennis_expert/reducer.py",
@@ -246,6 +253,10 @@ _IO_INVENTORY = (
     "inci_tennis_io/__init__.py",
     "inci_tennis_io/pinned_artifacts.py",
     "inci_tennis_io/ports.py",
+    "inci_tennis_io/historical_store.py",
+    "inci_tennis_io/clip_journal_store.py",
+    "inci_tennis_io/espn_readonly.py",
+    "inci_tennis_io/kalshi_readonly.py",
     "inci_tennis_io/expert_journal_store.py",
     "inci_tennis_io/facade.py",
     "inci_tennis_io/provider_readonly.py",
@@ -277,6 +288,7 @@ _KALSHI_CANDIDATE_SCHEMA_INVENTORY = (
 _ADAPTER_INVENTORY = (
     "inci_tennis_adapters/__init__.py",
     "inci_tennis_adapters/candidate_contracts.py",
+    "inci_tennis_adapters/espn_tennis.py",
     "inci_tennis_adapters/registry.py",
     "inci_tennis_adapters/sportradar_tennis_v3.py",
     "inci_tennis_adapters/sportradar_trial_v3.py",
@@ -289,6 +301,7 @@ _RUNTIME_INVENTORY = (
     "inci_tennis_runtime/provider_qualification_controller.py",
     "inci_tennis_runtime/shadow_runtime.py",
     "inci_tennis_runtime/shadow_cli.py",
+    "inci_tennis_runtime/scalp_paper_observer.py",
     "inci_tennis_runtime/sportradar_trial_cli.py",
 )
 _DEPENDENCY_INVENTORY = ("pyproject.toml", "requirements.txt")
@@ -331,6 +344,10 @@ _EXPERT_RESOURCE_INVENTORY = (
     "inci_tennis_expert/schemas/expert-synchronization-applied-v1.schema.json",
     "inci_tennis_expert/schemas/match-binding-v1.schema.json",
     "inci_tennis_expert/schemas/task6-fallback-no-payload-v1.schema.json",
+)
+_IO_RESOURCE_INVENTORY = (
+    "inci_tennis_io/schemas/historical-dataset-manifest-v1.schema.json",
+    "inci_tennis_io/schemas/historical-entitlement-v1.schema.json",
 )
 _SOURCE_PACKAGE_NAMES = (
     "tennis_v1",
@@ -451,7 +468,7 @@ _SOURCE_PACKAGE_INVENTORIES = {
     "inci_tennis_expert": tuple(
         sorted((*_EXPERT_INVENTORY, *_EXPERT_RESOURCE_INVENTORY))
     ),
-    "inci_tennis_io": _IO_INVENTORY,
+    "inci_tennis_io": tuple(sorted((*_IO_INVENTORY, *_IO_RESOURCE_INVENTORY))),
     "inci_tennis_adapters": tuple(
         sorted((*_ADAPTER_INVENTORY, *_CANDIDATE_SCHEMA_INVENTORY))
     ),
