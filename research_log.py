@@ -29,11 +29,13 @@ RESEARCH_CONFIG_FIELDS = (
     "stop_loss",
     "max_hold_seconds", "contracts_per_trade", "max_open_positions",
     "max_daily_loss_usd", "min_price", "max_price", "max_spread",
-    "sim_latency_s", "sim_slippage_cents", "balance_precision_usd",
+    "sim_latency_s", "fill_timeout_s", "sim_slippage_cents",
+    "balance_precision_usd",
     "poll_interval", "stale_data_s", "max_consec_errors",
     "close_buffer_seconds",
     "espn_gate_enabled", "espn_leagues", "espn_cache_s",
     "espn_min_model_prob", "espn_min_edge", "prefer_scoreboard_bind",
+    "two_model_prior_max_age_s",
     "one_contract_per_event",
     "sibling_spike_enabled", "sibling_spike_cents",
     "sibling_spike_lookback_s",
@@ -42,15 +44,16 @@ RESEARCH_CONFIG_FIELDS = (
 )
 REPLAY_CODE_FILES = (
     "analyze.py", "bot.py", "config.py", "engine.py", "executor.py",
+    "espn_prob_gate.py", "espn_tennis.py",
     "fees.py", "kalshi_client.py", "market_data.py", "replay.py",
     "research_log.py", "safety.py", "schemas.py", "signals.py",
-    "sports_discovery.py",
-    "strategy.py",
+    "sports_discovery.py", "strategy.py", "live_tennis.py",
+    "tennis_win_prob.py", "two_model_prior.py",
 )
 TICK_HEADER = [
     "schema_version", "session_id", "starting_daily_pnl_usd",
     "starting_utc_day", "utc_day", "config_fingerprint",
-    "code_fingerprint", "selected_sports", "ts", "ticker",
+    "code_fingerprint", "selected_sports", "market_scope", "ts", "ticker",
     "sport", "league", "series_ticker", "milestone_id", "event_ticker",
     "scheduled_start_ts", "event", "detail", "close_ts",
     "can_close_early", "mid", "bid", "ask", "bid_qty", "ask_qty",
@@ -58,7 +61,7 @@ TICK_HEADER = [
 TRADE_HEADER = [
     "schema_version", "session_id", "starting_daily_pnl_usd",
     "starting_utc_day", "utc_day", "config_fingerprint",
-    "code_fingerprint", "selected_sports", "ts", "ticker",
+    "code_fingerprint", "selected_sports", "market_scope", "ts", "ticker",
     "sport", "league", "series_ticker", "milestone_id", "event_ticker",
     "scheduled_start_ts", "side", "price", "contracts", "fee_usd", "reason",
 ]
@@ -122,6 +125,11 @@ def config_fingerprint(config):
     config.validate()
     payload = {name: _jsonable(getattr(config, name))
                for name in RESEARCH_CONFIG_FIELDS}
+    # The local path itself is intentionally neither logged nor portable, but
+    # replay must know whether Models 1+2 were required. Otherwise a session
+    # can silently weaken from fail-closed priors to guard-only scoring.
+    payload["two_model_prior_required"] = bool(
+        getattr(config, "two_model_prior_path", ""))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
 
@@ -138,10 +146,54 @@ def code_fingerprint():
     return digest.hexdigest()
 
 
+def observation_detail(market_role, sweep_id, *, quote_phase,
+                       decision_at, score_gate=None, siblings=None):
+    """Canonical, replayable decision evidence attached to every quote."""
+    if market_role not in ("trade", "watch"):
+        raise ValueError("market_role must be trade or watch")
+    if (isinstance(sweep_id, bool) or not isinstance(sweep_id, int)
+            or sweep_id <= 0):
+        raise ValueError("sweep_id must be a positive integer")
+    if quote_phase not in ("evidence", "execution"):
+        raise ValueError("quote_phase must be evidence or execution")
+    if market_role == "watch" and quote_phase != "evidence":
+        raise ValueError("watch quotes must use evidence phase")
+    if (isinstance(decision_at, bool)
+            or not isinstance(decision_at, (int, float, Decimal))
+            or not math.isfinite(float(decision_at))
+            or float(decision_at) < 0):
+        raise ValueError("decision_at must be finite and nonnegative")
+    payload = {
+        "market_role": market_role,
+        "sweep_id": sweep_id,
+        "quote_phase": quote_phase,
+        "decision_at": float(decision_at),
+    }
+    if quote_phase == "evidence":
+        if score_gate is not None or siblings is not None:
+            raise ValueError("evidence quotes cannot carry trade decisions")
+    else:
+        if market_role != "trade":
+            raise ValueError("only trade quotes can use execution phase")
+        if not isinstance(score_gate, Mapping):
+            raise ValueError("trade execution requires score_gate evidence")
+        if not isinstance(siblings, Mapping):
+            raise ValueError("trade execution requires sibling evidence")
+        payload["score_gate"] = dict(score_gate)
+        sibling_payload = dict(siblings)
+        sibling_payload["rises"] = [
+            [ticker, str(rise)]
+            for ticker, rise in sibling_payload.get("rises", ())
+        ]
+        payload["siblings"] = sibling_payload
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 class ResearchLog:
     def __init__(self, log_dir="logs", clock=time.time, session_id=None,
                  starting_pnl=0, config=None, session_start=None,
-                 provenance_by_ticker=None):
+                 provenance_by_ticker=None, trade_tickers=None,
+                 watch_tickers=None, score_bindings_by_ticker=None):
         if config is None:
             from config import Config
             config = Config()
@@ -155,10 +207,6 @@ class ResearchLog:
                 "config.sports must be a nonempty unique canonical list")
         if not isinstance(provenance_by_ticker, Mapping):
             raise TypeError("provenance_by_ticker must be a mapping")
-        if config.tickers and set(provenance_by_ticker) != set(config.tickers):
-            raise ValueError(
-                "explicit-ticker provenance keys must exactly match "
-                "config.tickers")
         copied_provenance = {}
         event_provenance = {}
         for ticker, provenance in provenance_by_ticker.items():
@@ -184,6 +232,83 @@ class ResearchLog:
                     f"event {provenance.event_ticker!r} has conflicting "
                     "game provenance")
             copied_provenance[ticker] = provenance
+        if (trade_tickers is None) != (watch_tickers is None):
+            raise ValueError(
+                "trade_tickers and watch_tickers must be supplied together")
+        if trade_tickers is None:
+            if config.tickers:
+                captured_trade = tuple(config.tickers)
+                captured_watch = tuple(
+                    ticker for ticker in copied_provenance
+                    if ticker not in set(captured_trade))
+            else:
+                captured_trade = tuple(copied_provenance)
+                captured_watch = ()
+        else:
+            def scope(values, field):
+                if isinstance(values, (str, bytes)):
+                    raise ValueError(f"{field} must be a sequence")
+                try:
+                    parsed = tuple(values)
+                except TypeError as error:
+                    raise ValueError(f"{field} must be a sequence") from error
+                if (any(not isinstance(value, str) or not value
+                        for value in parsed)
+                        or len(set(parsed)) != len(parsed)):
+                    raise ValueError(
+                        f"{field} must contain unique nonempty tickers")
+                return parsed
+
+            captured_trade = scope(trade_tickers, "trade_tickers")
+            captured_watch = scope(watch_tickers, "watch_tickers")
+        trade_set = set(captured_trade)
+        watch_set = set(captured_watch)
+        if trade_set & watch_set:
+            raise ValueError("trade/watch ticker scopes must be disjoint")
+        if trade_set | watch_set != set(copied_provenance):
+            raise ValueError(
+                "trade/watch ticker scopes must exactly partition provenance")
+        if config.tickers and trade_set != set(config.tickers):
+            raise ValueError(
+                "explicit config tickers must exactly match trade_tickers")
+        if score_bindings_by_ticker is None:
+            score_bindings_by_ticker = {}
+        if not isinstance(score_bindings_by_ticker, Mapping):
+            raise TypeError("score_bindings_by_ticker must be a mapping")
+        captured_bindings = {}
+        for ticker, raw_binding in score_bindings_by_ticker.items():
+            if ticker not in trade_set | watch_set:
+                raise ValueError(
+                    f"score binding ticker {ticker!r} is outside market scope")
+            if (isinstance(raw_binding, (str, bytes))
+                    or not isinstance(raw_binding, (tuple, list))
+                    or len(raw_binding) not in (3, 5)
+                    or any(not isinstance(value, str) or not value
+                           for value in raw_binding)):
+                raise ValueError(
+                    f"invalid discovery score binding for {ticker!r}")
+            binding = tuple(raw_binding)
+            competition_id, athlete_id, opponent_id = binding[:3]
+            source = "lt:" if competition_id.startswith("lt:") else "espn:"
+            athlete_prefix = source + "athlete:"
+            if (competition_id == source
+                    or not competition_id.startswith(source)
+                    or athlete_id == athlete_prefix
+                    or opponent_id == athlete_prefix
+                    or not athlete_id.startswith(athlete_prefix)
+                    or not opponent_id.startswith(athlete_prefix)
+                    or athlete_id == opponent_id
+                    or (len(binding) == 5 and binding[3] == binding[4])):
+                raise ValueError(
+                    f"invalid discovery score binding for {ticker!r}")
+            captured_bindings[ticker] = binding
+        market_scope_text = json.dumps({
+            "score_bindings": {
+                ticker: list(captured_bindings[ticker])
+                for ticker in sorted(captured_bindings)
+            },
+            "trade": sorted(trade_set), "watch": sorted(watch_set),
+        }, sort_keys=True, separators=(",", ":"))
         selected_sports_text = json.dumps(
             list(selected_sports), separators=(",", ":"))
         captured_config_fingerprint = config_fingerprint(config)
@@ -210,9 +335,14 @@ class ResearchLog:
         self.starting_utc_day = starting_utc_day
         self.selected_sports = selected_sports
         self.selected_sports_text = selected_sports_text
+        self.market_scope_text = market_scope_text
         self.config_fingerprint = captured_config_fingerprint
         self.code_fingerprint = captured_code_fingerprint
+        self.paper_trading = bool(config.paper_trading)
+        self.balance_precision_usd = Decimal(
+            str(config.balance_precision_usd))
         self.provenance_by_ticker = MappingProxyType(copied_provenance)
+        self.score_bindings_by_ticker = MappingProxyType(captured_bindings)
         self._ended = False
         os.makedirs(log_dir, exist_ok=True)
         day = self.starting_utc_day.replace("-", "")
@@ -291,7 +421,8 @@ class ResearchLog:
             RESEARCH_SCHEMA_VERSION, self.session_id, self.starting_pnl,
             self.starting_utc_day, utc_day,
             self.config_fingerprint, self.code_fingerprint,
-            self.selected_sports_text, repr(timestamp), ticker,
+            self.selected_sports_text, self.market_scope_text,
+            repr(timestamp), ticker,
             *provenance_values,
         ]
 
@@ -313,6 +444,9 @@ class ResearchLog:
         if not isinstance(detail, str):
             raise ValueError("detail must be a string")
         if event == "quote":
+            if not detail:
+                raise ValueError(
+                    "quote requires replayable decision detail")
             if any(value is None for value in (
                     mid, bid, ask, bid_qty, ask_qty, close_ts,
                     can_close_early)):
@@ -367,6 +501,15 @@ class ResearchLog:
             raise ValueError("contracts must be positive")
         parsed_fee = self._decimal(
             fee, "fee_usd", minimum=Decimal(0))
+        if self.paper_trading:
+            from fees import fee_usd
+            expected_fee = fee_usd(
+                parsed_price, parsed_contracts, side=side,
+                balance_precision_usd=self.balance_precision_usd)
+            if parsed_fee != expected_fee:
+                raise ValueError(
+                    f"paper fee_usd {parsed_fee} does not equal "
+                    f"deterministic fee {expected_fee}")
         if not isinstance(reason, str) or not reason:
             raise ValueError("trade reason must be a nonempty string")
         self._append(

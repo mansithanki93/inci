@@ -580,11 +580,164 @@ def test_discovery_cursors_missing_nonstring_repeated_and_capped_fail():
 RESEARCH_HEADER = [
     "schema_version", "session_id", "starting_daily_pnl_usd",
     "starting_utc_day", "utc_day", "config_fingerprint",
-    "code_fingerprint", "selected_sports", "ts", "ticker",
+    "code_fingerprint", "selected_sports", "market_scope", "ts", "ticker",
     "sport", "league", "series_ticker", "milestone_id", "event_ticker",
     "scheduled_start_ts", "event", "detail", "close_ts",
     "can_close_early", "mid", "bid", "ask", "bid_qty", "ask_qty",
 ]
+
+
+_RESEARCH_SWEEP_ID = 0
+
+
+def _new_research_fixture_path():
+    """Return one canonical tick path with its required empty fill ledger."""
+    import csv
+    from research_log import TRADE_HEADER
+
+    directory = tempfile.mkdtemp()
+    tick_path = os.path.join(directory, "ticks_v6_fixture.csv")
+    trade_path = os.path.join(directory, "trades_v6_fixture.csv")
+    with open(trade_path, "w", newline="") as handle:
+        csv.writer(handle).writerow(TRADE_HEADER)
+    return tick_path
+
+
+def _write_research_trades(tick_path, rows):
+    """Replace a fixture's sibling ledger with exact deterministic fills."""
+    import csv
+    from research_log import TRADE_HEADER
+
+    name = os.path.basename(tick_path)
+    assert name.startswith("ticks_v6_") and name.endswith(".csv")
+    trade_path = os.path.join(
+        os.path.dirname(tick_path),
+        "trades_v6_" + name[len("ticks_v6_"):])
+    with open(trade_path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(TRADE_HEADER)
+        writer.writerows(rows)
+
+
+def research_trade_row(tick_row, side, price, contracts, reason, *,
+                       cfg=None, fee=None, ts=None):
+    """Build the exact v6 fill-ledger row paired with a synthetic quote."""
+    from datetime import datetime, timezone
+    from fees import fee_usd
+    from research_log import TRADE_HEADER
+
+    cfg = cfg or Config()
+    source = dict(zip(RESEARCH_HEADER, tick_row))
+    if ts is not None:
+        source["ts"] = ts
+        source["utc_day"] = datetime.fromtimestamp(
+            float(ts), timezone.utc).date().isoformat()
+    if fee is None:
+        fee = fee_usd(
+            price, contracts, side=side,
+            balance_precision_usd=cfg.balance_precision_usd)
+    values = {
+        **source,
+        "side": side,
+        "price": price,
+        "contracts": contracts,
+        "fee_usd": fee,
+        "reason": reason,
+    }
+    return [values[field] for field in TRADE_HEADER]
+
+
+def research_decision_detail(
+        cfg=None, ask=51, sibling_tickers=(), decision_at=1.0,
+        quote_phase="execution", sweep_id=None, market_role="trade"):
+    """One synthetic trade sweep consistent with the supplied config."""
+    from research_log import observation_detail
+
+    global _RESEARCH_SWEEP_ID
+    if sweep_id is None:
+        _RESEARCH_SWEEP_ID += 1
+        sweep_id = _RESEARCH_SWEEP_ID
+    if quote_phase == "evidence":
+        return observation_detail(
+            market_role, sweep_id, quote_phase="evidence",
+            decision_at=decision_at)
+    if cfg is None or not cfg.espn_gate_enabled:
+        score_gate = {
+            "enabled": False, "allow": True,
+            "reason": "score_gate_disabled",
+        }
+    else:
+        try:
+            ask_decimal = Decimal(str(ask))
+        except Exception:
+            ask_decimal = Decimal(50)
+        if (not ask_decimal.is_finite()
+                or not Decimal(0) <= ask_decimal <= Decimal(100)):
+            ask_decimal = Decimal(50)
+        market = ask_decimal / Decimal(100)
+        # Neutral pre-match score state is exactly 0.5. Synthetic replay
+        # fixtures must not invent a model value that strict replay cannot
+        # recompute from their durable score evidence.
+        model = Decimal("0.5")
+        allow = model >= Decimal(str(cfg.espn_min_model_prob))
+        score_gate = {
+            "enabled": True, "allow": allow,
+            "reason": ("synthetic_score_guard_only" if allow
+                       else "blocked:synthetic_score_threshold"),
+            "model_prob": str(model), "market_prob": str(market),
+            "edge": None, "espn_match_id": "espn:SYNTHETIC",
+            "espn_player": "Synthetic Player",
+            "score_source": "espn",
+            "score_match_id": "espn:SYNTHETIC",
+            "score_athlete_id": "espn:athlete:synthetic-player",
+            "score_opponent_id": "espn:athlete:synthetic-opponent",
+            "score_player_name": "Synthetic Player",
+            "score_opponent_name": "Synthetic Opponent",
+            "score_timestamp": None,
+            "score_lifecycle_state": "pre",
+            "score_observed": False,
+            "score_best_of": 3,
+            "score_sets_for": 0,
+            "score_sets_against": 0,
+            "score_games_for": 0,
+            "score_games_against": 0,
+            "gate_observed_at": str(decision_at),
+        }
+    if cfg is None or not cfg.sibling_spike_enabled:
+        siblings = {"enabled": False, "complete": True, "rises": ()}
+    elif sibling_tickers:
+        siblings = {
+            "enabled": True, "complete": True,
+            "rises": tuple((ticker, "0") for ticker in sibling_tickers),
+        }
+    else:
+        siblings = {
+            "enabled": True, "complete": False, "rises": (),
+            "error": "no same-event sibling provenance",
+        }
+    return observation_detail(
+        market_role, sweep_id,
+        quote_phase=quote_phase, decision_at=decision_at,
+        score_gate=score_gate, siblings=siblings,
+    )
+
+
+def _research_scope_with_score_bindings(market_scope, cfg):
+    """Make canonical synthetic score identity part of the v6 manifest."""
+    if (not cfg.espn_gate_enabled or not isinstance(market_scope, dict)
+            or "score_bindings" in market_scope):
+        return market_scope
+    scope = dict(market_scope)
+    selected = tuple(scope.get("trade", ())) + tuple(scope.get("watch", ()))
+    scope["score_bindings"] = {
+        ticker: [
+            "espn:SYNTHETIC",
+            "espn:athlete:synthetic-player",
+            "espn:athlete:synthetic-opponent",
+        ]
+        for ticker in selected
+    }
+    return scope
 
 
 def research_row(*, cfg=None, session="S", starting_pnl=0,
@@ -593,11 +746,16 @@ def research_row(*, cfg=None, session="S", starting_pnl=0,
                  ticker="T", sport="Tennis", league="League",
                  series_ticker="KXSERIES", milestone_id="M",
                  event_ticker="E", scheduled_start_ts=3600,
-                 event="quote", detail="",
+                 event="quote", detail=None,
+                 market_scope=None,
                  close_ts=4070908800.0, can_close_early="false",
                  mid=50, bid=49, ask=51, bid_qty=10, ask_qty=10):
     import json
-    from research_log import config_fingerprint, code_fingerprint
+    from research_log import (
+        code_fingerprint,
+        config_fingerprint,
+    )
+    global _RESEARCH_SWEEP_ID
     selected_sports = tuple(selected_sports)
     cfg = cfg or Config(sports=list(selected_sports))
     if not cfg.sports:
@@ -606,6 +764,12 @@ def research_row(*, cfg=None, session="S", starting_pnl=0,
                      if selected_sports_text is not None
                      else json.dumps(list(selected_sports),
                                      separators=(",", ":")))
+    if market_scope is None:
+        market_scope = {"trade": ["T"], "watch": []}
+    market_scope = _research_scope_with_score_bindings(market_scope, cfg)
+    scope_text = (market_scope if isinstance(market_scope, str)
+                  else json.dumps(
+                      market_scope, sort_keys=True, separators=(",", ":")))
     if event in ("session_end", "session_halt"):
         ticker = sport = league = series_ticker = milestone_id = ""
         event_ticker = scheduled_start_ts = ""
@@ -614,12 +778,76 @@ def research_row(*, cfg=None, session="S", starting_pnl=0,
     elif event != "quote":
         close_ts, can_close_early = "", ""
         mid = bid = ask = bid_qty = ask_qty = ""
+    elif detail is None:
+        parsed_scope = (json.loads(scope_text)
+                        if isinstance(scope_text, str) else market_scope)
+        detail = research_decision_detail(
+            cfg=cfg, ask=ask,
+            sibling_tickers=tuple(parsed_scope.get("watch", ())),
+            decision_at=ts, quote_phase="evidence")
+    if detail is None:
+        detail = ""
     return [6, session, starting_pnl, starting_day, day,
-            config_fingerprint(cfg), code_fingerprint(), selected_text, ts,
+            config_fingerprint(cfg), code_fingerprint(), selected_text,
+            scope_text, ts,
             ticker, sport, league, series_ticker, milestone_id,
             event_ticker, scheduled_start_ts, event, detail,
             close_ts, can_close_early,
             mid, bid, ask, bid_qty, ask_qty]
+
+
+def research_execution_rows(**overrides):
+    """A same-sweep evidence quote followed by its executable requote."""
+    import json
+
+    if overrides.get("event", "quote") != "quote":
+        raise ValueError("execution row pairs require quote events")
+    selected_sports = tuple(overrides.get("selected_sports", ("Tennis",)))
+    cfg = overrides.get("cfg") or Config(sports=list(selected_sports))
+    ticker = overrides.get("ticker", "T")
+    ask = overrides.get("ask", 51)
+    decision_at = overrides.pop("decision_at", overrides.get("ts", 1))
+    market_scope = overrides.get("market_scope")
+    if market_scope is None:
+        market_scope = {"trade": [ticker], "watch": []}
+        overrides["market_scope"] = market_scope
+    parsed_scope = (json.loads(market_scope)
+                    if isinstance(market_scope, str) else market_scope)
+    sibling_tickers = tuple(parsed_scope.get("watch", ()))
+    global _RESEARCH_SWEEP_ID
+    _RESEARCH_SWEEP_ID += 1
+    sweep_id = _RESEARCH_SWEEP_ID
+    common = dict(
+        cfg=cfg, ask=ask, sibling_tickers=sibling_tickers,
+        decision_at=decision_at, sweep_id=sweep_id,
+    )
+    evidence = research_decision_detail(
+        **common, quote_phase="evidence")
+    execution = research_decision_detail(
+        **common, quote_phase="execution")
+    return (
+        research_row(**overrides, detail=evidence),
+        research_row(**overrides, detail=execution),
+    )
+
+
+def log_research_execution_pair(
+        log, ticker, mid, bid, ask, bid_qty, ask_qty, *, cfg,
+        ts=None, decision_at=None, close_ts=4070908800.0,
+        can_close_early=False):
+    """Write one exact same-sweep runtime package through ResearchLog."""
+    global _RESEARCH_SWEEP_ID
+    timestamp = float(log.clock() if ts is None else ts)
+    decision_at = timestamp if decision_at is None else decision_at
+    _RESEARCH_SWEEP_ID += 1
+    sweep_id = _RESEARCH_SWEEP_ID
+    for quote_phase in ("evidence", "execution"):
+        log.tick(
+            ticker, mid, bid, ask, bid_qty, ask_qty, ts=timestamp,
+            detail=research_decision_detail(
+                cfg=cfg, ask=ask, decision_at=decision_at,
+                quote_phase=quote_phase, sweep_id=sweep_id),
+            close_ts=close_ts, can_close_early=can_close_early)
 
 
 def research_provenance(
@@ -2211,7 +2439,11 @@ def test_loss_breach_stops_before_next_market_action():
     ctx = Context(cfg, feed, strat, Executor(cfg, None, feed), None,
                   Safety(cfg))
     assert not run_loop(ctx, None, ["LOSS", "NEXT"], sleep=lambda _: None)
-    assert feed.calls == ["LOSS"]
+    # Each trade package decides immediately after its own evidence/requote,
+    # so the loss breach prevents even observing the unrelated NEXT market.
+    assert feed.calls == ["LOSS", "LOSS"]
+    assert "NEXT" not in strat.positions
+    assert not ctx.executor.has_pending("NEXT")
     assert "loss limit" in ctx.safety.tripped_reason
     print("PASS loss breach stops before the next market can act")
 
@@ -2410,28 +2642,41 @@ def test_signal_rejects_future_history():
 
 def test_analyzer_preserves_order_and_censors_horizons():
     import csv as _csv
-    from analyze import load, markouts
-    path = tempfile.mktemp(suffix=".csv")
+    import analyze
+    cfg = Config(
+        sports=["Tennis"], espn_gate_enabled=False,
+        sibling_spike_enabled=False)
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
         w.writerow(RESEARCH_HEADER)
-        w.writerow(research_row(ts=1, mid=60, bid=59, ask=61))
-        w.writerow(research_row(ts=10, mid=50, bid=49, ask=51))
-        w.writerow(research_row(ts=12, mid=52, bid=51, ask=53))
+        w.writerows(research_execution_rows(
+            cfg=cfg, ts=1, mid=60, bid=59, ask=61))
+        w.writerows(research_execution_rows(
+            cfg=cfg, ts=10, mid=50, bid=49, ask=51))
+        w.writerows(research_execution_rows(
+            cfg=cfg, ts=12, mid=52, bid=51, ask=53))
         w.writerow(research_row(
+            cfg=cfg,
             ts=13, event_ticker="", ticker="", event="session_end",
             detail="operator interrupt", mid="", bid="", ask="",
             bid_qty="", ask_qty=""))
-    series, groups, selected_sports, provenance = load(path)
-    assert [p[0] for p in series["T"]] == [1.0, 10.0, 12.0]
+    original_cfg = analyze.CFG
+    try:
+        analyze.CFG = cfg
+        series, groups, selected_sports, provenance = analyze.load(path)
+    finally:
+        analyze.CFG = original_cfg
+    assert [p[0] for p in series["T"]] == [
+        1.0, 1.0, 10.0, 10.0, 12.0, 12.0]
     assert groups == {"T": "E"}
     assert selected_sports == ("Tennis",)
     assert provenance["T"] == research_provenance()
-    marks = markouts(series["T"], 1)
+    marks = analyze.markouts(series["T"], 2)
     assert 1 in marks and 5 not in marks and 300 not in marks
     far = [(0.0, Decimal(50), Decimal(49), Decimal(51)),
            (100.0, Decimal(50), Decimal(49), Decimal(51))]
-    assert markouts(far, 0) == {}
+    assert analyze.markouts(far, 0) == {}
     print("PASS analyzer preserves row order and omits censored horizons")
 
 
@@ -2440,11 +2685,11 @@ def test_analyzer_requires_a_clean_terminal_record():
     from analyze import load
 
     for terminal in (None, "session_halt"):
-        path = tempfile.mktemp(suffix=".csv")
+        path = _new_research_fixture_path()
         with open(path, "w", newline="") as handle:
             writer = _csv.writer(handle)
             writer.writerow(RESEARCH_HEADER)
-            writer.writerow(research_row())
+            writer.writerows(research_execution_rows())
             if terminal:
                 writer.writerow(research_row(
                     ts=2, event_ticker="", ticker="", event=terminal,
@@ -2463,7 +2708,9 @@ def test_research_log_preserves_no_quote_and_event_group():
     import csv as _csv
     from research_log import ResearchLog
     directory = tempfile.mkdtemp()
-    cfg = Config(sports=["Tennis"])
+    cfg = Config(
+        sports=["Tennis"], espn_gate_enabled=False,
+        sibling_spike_enabled=False)
     provenance = {"T": research_provenance(event_ticker="EVENT-7")}
     log = ResearchLog(
         directory, clock=lambda: 123.5, session_id="SESSION-A",
@@ -2488,7 +2735,7 @@ def test_research_log_preserves_no_quote_and_event_group():
     assert len(rows[0]["code_fingerprint"]) == 64
     assert "ticks_v6_" in log.tick_path
     from replay import replay
-    result = replay(log.tick_path)
+    result = replay(log.tick_path, cfg=cfg)
     assert result["data_gaps"] == 1 and not result["evaluable"]
     second = ResearchLog(
         directory, clock=lambda: 123.5, session_id="SESSION-B",
@@ -2507,7 +2754,7 @@ def test_research_log_preserves_no_quote_and_event_group():
 def test_analyzer_rejects_legacy_per_ticker_split():
     import csv as _csv
     from analyze import load
-    path = tempfile.mktemp(suffix=".csv")
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
         w.writerow(["ts", "ticker", "mid", "bid", "ask"])
@@ -2526,7 +2773,7 @@ def test_malformed_quote_rows_disqualify_research():
     from analyze import load
     from replay import load_log
 
-    path = tempfile.mktemp(suffix=".csv")
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
@@ -2548,7 +2795,12 @@ def test_analyzer_end_to_end_v6_smoke():
     import contextlib
     import csv as _csv
     import io
+    import analyze
     from analyze import main as analyze_main, split_bucket
+
+    cfg = Config(
+        sports=["Tennis"], espn_gate_enabled=False,
+        sibling_spike_enabled=False)
 
     groups = {}
     candidate = 0
@@ -2556,24 +2808,34 @@ def test_analyzer_end_to_end_v6_smoke():
         group = f"EVENT-{candidate}"
         groups.setdefault(split_bucket(group), group)
         candidate += 1
-    path = tempfile.mktemp(suffix=".csv")
+    path = _new_research_fixture_path()
+    market_scope = {"trade": ["T-TEST", "T-TRAIN"], "watch": []}
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
         for offset, bucket in enumerate(("TRAIN", "TEST")):
             event = groups[bucket]
             for ts in range(1, 26):
-                writer.writerow(research_row(
+                writer.writerows(research_execution_rows(
+                    cfg=cfg,
                     session="SMOKE", ts=ts + offset * 100,
                     event_ticker=event, ticker=f"T-{bucket}",
-                    bid_qty=100, ask_qty=100))
+                    bid_qty=100, ask_qty=100,
+                    market_scope=market_scope))
         writer.writerow(research_row(
+            cfg=cfg,
             session="SMOKE", ts=200, event_ticker="", ticker="",
             event="session_end", detail="operator interrupt",
-            mid="", bid="", ask="", bid_qty="", ask_qty=""))
+            mid="", bid="", ask="", bid_qty="", ask_qty="",
+            market_scope=market_scope))
     output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        analyze_main(path)
+    original_cfg = analyze.CFG
+    try:
+        analyze.CFG = cfg
+        with contextlib.redirect_stdout(output):
+            analyze_main(path)
+    finally:
+        analyze.CFG = original_cfg
     text = output.getvalue()
     assert "MARK-OUTS (NON-EXECUTABLE" in text
     assert "FULL REPLAY" in text and "TRAIN:" in text and "TEST:" in text
@@ -2593,17 +2855,25 @@ def test_analyzer_replays_shared_portfolio_exactly_once():
         group = f"PORTFOLIO-{candidate}"
         groups.setdefault(analyzer.split_bucket(group), group)
         candidate += 1
-    cfg = Config(max_open_positions=1, tp_trail_cents=0)
-    path = tempfile.mktemp(suffix=".csv")
+    cfg = Config(
+        max_open_positions=1, tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
+    market_scope = {"trade": ["ACTIVE", "BLOCKED"], "watch": []}
+    path = _new_research_fixture_path()
+    execution_rows = {}
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
 
         def quote(ts, ticker, event, mid, bid, ask):
-            writer.writerow(research_row(
+            pair = research_execution_rows(
                 cfg=cfg, session="SHARED", ts=ts, event_ticker=event,
                 ticker=ticker, mid=mid, bid=bid, ask=ask,
-                bid_qty=100, ask_qty=100))
+                bid_qty=100, ask_qty=100,
+                market_scope=market_scope)
+            writer.writerows(pair)
+            execution_rows[(ticker, float(ts))] = pair[-1]
 
         for ts in range(1, 21):
             quote(float(ts), "ACTIVE", groups["TRAIN"], 60, 59, 61)
@@ -2621,20 +2891,28 @@ def test_analyzer_replays_shared_portfolio_exactly_once():
         quote(25.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # TP: A IOC SELL due@26
         quote(25.1, "BLOCKED", groups["TEST"], 59, 58, 60)   # blocked: A still open
         quote(26.0, "ACTIVE", groups["TRAIN"], 59, 58, 60)   # bid>=floor -> A SELL@58
-        # BLOCKED's quiet quote arrives only after ACTIVE fully traded. In
-        # isolation BLOCKED completes BUY->SELL on its own dip/TP path; in the
-        # shared replay it already missed every slot and does not dip here.
+        # BLOCKED's quiet quote arrives only after ACTIVE fully traded. In the
+        # shared portfolio it already missed every slot and does not dip here.
         quote(26.1, "BLOCKED", groups["TEST"], 61, 60, 62)
         writer.writerow(research_row(
             cfg=cfg, session="SHARED", ts=27, event_ticker="", ticker="",
             event="session_end", detail="operator interrupt",
-            mid="", bid="", ask="", bid_qty="", ask_qty=""))
+            mid="", bid="", ask="", bid_qty="", ask_qty="",
+            market_scope=market_scope))
+
+    _write_research_trades(path, [
+        research_trade_row(
+            execution_rows[("ACTIVE", 22.0)], "BUY", 53, 20,
+            "dip 8.0c; entry ask 53c, size 20, projected net $+0.3000",
+            cfg=cfg),
+        research_trade_row(
+            execution_rows[("ACTIVE", 26.0)], "SELL", 58, 20,
+            "take-profit, bid +5c vs entry", cfg=cfg),
+    ])
 
     full = real_replay(path, cfg=cfg)
-    isolated = real_replay(path, tickers={"BLOCKED"}, cfg=cfg)
     assert [trade[1] for trade in full["trades"]] == ["BUY", "SELL"]
     assert {trade[0] for trade in full["trades"]} == {"ACTIVE"}
-    assert [trade[1] for trade in isolated["trades"]] == ["BUY", "SELL"]
     assert sum(full["per_ticker_total"].values(), Decimal(0)) \
         == full["total_pnl"]
 
@@ -2838,9 +3116,26 @@ def test_time_exit_upgrades_working_take_profit():
     timed = ex.get_pending("T", side="SELL")
     assert timed is not None
     assert timed.reason.startswith("time exit")
-    assert timed.due_at == 305.5
+    # Priority changes must not restart the already-paid latency window.
+    assert timed.due_at == 304.0
     assert timed is not tp
     print("PASS time exit upgrades a pending take-profit once")
+
+
+def test_time_exit_preempts_trailing_take_profit_at_hold_limit():
+    """The configured max hold is binding even after trailing TP arms."""
+    cfg = Config(tp_trail_cents=2, max_hold_seconds=300)
+    strat = ScalpStrategy(cfg)
+    strat.record_fill(
+        "T", "BUY", Decimal(50), Decimal(20), fee_usd(50, 20), now=0.0)
+    # Arm the trail and establish a high-water mark before max hold.
+    assert strat.check_exit("T", Decimal(62), now=299.0) is None
+    # At the deadline this quote also satisfies the trailing giveback. The
+    # binding time exit must win so its IOC is marketable without a TP floor.
+    signal = strat.check_exit("T", Decimal(60), now=300.0)
+    assert signal is not None
+    assert signal["reason"].startswith("time exit")
+    print("PASS binding time exit preempts an armed trailing take-profit")
 
 
 def test_ioc_ask_cap_miss_cancels_entry():
@@ -2866,6 +3161,41 @@ def test_ioc_ask_cap_miss_cancels_entry():
     assert ex.process_due_paper_orders(0.0, ticker="T")[0][1] is None
     assert not ex.has_pending("T")
     print("PASS IOC entry miss on worsened ask cancels remainder")
+
+
+def test_overdue_paper_ioc_cancels_without_late_fill():
+    """The first quote after a long outage cannot resurrect a stale IOC."""
+    cfg = Config(sim_latency_s=1.0, fill_timeout_s=4.0)
+    feed = BookFeed(bid=Decimal(51), bq=Decimal(20),
+                    ask=Decimal(53), aq=Decimal(20))
+    ex = Executor(cfg, None, feed, clock=lambda: 0.0, sleep=lambda _: None)
+    ex.submit_paper("T", "BUY", 20, "dip", now=0.0)
+    result = ex.process_due_paper_orders(600.0, ticker="T")
+    assert len(result) == 1
+    assert result[0][1] is None
+    assert not ex.has_pending("T")
+    print("PASS overdue paper IOC cancels instead of filling a late quote")
+
+
+def test_paper_buy_rechecks_fragmented_fill_profitability():
+    """Arrival depth must still clear fees for the actual fractional fill."""
+    cfg = Config(sim_latency_s=0)
+    feed = BookFeed(bid=Decimal(51), bq=Decimal(20),
+                    ask=Decimal(53), aq=Decimal(20))
+    ex = Executor(cfg, None, feed, clock=lambda: 0.0, sleep=lambda _: None)
+    ex.submit_paper("T", "BUY", 20, "dip", now=0.0)
+    # The signal-time 20 contracts clear fees, but a fragmented 0.1-contract
+    # arrival fill would lose money even at the configured TP after rounding.
+    feed.book = (Decimal(51), Decimal(20),
+                 Decimal(53), Decimal("0.1"))
+    assert projected_scalp_pnl_usd(
+        Decimal(53), cfg.take_profit, Decimal("0.1"),
+        cfg.sim_slippage_cents, cfg.balance_precision_usd) <= 0
+    result = ex.process_due_paper_orders(0.0, ticker="T")
+    assert len(result) == 1
+    assert result[0][1] is None
+    assert not ex.has_pending("T")
+    print("PASS paper BUY cancels a fee-negative fragmented arrival fill")
 
 def test_entry_edge_uses_executable_ask_depth():
     """Edge gate and submitted size must use visible ask depth, not hope."""
@@ -2983,6 +3313,7 @@ def test_market_envelope_to_research_log_preserves_event_identity():
         _, bid_qty, _, ask_qty = feed.top_of_book(ticker)
         log.tick(ticker, mid, bid, ask, bid_qty, ask_qty,
                  ts=observed_at,
+                 detail=research_decision_detail(),
                  close_ts=feed.lifecycle(ticker)[0],
                  can_close_early=feed.lifecycle(ticker)[1])
     with open(log.tick_path) as handle:
@@ -3001,31 +3332,41 @@ def test_market_envelope_to_research_log_preserves_event_identity():
 def test_replay_exact_paper_path_and_residual():
     import csv as _csv
     from replay import replay
-    cfg = Config(sports=["Tennis"], tp_trail_cents=0)
-    path = tempfile.mktemp(suffix=".csv")
+    cfg = Config(
+        sports=["Tennis"], tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
         w.writerow(RESEARCH_HEADER)
         t = 0.0
         for i in range(80):
             t += 1.5
-            w.writerow(research_row(
+            w.writerows(research_execution_rows(
                 cfg=cfg, session="RESIDUAL", ts=t,
                 mid=60, bid=59, ask=61, bid_qty=500, ask_qty=500))
         # Dip triggers a delayed IOC BUY (signal ask cap 53).
-        w.writerow(research_row(
+        w.writerows(research_execution_rows(
             cfg=cfg, session="RESIDUAL", ts=t + 1.5,
             mid=52, bid=51, ask=53, bid_qty=500, ask_qty=500))
         # Due quote: BUY fills at the then-current ask (51), depth-limited
         # to the ask size (6); unfilled remainder is canceled (IOC).
-        w.writerow(research_row(
+        fill_rows = research_execution_rows(
             cfg=cfg, session="RESIDUAL", ts=t + 2.6,
-            mid=50, bid=49, ask=51, bid_qty=500, ask_qty=6))
+            mid=50, bid=49, ask=51, bid_qty=500, ask_qty=6)
+        w.writerows(fill_rows)
         # crash with ZERO bid depth: the stop-loss market exit cannot fill
         for k in range(40):
-            w.writerow(research_row(
+            w.writerows(research_execution_rows(
                 cfg=cfg, session="RESIDUAL", ts=t + 4.1 + k * 1.5,
                 mid=40, bid=39, ask=41, bid_qty=0, ask_qty=500))
+    _write_research_trades(path, [
+        research_trade_row(
+            fill_rows[-1], "BUY", 51, 6,
+            "dip 8.0c; entry ask 53c, size 20, projected net $+0.3000",
+            cfg=cfg),
+    ])
     r = replay(path, cfg=cfg)
     buys = [tr for tr in r["trades"] if tr[1] == "BUY"]
     assert buys and buys[0][2] == Decimal(51)       # current ask at fill
@@ -3166,16 +3507,18 @@ def test_replay_empty_ticker_selection_processes_nothing():
     import csv as _csv
     from replay import replay
     cfg = Config(sports=["Tennis"])
-    path = tempfile.mktemp(suffix=".csv")
+    market_scope = {"trade": ["ONLY"], "watch": []}
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
         w.writerow(RESEARCH_HEADER)
-        w.writerow(research_row(
+        w.writerows(research_execution_rows(
             cfg=cfg, session="FILTER", ticker="ONLY",
-            event_ticker="ONLY-EVENT"))
+            event_ticker="ONLY-EVENT", market_scope=market_scope))
         w.writerow(research_row(
             cfg=cfg, session="FILTER", ts=2, ticker="",
-            event="session_end", detail="operator interrupt"))
+            event="session_end", detail="operator interrupt",
+            market_scope=market_scope))
     result = replay(path, tickers=set(), cfg=cfg)
     assert result["rows_processed"] == 0
     assert result["trades"] == []
@@ -3186,22 +3529,32 @@ def test_replay_empty_ticker_selection_processes_nothing():
 def test_replay_eof_never_fabricates_flatten_fills():
     import csv as _csv
     from replay import replay
-    cfg = Config(sports=["Tennis"], tp_trail_cents=0)
-    path = tempfile.mktemp(suffix=".csv")
+    cfg = Config(
+        sports=["Tennis"], tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
         w.writerow(RESEARCH_HEADER)
         for ts in range(1, 21):
-            w.writerow(research_row(
+            w.writerows(research_execution_rows(
                 cfg=cfg, session="EOF", ts=ts, mid=60, bid=59, ask=61,
                 bid_qty=100, ask_qty=100))
-        w.writerow(research_row(
+        w.writerows(research_execution_rows(
             cfg=cfg, session="EOF", ts=21, mid=52, bid=51, ask=53,
             bid_qty=100, ask_qty=100))
         # Ask still at/below the signal cap; depth-limited IOC fill.
-        w.writerow(research_row(
+        fill_rows = research_execution_rows(
             cfg=cfg, session="EOF", ts=22, mid=52, bid=51, ask=53,
-            bid_qty=100, ask_qty=5))
+            bid_qty=100, ask_qty=5)
+        w.writerows(fill_rows)
+    _write_research_trades(path, [
+        research_trade_row(
+            fill_rows[-1], "BUY", 53, 5,
+            "dip 8.0c; entry ask 53c, size 20, projected net $+0.3000",
+            cfg=cfg),
+    ])
     result = replay(path, cfg=cfg)
     assert [trade[1] for trade in result["trades"]] == ["BUY"]
     assert result["realized"] == 0
@@ -3311,25 +3664,46 @@ def test_actual_runtime_driver_matches_replay():
         (25.0, "T", Decimal(59), Decimal(58), Decimal(60),
          Decimal(6), Decimal(100)),
     ]
-    cfg = Config(sports=["Tennis"], tp_trail_cents=0); cfg.sim_latency_s = 1.0
-    path = tempfile.mktemp(suffix=".csv")
+    cfg = Config(
+        sports=["Tennis"], tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
+    cfg.sim_latency_s = 1.0
+    path = _new_research_fixture_path()
+    execution_rows = {}
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
         for ts, ticker, mid, bid, ask, bid_qty, ask_qty in rows:
-            writer.writerow(research_row(
+            pair = research_execution_rows(
                 cfg=cfg, session="DRIVER", ts=ts, ticker=ticker,
                 event_ticker="EVENT-T", mid=mid, bid=bid, ask=ask,
-                bid_qty=bid_qty, ask_qty=ask_qty))
+                bid_qty=bid_qty, ask_qty=ask_qty)
+            writer.writerows(pair)
+            execution_rows[ts] = pair[-1]
         writer.writerow(research_row(
             cfg=cfg, session="DRIVER", ts=26, ticker="",
             event="session_end", detail="operator interrupt"))
+    _write_research_trades(path, [
+        research_trade_row(
+            execution_rows[22.0], "BUY", 53, 6,
+            "dip 8.0c; entry ask 53c, size 20, projected net $+0.3000",
+            cfg=cfg),
+        research_trade_row(
+            execution_rows[25.0], "SELL", 58, 6,
+            "take-profit, bid +5c vs entry", cfg=cfg),
+    ])
     replay_result = replay(path, cfg=cfg)
 
     clock = VirtualClock()
     class RuntimeFeed:
         def __init__(self):
-            self.remaining = deque(rows)
+            # Live run_loop takes one evidence quote and one post-evidence
+            # execution requote per trade decision.  Duplicate each captured
+            # frame so the runtime and the single-phase synthetic replay
+            # fixture receive the same decision books in the same order.
+            self.remaining = deque(
+                frame for row in rows for frame in (row, row))
             self.history = defaultdict(lambda: deque(maxlen=600))
             self.books = {}
 
@@ -3674,6 +4048,12 @@ def test_config_rejects_unsafe_research_parameters():
         {"balance_precision_usd": "0.003"},
         {"max_monitored_markets": 0},
         {"max_monitored_markets": 11},
+        {"two_model_prior_max_age_s": 0},
+        {"two_model_prior_path": " /tmp/priors.json"},
+        {"two_model_prior_path": "bad\x00path"},
+        {"two_model_prior_path": 7},
+        {"one_contract_per_event": False,
+         "sibling_spike_enabled": True},
     )
     for kwargs in invalid:
         try:
@@ -4435,18 +4815,24 @@ def test_replay_reports_halt_and_resets_daily_risk_at_utc_midnight():
         (after + 23, 40, 39, 41, 20, 100),
         (after + 24, 40, 39, 41, 20, 100),
     ]
-    cfg = Config(max_daily_loss_usd=1, tp_trail_cents=0)
-    path = tempfile.mktemp(suffix=".csv")
+    cfg = Config(
+        max_daily_loss_usd=1, tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
+    path = _new_research_fixture_path()
+    execution_rows = {}
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
         for ts, mid, bid, ask, bid_qty, ask_qty in rows:
             day = datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
-            writer.writerow(research_row(
+            pair = research_execution_rows(
                 cfg=cfg, session="MIDNIGHT", starting_pnl=100,
                 starting_day="2026-01-01", day=day, ts=ts,
                 event_ticker="EVENT-T", mid=mid, bid=bid, ask=ask,
-                bid_qty=bid_qty, ask_qty=ask_qty))
+                bid_qty=bid_qty, ask_qty=ask_qty)
+            writer.writerows(pair)
+            execution_rows[ts] = pair[-1]
         terminal_ts = rows[-1][0] + 1
         writer.writerow(research_row(
             cfg=cfg, session="MIDNIGHT", starting_pnl=100,
@@ -4454,6 +4840,12 @@ def test_replay_reports_halt_and_resets_daily_risk_at_utc_midnight():
             event_ticker="", ticker="", event="session_end",
             detail="operator interrupt", mid="", bid="", ask="",
             bid_qty="", ask_qty=""))
+    _write_research_trades(path, [
+        research_trade_row(
+            execution_rows[after + 21], "BUY", Decimal("52.5"), 20,
+            "dip 8.0c; entry ask 53c, size 20, projected net $+0.3000",
+            cfg=cfg),
+    ])
     result = replay(path, cfg=cfg)
     assert result["halted"]
     assert "loss limit" in result["halt_reason"]
@@ -4475,7 +4867,7 @@ def test_malformed_executable_books_fail_closed():
         (50, 49, 51, "NaN", 10),
     )
     for i, (mid, bid, ask, bid_qty, ask_qty) in enumerate(cases):
-        path = tempfile.mktemp(suffix=".csv")
+        path = _new_research_fixture_path()
         with open(path, "w", newline="") as handle:
             writer = _csv.writer(handle)
             writer.writerow(RESEARCH_HEADER)
@@ -4489,7 +4881,7 @@ def test_malformed_executable_books_fail_closed():
             except ValueError:
                 pass
 
-    missing_event = tempfile.mktemp(suffix=".csv")
+    missing_event = _new_research_fixture_path()
     with open(missing_event, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
@@ -4506,12 +4898,15 @@ def test_replay_honors_logged_same_day_starting_loss():
     import csv as _csv
     from replay import replay
 
-    cfg = Config(max_daily_loss_usd=30, tp_trail_cents=0)
-    path = tempfile.mktemp(suffix=".csv")
+    cfg = Config(
+        max_daily_loss_usd=30, tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as handle:
         writer = _csv.writer(handle)
         writer.writerow(RESEARCH_HEADER)
-        writer.writerow(research_row(
+        writer.writerows(research_execution_rows(
             cfg=cfg, session="RESTART", starting_pnl=-31))
         writer.writerow(research_row(
             cfg=cfg, session="RESTART", starting_pnl=-31, ts=2,
@@ -4535,15 +4930,18 @@ def test_replay_uses_log_creation_day_when_first_quote_is_after_midnight():
     after = datetime(2026, 1, 2, 0, 0, 1,
                      tzinfo=timezone.utc).timestamp()
     now = [before]
-    cfg = Config(max_daily_loss_usd=30, sports=["Tennis"], tp_trail_cents=0)
+    cfg = Config(
+        max_daily_loss_usd=30, sports=["Tennis"], tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False)
     log = ResearchLog(
         tempfile.mkdtemp(), clock=lambda: now[0],
         session_id="DELAYED-FIRST", starting_pnl=-31, config=cfg,
-        provenance_by_ticker={"T": research_provenance()})
+        provenance_by_ticker={"T": research_provenance(
+            scheduled_start_ts=after + 3600)})
     now[0] = after
-    log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-             Decimal(10), Decimal(10),
-             close_ts=4070908800.0, can_close_early=False)
+    log_research_execution_pair(
+        log, "T", Decimal(50), Decimal(49), Decimal(51),
+        Decimal(10), Decimal(10), cfg=cfg, decision_at=after)
     now[0] = after + 1
     log.end(clean=True, reason="operator interrupt")
     result = replay(log.tick_path, cfg=cfg)
@@ -4557,14 +4955,16 @@ def test_replay_requires_durable_clean_session_terminal():
     from replay import replay
 
     now = [1.0]
-    cfg = Config(sports=["Tennis"])
+    cfg = Config(
+        sports=["Tennis"], espn_gate_enabled=False,
+        sibling_spike_enabled=False)
     log = ResearchLog(
         tempfile.mkdtemp(), clock=lambda: now[0],
         session_id="TERMINAL", config=cfg,
         provenance_by_ticker={"T": research_provenance()})
-    log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-             Decimal(10), Decimal(10),
-             close_ts=4070908800.0, can_close_early=False)
+    log_research_execution_pair(
+        log, "T", Decimal(50), Decimal(49), Decimal(51),
+        Decimal(10), Decimal(10), cfg=cfg)
     incomplete = replay(log.tick_path, cfg=cfg)
     assert not incomplete["evaluable"]
     assert incomplete["terminal_status"] == "missing"
@@ -4580,15 +4980,18 @@ def test_replay_rejects_nonmonotonic_observation_order():
     from research_log import ResearchLog
     from replay import replay
 
-    cfg = Config(sports=["Tennis"])
+    cfg = Config(
+        sports=["Tennis"], espn_gate_enabled=False,
+        sibling_spike_enabled=False)
     log = ResearchLog(
         tempfile.mkdtemp(), clock=lambda: 0.0,
         session_id="ORDER", config=cfg,
         provenance_by_ticker={"T": research_provenance()})
     for ts in (2.0, 1.0):
-        log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-                 Decimal(10), Decimal(10), ts=ts,
-                 close_ts=4070908800.0, can_close_early=False)
+        log_research_execution_pair(
+            log, "T", Decimal(50), Decimal(49), Decimal(51),
+            Decimal(10), Decimal(10), cfg=cfg, ts=ts,
+            decision_at=ts)
     log.end(clean=True, reason="operator interrupt", ts=3.0)
     try:
         replay(log.tick_path, cfg=cfg)
@@ -4602,19 +5005,24 @@ def test_replay_rejects_config_or_code_provenance_mismatch():
     from research_log import ResearchLog
     from replay import replay
 
-    original = Config(sports=["Tennis"])
+    base = {
+        "sports": ["Tennis"], "espn_gate_enabled": False,
+        "sibling_spike_enabled": False,
+    }
+    original = Config(**base)
     log = ResearchLog(
         tempfile.mkdtemp(), clock=lambda: 1.0,
         session_id="PROVENANCE", config=original,
         provenance_by_ticker={"T": research_provenance()})
-    log.tick("T", Decimal(50), Decimal(49), Decimal(51),
-             Decimal(10), Decimal(10),
-             close_ts=4070908800.0, can_close_early=False)
+    log_research_execution_pair(
+        log, "T", Decimal(50), Decimal(49), Decimal(51),
+        Decimal(10), Decimal(10), cfg=original)
     log.end(clean=True, reason="operator interrupt", ts=2.0)
     for changed in (
-            Config(dip_threshold=8), Config(poll_interval=2.0),
-            Config(tickers=["OTHER"]),
-            Config(max_monitored_markets=9)):
+            Config(**base, dip_threshold=8),
+            Config(**base, poll_interval=2.0),
+            Config(**base, tickers=["OTHER"]),
+            Config(**base, max_monitored_markets=9)):
         try:
             replay(log.tick_path, cfg=changed)
             assert False
@@ -4893,39 +5301,54 @@ def test_replay_enforces_logged_market_lifecycle():
     import csv as _csv
     from replay import replay
 
-    cfg = Config(max_hold_seconds=300, close_buffer_seconds=60, tp_trail_cents=0)
+    cfg = Config(
+        max_hold_seconds=300, close_buffer_seconds=60, tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
     results = {}
     for name, close_ts, early in (
             ("near-close", 350.0, "false"),
             ("early-close", 1000.0, "true")):
-        path = tempfile.mktemp(suffix=".csv")
+        path = _new_research_fixture_path()
         with open(path, "w", newline="") as handle:
             writer = _csv.writer(handle)
             writer.writerow(RESEARCH_HEADER)
             for ts in range(1, 21):
-                writer.writerow(research_row(
+                writer.writerows(research_execution_rows(
                     cfg=cfg, session=name, ts=ts, mid=60, bid=59,
                     ask=61, close_ts=close_ts,
                     can_close_early=early))
-            writer.writerow(research_row(
+            writer.writerows(research_execution_rows(
                 cfg=cfg, session=name, ts=21, mid=52, bid=51, ask=53,
                 close_ts=close_ts, can_close_early=early))
             # Ask still at/below signal cap so the delayed IOC BUY fills.
-            writer.writerow(research_row(
+            buy_rows = research_execution_rows(
                 cfg=cfg, session=name, ts=22, mid=52, bid=51, ask=53,
-                close_ts=close_ts, can_close_early=early))
+                close_ts=close_ts, can_close_early=early)
+            writer.writerows(buy_rows)
             # Take-profit: delayed IOC SELL at the bid floor.
-            writer.writerow(research_row(
+            writer.writerows(research_execution_rows(
                 cfg=cfg, session=name, ts=23, mid=59, bid=58, ask=60,
                 close_ts=close_ts, can_close_early=early))
             # Bid still at/above floor so the IOC SELL fills.
-            writer.writerow(research_row(
+            sell_rows = research_execution_rows(
                 cfg=cfg, session=name, ts=24, mid=59, bid=58, ask=60,
-                close_ts=close_ts, can_close_early=early))
+                close_ts=close_ts, can_close_early=early)
+            writer.writerows(sell_rows)
             writer.writerow(research_row(
                 cfg=cfg, session=name, ts=25, event_ticker="", ticker="",
                 event="session_end", detail="operator interrupt",
                 mid="", bid="", ask="", bid_qty="", ask_qty=""))
+        if name == "early-close":
+            _write_research_trades(path, [
+                research_trade_row(
+                    buy_rows[-1], "BUY", 53, 10,
+                    "dip 8.0c; entry ask 53c, size 10, projected net $+0.1400",
+                    cfg=cfg),
+                research_trade_row(
+                    sell_rows[-1], "SELL", 58, 10,
+                    "take-profit, bid +5c vs entry", cfg=cfg),
+            ])
         results[name] = replay(path, cfg=cfg)
 
     assert results["near-close"]["trades"] == []
@@ -5254,10 +5677,12 @@ def _normalized_market(*, ticker, event_ticker, bid=Decimal(50), ask=Decimal(52)
 
 
 def _discover_cfg(*, sports=(), tickers=(), max_markets=10, max_spread=3,
-                  one_contract_per_event=True):
+                  one_contract_per_event=True,
+                  sibling_spike_enabled=False):
     return Config(sports=list(sports), tickers=list(tickers),
                   max_monitored_markets=max_markets, max_spread=max_spread,
                   one_contract_per_event=one_contract_per_event,
+                  sibling_spike_enabled=sibling_spike_enabled,
                   state_root=tempfile.mkdtemp())
 
 
@@ -5641,7 +6066,7 @@ def test_dynamic_contract_cap_allows_siblings_from_one_game():
 
 
 def test_discovery_keeps_one_contract_per_event():
-    """Default one_contract_per_event drops the weaker sibling and fills elsewhere."""
+    """The monitoring cap includes each protected trade's sibling watch."""
     from datetime import datetime, timezone
     from sports_discovery import discover_game_contracts
 
@@ -5683,16 +6108,28 @@ def test_discovery_keeps_one_contract_per_event():
         # Prefer the shallower sibling B to prove score overrides rank order.
         return (1, Decimal(1)) if contract.ticker.endswith("-B") else (1, Decimal(0))
 
+    def binding(contract):
+        if contract.provenance.event_ticker != sibling_event:
+            return None
+        selected = "espn:athlete:b" if contract.ticker.endswith("-B") \
+            else "espn:athlete:a"
+        opponent = "espn:athlete:a" if contract.ticker.endswith("-B") \
+            else "espn:athlete:b"
+        return "espn:siblings", selected, opponent
+
     result = discover_game_contracts(
-        _discover_cfg(sports=("Tennis",), max_markets=2), client,
+        _discover_cfg(
+            sports=("Tennis",), max_markets=2,
+            sibling_spike_enabled=True), client,
         now=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),
+        bind_predicate=binding,
         sibling_score=score)
-    assert result.tickers == (
-        sibling_event + "-B", other_event + "-A")
+    assert result.tickers == (sibling_event + "-B",)
     assert result.stats["skipped_event_siblings"] == 1
-    assert result.stats["selected"] == 2
+    assert result.stats["selected"] == 1
     assert result.stats["watch_siblings"] == 1
     assert result.watch_tickers == (sibling_event + "-A",)
+    assert len(result.tickers) + len(result.watch_tickers) == 2
     print("PASS discovery keeps one contract per event")
 
 
@@ -6583,8 +7020,8 @@ def test_run_session_discovers_and_reports_only_once():
         "  utc=[1970-01-01T00:00:00Z, 1970-01-02T00:00:00Z)",
         "[discover] series_rows=3 milestone_pages=2 milestone_rows=4 "
         "event_pages=1 event_rows=2 candidates=1 bindable_candidates=0 "
-        "skipped_event_siblings=0 watch_siblings=0 selected=1 "
-        "selected_bindable=0",
+        "skipped_event_siblings=0 skipped_unverified_opponent=0 "
+        "watch_siblings=0 selected=1 selected_bindable=0",
         "  skips=skip_a=1, skip_z=2",
         "[discover] Tennis | League | Game | T | "
         "1970-01-01T01:00:00Z | bid=50 ask=52 spread=2 "
@@ -6736,32 +7173,40 @@ def test_keyboard_interrupt_and_system_exit_are_not_swallowed_by_discovery():
     print("PASS discovery preserves KeyboardInterrupt and SystemExit")
 
 
-def _write_research_csv(rows, header=None):
+def _write_research_csv(rows, header=None, trade_rows=()):
     import csv
 
-    path = tempfile.mktemp(suffix=".csv")
+    path = _new_research_fixture_path()
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(RESEARCH_HEADER if header is None else header)
         writer.writerows(rows)
+    _write_research_trades(path, trade_rows)
     return path
 
 
 def _clean_v6_rows(*, cfg=None, selected_sports=("Tennis",),
                    quotes=None, session="V6"):
     cfg = cfg or Config(sports=list(selected_sports))
+    quote_rows = tuple(quotes or ({},))
+    market_scope = {
+        "trade": sorted({row.get("ticker", "T") for row in quote_rows}),
+        "watch": [],
+    }
     rows = []
-    for i, overrides in enumerate(quotes or ({},), start=1):
+    for i, overrides in enumerate(quote_rows, start=1):
         params = {
             "cfg": cfg, "session": session, "ts": i,
             "selected_sports": selected_sports,
+            "market_scope": market_scope,
         }
         params.update(overrides)
-        rows.append(research_row(**params))
+        rows.extend(research_execution_rows(**params))
     rows.append(research_row(
         cfg=cfg, session=session, ts=len(rows) + 1,
         selected_sports=selected_sports, ticker="",
-        event="session_end", detail="operator interrupt"))
+        event="session_end", detail="operator interrupt",
+        market_scope=market_scope))
     return rows
 
 
@@ -6796,10 +7241,17 @@ def test_v6_quote_and_trade_rows_share_full_provenance():
     log.tick(
         "T", Decimal(50), Decimal(49), Decimal(51),
         Decimal(10), Decimal(11), close_ts=1000,
-        can_close_early=False)
+        can_close_early=False, detail=research_decision_detail())
+    try:
+        log.trade(
+            "T", "BUY", Decimal(52), Decimal(2), "dip",
+            fee=Decimal("0.02"), ts=2)
+        assert False, "paper logger accepted a non-deterministic fee"
+    except ValueError:
+        pass
     log.trade(
         "T", "BUY", Decimal(52), Decimal(2), "dip",
-        fee=Decimal("0.02"), ts=2)
+        fee=Decimal("0.04"), ts=2)
     log.event("T", "api_error", ts=3, detail="timeout")
     log.event("T", "quarantined", ts=4, detail="bounded failures")
     log.end(clean=True, reason="operator interrupt", ts=5)
@@ -7092,7 +7544,7 @@ def test_replay_rejects_whitespace_only_terminal_reason():
 def test_replay_rejects_each_missing_provenance_field():
     from replay import load_log
 
-    for index in (10, 12, 13, 14):
+    for index in (11, 13, 14, 15):
         row = research_row()
         row[index] = ""
         try:
@@ -7102,7 +7554,7 @@ def test_replay_rejects_each_missing_provenance_field():
             assert RESEARCH_HEADER[index] in str(error)
     for raw in ("", "NaN", "-1"):
         row = research_row()
-        row[15] = raw
+        row[16] = raw
         try:
             load_log(_write_research_csv([row]))
             assert False, raw
@@ -7145,16 +7597,19 @@ def test_replay_rejects_invalid_or_drifting_provenance():
     except ValueError as error:
         assert "provenance" in str(error)
 
+    cross_scope = {"trade": ["A", "B"], "watch": []}
     cross_event = [
         research_row(
             cfg=cfg, ts=1, ticker="A", sport="Tennis",
             event_ticker="SHARED",
-            selected_sports=("Basketball", "Tennis")),
+            selected_sports=("Basketball", "Tennis"),
+            market_scope=cross_scope),
         research_row(
             cfg=cfg, ts=2, ticker="B", sport="Basketball",
             series_ticker="KXNBA", milestone_id="M2",
             event_ticker="SHARED", scheduled_start_ts=7200,
-            selected_sports=("Basketball", "Tennis")),
+            selected_sports=("Basketball", "Tennis"),
+            market_scope=cross_scope),
     ]
     try:
         load_log(_write_research_csv(cross_event), cfg=cfg)
@@ -7166,10 +7621,12 @@ def test_replay_rejects_invalid_or_drifting_provenance():
     hidden = [
         research_row(cfg=cfg, ts=1, ticker="A", sport="Tennis",
                      event_ticker="A-EVENT",
-                     selected_sports=("Basketball", "Tennis")),
+                     selected_sports=("Basketball", "Tennis"),
+                     market_scope=cross_scope),
         research_row(cfg=cfg, ts=2, ticker="B", sport="Basketball",
                      series_ticker="", event_ticker="B-EVENT",
-                     selected_sports=("Basketball", "Tennis")),
+                     selected_sports=("Basketball", "Tennis"),
+                     market_scope=cross_scope),
     ]
     try:
         load_log(_write_research_csv(hidden), tickers=["A"], cfg=cfg)
@@ -7250,7 +7707,10 @@ def test_runtime_v6_log_replays_same_fills_and_pnl():
         (25.0, Decimal(61), Decimal(60), Decimal(62),
          Decimal(6), Decimal(100)),
     ]
-    cfg = Config(sports=["Tennis"], tp_trail_cents=0)
+    cfg = Config(
+        sports=["Tennis"], tp_trail_cents=0,
+        espn_gate_enabled=False, sibling_spike_enabled=False,
+    )
     cfg.sim_latency_s = 1.0
     clock = VirtualClock()
     feed = ReplayFeed(clock)
@@ -7276,6 +7736,14 @@ def test_runtime_v6_log_replays_same_fills_and_pnl():
         feed.apply(
             ts, "T", mid, bid, ask, bid_qty, ask_qty,
             close_ts=4070908800.0, can_close_early=False)
+        # process_tick owns the execution row; mirror run_loop's immediately
+        # preceding trade evidence under the sweep id it will allocate.
+        log.tick(
+            "T", mid, bid, ask, bid_qty, ask_qty, ts=ts,
+            detail=research_decision_detail(
+                cfg=cfg, ask=ask, decision_at=ts,
+                quote_phase="evidence", sweep_id=ctx.sweep_id + 1),
+            close_ts=4070908800.0, can_close_early=False)
         process_tick(ctx, "T", mid, bid, ask, observed_at=ts)
     clock.t = 26
     log.end(clean=True, reason="operator interrupt")
@@ -7288,7 +7756,9 @@ def test_runtime_v6_log_replays_same_fills_and_pnl():
 def test_analyzer_delegates_to_strict_v6_loader():
     import analyze
 
-    cfg = Config(sports=["Tennis"])
+    cfg = Config(
+        sports=["Tennis"], espn_gate_enabled=False,
+        sibling_spike_enabled=False)
     path = _write_research_csv(_clean_v6_rows(cfg=cfg))
     original_cfg = analyze.CFG
     original_loader = getattr(analyze, "load_log", None)
@@ -7777,7 +8247,10 @@ if __name__ == "__main__":
     test_unknown_depth_never_means_unlimited_fill()
     test_stop_deadline_does_not_slide_while_pending()
     test_time_exit_upgrades_working_take_profit()
+    test_time_exit_preempts_trailing_take_profit_at_hold_limit()
     test_ioc_ask_cap_miss_cancels_entry()
+    test_overdue_paper_ioc_cancels_without_late_fill()
+    test_paper_buy_rechecks_fragmented_fill_profitability()
     test_entry_edge_uses_executable_ask_depth()
     test_trailing_tp_lets_runners_extend_past_arm()
     test_trailing_tp_zero_keeps_fixed_arm_exit()
@@ -7847,4 +8320,4 @@ if __name__ == "__main__":
     test_rank_contracts_prefer_bind_tiers()
     test_mid_rise_in_lookback_and_sibling_spike_block()
     test_gate_binds_itf_via_live_tennis_secondary()
-    print("\nALL TESTS PASS (219 tests)")
+    print("\nALL TESTS PASS (222 tests)")

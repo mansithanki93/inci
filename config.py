@@ -72,7 +72,9 @@ class Config:
 
     # --- Execution & safety (fixes #8, #9) ---
     poll_interval: float = 1.5
-    fill_timeout_s: float = 4.0       # cancel unfilled remainder after this
+    # Also bounds how late the first eligible paper quote may arrive after a
+    # delayed IOC's due_at; later observations cancel instead of back-filling.
+    fill_timeout_s: float = 4.0       # cancel unfilled/stale IOC after this
     cancel_timeout_s: float = 5.0     # poll-until-terminal after a cancel
     reconcile_timeout_s: float = 5.0  # wait for order/fill/position agreement
     flatten_retries: int = 3          # attempts per position when flattening
@@ -85,6 +87,10 @@ class Config:
     espn_cache_s: float = 15.0
     espn_min_model_prob: float = 0.35   # reject collapsing sides
     espn_min_edge: float = 0.03         # model_prob - ask/100
+    # Optional read-only bridge from the separate Models 1+2 pilot.  With no
+    # path, the live score transform is a guard only and cannot claim edge.
+    two_model_prior_path: str = os.getenv("INCI_TWO_MODEL_PRIOR_PATH", "")
+    two_model_prior_max_age_s: float = 86400.0
     # When True (default), discovery ranks scoreboard-bindable contracts
     # ahead of unbound ones, then applies the usual depth/spread ranking
     # within each tier. Still capped by max_monitored_markets.
@@ -196,7 +202,7 @@ class Config:
                      "max_daily_loss_usd", "poll_interval", "fill_timeout_s",
                      "cancel_timeout_s", "reconcile_timeout_s",
                      "stale_data_s", "reconcile_every_s",
-                     "close_buffer_seconds"):
+                     "close_buffer_seconds", "two_model_prior_max_age_s"):
             number(name, positive=True)
         for name in ("sim_latency_s", "sim_slippage_cents", "max_spread",
                      "tp_trail_cents", "espn_cache_s", "espn_min_model_prob",
@@ -214,12 +220,22 @@ class Config:
             raise ValueError("espn_leagues must be a nonempty tuple of strings")
         if not isinstance(self.espn_gate_enabled, bool):
             raise ValueError("espn_gate_enabled must be a bool")
+        if (not isinstance(self.two_model_prior_path, str)
+                or "\x00" in self.two_model_prior_path
+                or (self.two_model_prior_path
+                    and self.two_model_prior_path !=
+                    self.two_model_prior_path.strip())):
+            raise ValueError(
+                "two_model_prior_path must be a trimmed filesystem path")
         if not isinstance(self.prefer_scoreboard_bind, bool):
             raise ValueError("prefer_scoreboard_bind must be a bool")
         if not isinstance(self.one_contract_per_event, bool):
             raise ValueError("one_contract_per_event must be a bool")
         if not isinstance(self.sibling_spike_enabled, bool):
             raise ValueError("sibling_spike_enabled must be a bool")
+        if self.sibling_spike_enabled and not self.one_contract_per_event:
+            raise ValueError(
+                "sibling_spike_enabled requires one_contract_per_event")
         if not isinstance(self.live_tennis_enabled, bool):
             raise ValueError("live_tennis_enabled must be a bool")
         if not isinstance(self.live_tennis_include_upcoming, bool):
@@ -300,6 +316,7 @@ class Config:
                      "stale_data_s", "reconcile_every_s",
                      "close_buffer_seconds", "espn_cache_s",
                      "espn_min_model_prob", "espn_min_edge",
+                     "two_model_prior_max_age_s",
                      "live_tennis_cache_s", "sibling_spike_lookback_s"):
             setattr(self, name, float(getattr(self, name)))
         self.espn_leagues = tuple(self.espn_leagues)

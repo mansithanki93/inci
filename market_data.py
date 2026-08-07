@@ -28,6 +28,7 @@ class PriceFeed:
         self.last_book = {}     # ticker -> (bid, bid_qty, ask, ask_qty)
         self.contracts_by_ticker = MappingProxyType({})
         self.provenance_by_ticker = MappingProxyType({})
+        self.score_bindings_by_ticker = MappingProxyType({})
         self.trade_tickers = frozenset()
         self.watch_tickers = frozenset()
         self._discovery_installed = False
@@ -42,10 +43,20 @@ class PriceFeed:
             raise ValueError("discovery must be a DiscoveryResult")
 
         selected_sports = frozenset(discovery.selected_sports)
+        score_bindings = dict(discovery.score_bindings)
         contracts = {}
         provenance = {}
         trade = set()
         watch = set()
+        watch_contracts = tuple(
+            getattr(discovery, "watch_contracts", ()) or ())
+        total_quotes = len(discovery.contracts) + len(watch_contracts)
+        if total_quotes > self.cfg.max_monitored_markets:
+            raise ValueError(
+                "total quote cap exceeded: "
+                f"{total_quotes} > {self.cfg.max_monitored_markets} "
+                f"({len(discovery.contracts)} trade + "
+                f"{len(watch_contracts)} watch)")
         for contract in discovery.contracts:
             if not isinstance(contract, SelectedContract):
                 raise ValueError(
@@ -60,7 +71,7 @@ class PriceFeed:
             contracts[ticker] = contract
             provenance[ticker] = contract.provenance
             trade.add(ticker)
-        for contract in getattr(discovery, "watch_contracts", ()) or ():
+        for contract in watch_contracts:
             if not isinstance(contract, SelectedContract):
                 raise ValueError(
                     "watch contracts must contain SelectedContract values")
@@ -76,6 +87,7 @@ class PriceFeed:
 
         self.contracts_by_ticker = MappingProxyType(contracts)
         self.provenance_by_ticker = MappingProxyType(provenance)
+        self.score_bindings_by_ticker = MappingProxyType(score_bindings)
         self.trade_tickers = frozenset(trade)
         self.watch_tickers = frozenset(watch)
         self._discovery_installed = True
@@ -87,12 +99,31 @@ class PriceFeed:
             scoreboard_gate is not None
             and getattr(scoreboard_gate, "enabled", lambda: False)())
         prefer = bool(getattr(self.cfg, "prefer_scoreboard_bind", True))
-        if prefer and gate_on:
-            def bind_predicate(contract, gate=scoreboard_gate):
-                return gate.is_bound(
-                    ticker=contract.ticker,
-                    player_name=contract.title,
-                    event_title=contract.game_title)
+        protect_siblings = bool(getattr(
+            self.cfg, "sibling_spike_enabled", True))
+        if gate_on:
+            provenance_resolver = getattr(
+                scoreboard_gate, "binding_provenance", None)
+            identity_resolver = getattr(
+                scoreboard_gate, "binding_identity", None)
+            if callable(provenance_resolver):
+                def bind_predicate(contract, resolver=provenance_resolver):
+                    return resolver(
+                        ticker=contract.ticker,
+                        player_name=contract.title,
+                        event_title=contract.game_title)
+            elif callable(identity_resolver):
+                def bind_predicate(contract, resolver=identity_resolver):
+                    return resolver(
+                        ticker=contract.ticker,
+                        player_name=contract.title,
+                        event_title=contract.game_title)
+            elif prefer and not protect_siblings:
+                def bind_predicate(contract, gate=scoreboard_gate):
+                    return gate.is_bound(
+                        ticker=contract.ticker,
+                        player_name=contract.title,
+                        event_title=contract.game_title)
         if (bool(getattr(self.cfg, "one_contract_per_event", True))
                 and gate_on
                 and hasattr(scoreboard_gate, "model_edge_score")):
@@ -101,7 +132,9 @@ class PriceFeed:
                     ticker=contract.ticker,
                     player_name=contract.title,
                     event_title=contract.game_title,
-                    ask_cents=contract.ask)
+                    ask_cents=contract.ask,
+                    scheduled_start_ts=(
+                        contract.provenance.scheduled_start_ts))
         result = discover_game_contracts(
             self.cfg, self.client, now=now,
             bind_predicate=bind_predicate,

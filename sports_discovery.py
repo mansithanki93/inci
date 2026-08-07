@@ -6,7 +6,7 @@ deterministic and independently testable.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 import math
@@ -107,6 +107,10 @@ class DiscoveryResult:
     stats: Mapping[str, int]
     # Same-event opposite sides quoted for spike checks but not traded.
     watch_contracts: tuple[SelectedContract, ...] = ()
+    # Immutable discovery-time scoreboard commitments for selected trade/watch
+    # tickers. Production bindings retain oriented player names (five parts);
+    # legacy test/integration callbacks may still supply three identity parts.
+    score_bindings: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self):
         if not isinstance(self.contracts, tuple):
@@ -132,6 +136,21 @@ class DiscoveryResult:
                 raise ValueError(
                     f"duplicate watch ticker {contract.ticker!r}")
             watch_tickers.add(contract.ticker)
+        if not isinstance(self.score_bindings, Mapping):
+            raise ValueError("score_bindings must be a mapping")
+        selected_tickers = tickers | watch_tickers
+        copied_bindings = {}
+        for ticker, raw_binding in self.score_bindings.items():
+            _identity(ticker, "score_bindings ticker")
+            if ticker not in selected_tickers:
+                raise ValueError(
+                    f"score binding ticker {ticker!r} is not selected")
+            binding = _score_binding_identity(
+                raw_binding, f"score binding for {ticker!r}")
+            if binding is None:
+                raise ValueError(
+                    f"score binding for {ticker!r} cannot be empty")
+            copied_bindings[ticker] = binding
         if not isinstance(self.selected_sports, tuple):
             raise ValueError("selected_sports must be a tuple")
         sport_names = set()
@@ -158,6 +177,8 @@ class DiscoveryResult:
         object.__setattr__(self, "session_start_utc", start)
         object.__setattr__(self, "session_end_utc", end)
         object.__setattr__(self, "stats", MappingProxyType(copied_stats))
+        object.__setattr__(
+            self, "score_bindings", MappingProxyType(copied_bindings))
 
     @property
     def tickers(self):
@@ -344,6 +365,65 @@ def select_one_per_event(ranked, max_markets, *, sibling_score=None):
         if len(selected) >= max_markets:
             break
     return tuple(selected)
+
+
+def _score_binding_identity(value, context):
+    """Validate one stable scoreboard orientation.
+
+    A truthy boolean used to be enough to call two Markets opponents.  That
+    loses the player orientation and can pair a match-winner with a same-player
+    prop. Protected discovery therefore requires the exact score identity.
+    Production additionally retains the two oriented player names; legacy
+    three-part callbacks remain accepted for compatibility.
+    """
+    if value is None:
+        return None
+    if (isinstance(value, bool) or not isinstance(value, (tuple, list))
+            or len(value) not in (3, 5)):
+        raise ValueError(
+            f"{context} must return a stable three- or five-part "
+            "score identity")
+    binding = tuple(
+        _identity(item, f"{context} item") for item in value)
+    competition_id, selected_id, opponent_id = binding[:3]
+    if selected_id == opponent_id:
+        raise ValueError(
+            f"{context} selected and opponent athlete identities must differ")
+    return binding
+
+
+def _verified_event_pair(event_candidates, binding_by_ticker, *, strict):
+    """Return exactly two mutually reversed scoreboard-bound outcomes.
+
+    Unbound same-Event props are ignored. Any duplicate bound orientation,
+    extra bound Market, missing side, different competition, or same-player
+    orientation is ambiguous and fails closed.
+    """
+    bound = tuple(
+        (candidate, binding_by_ticker[candidate.ticker])
+        for candidate in event_candidates
+        if candidate.ticker in binding_by_ticker)
+    pair = None
+    if len(bound) == 2:
+        first, second = bound
+        first_binding = first[1]
+        competition_id, selected_id, opponent_id = first_binding[:3]
+        if len(first_binding) == 5:
+            player_name, opponent_name = first_binding[3:]
+            reversed_identity = (
+                competition_id, opponent_id, selected_id,
+                opponent_name, player_name)
+        else:
+            reversed_identity = (competition_id, opponent_id, selected_id)
+        if second[1] == reversed_identity:
+            pair = first[0], second[0]
+    if pair is not None:
+        return pair
+    if strict:
+        raise ValueError(
+            "sibling protection requires exactly one verified opposite "
+            "match-winner pair with mutually reversed score identities")
+    return None
 
 
 def _selected_sports(filters):
@@ -663,7 +743,8 @@ def _explicit_selected_contract(market, event, expected, cfg):
             scheduled_start_ts=expected["scheduled_start_ts"]))
 
 
-def _discover_explicit_tickers(cfg, client, *, now=None):
+def _discover_explicit_tickers(cfg, client, *, now=None,
+                               bind_predicate=None):
     tickers = _validated_explicit_tickers(cfg)
     for method in ("get_sports_filters", "get_sports_series", "get_market",
                    "get_event", "get_sports_milestones"):
@@ -725,6 +806,7 @@ def _discover_explicit_tickers(cfg, client, *, now=None):
             requested_ticker)
 
     contracts_by_ticker = {}
+    eligible_by_event = {}
     seen_milestones = {}
     for event_ticker, requested_tickers in requested_by_event.items():
         series_ticker, sport = event_resolution[event_ticker]
@@ -826,6 +908,8 @@ def _discover_explicit_tickers(cfg, client, *, now=None):
             "milestone_id": proof["milestone_id"],
             "scheduled_start_ts": proof["start_ts"],
         }
+        eligible_by_event[event_ticker] = _select_event_markets(
+            event, expected, cfg, stats)
         for requested_ticker in requested_tickers:
             contracts_by_ticker[requested_ticker] = \
                 _explicit_selected_contract(
@@ -837,6 +921,65 @@ def _discover_explicit_tickers(cfg, client, *, now=None):
         sport for sport in sport_ordering if sport in selected)
     stats["candidates"] = len(contracts)
     stats["selected"] = len(contracts)
+    watch_contracts = ()
+    binding_by_ticker = {}
+    all_eligible = tuple(
+        candidate
+        for event_candidates in eligible_by_event.values()
+        for candidate in event_candidates)
+    if bind_predicate is not None:
+        for candidate in all_eligible:
+            try:
+                raw_binding = bind_predicate(candidate)
+                binding = _score_binding_identity(
+                    raw_binding,
+                    f"score binding for explicit Market "
+                    f"{candidate.ticker!r}")
+            except Exception as error:  # noqa: BLE001 - see strict branch
+                if bool(getattr(cfg, "sibling_spike_enabled", True)):
+                    raise ValueError(
+                        "sibling protection scoreboard binding failed for "
+                        f"explicit Market {candidate.ticker!r}") from error
+                continue
+            if binding is not None:
+                binding_by_ticker[candidate.ticker] = binding
+    if bool(getattr(cfg, "sibling_spike_enabled", True)):
+        selected_by_event = {}
+        for contract in contracts:
+            selected_by_event.setdefault(
+                contract.provenance.event_ticker, set()).add(contract.ticker)
+        watched = []
+        for event_ticker, selected_tickers in selected_by_event.items():
+            pair = _verified_event_pair(
+                eligible_by_event[event_ticker], binding_by_ticker,
+                strict=True)
+            pair_by_ticker = {contract.ticker: contract for contract in pair}
+            if not selected_tickers.issubset(pair_by_ticker):
+                raise ValueError(
+                    "sibling protection requires explicit Markets to be the "
+                    "verified opposite match-winner pair")
+            if len(selected_tickers) == 1:
+                watched.extend(
+                    contract for ticker, contract in pair_by_ticker.items()
+                    if ticker not in selected_tickers)
+            elif len(selected_tickers) != 2:
+                raise ValueError(
+                    "sibling protection requires one or both Markets from "
+                    "the verified opposite match-winner pair")
+        max_markets = getattr(cfg, "max_monitored_markets")
+        if len(contracts) + len(watched) > max_markets:
+            raise ValueError(
+                "sibling protection exceeds monitoring cap "
+                f"{max_markets}: {len(contracts)} explicit trade "
+                f"contract(s) plus {len(watched)} opponent watch(es)")
+        watch_contracts = tuple(watched)
+        if watch_contracts:
+            stats["watch_siblings"] = len(watch_contracts)
+    selected_bindings = {
+        contract.ticker: binding_by_ticker[contract.ticker]
+        for contract in (*contracts, *watch_contracts)
+        if contract.ticker in binding_by_ticker
+    }
     return DiscoveryResult(
         contracts=contracts, selected_sports=selected_sports,
         local_timezone=window.local_timezone,
@@ -844,7 +987,9 @@ def _discover_explicit_tickers(cfg, client, *, now=None):
         session_end_local=window.session_end_local,
         session_start_utc=window.session_start_utc,
         session_end_utc=window.session_end_utc,
-        stats=dict(sorted(stats.items())))
+        stats=dict(sorted(stats.items())),
+        watch_contracts=watch_contracts,
+        score_bindings=selected_bindings)
 
 
 def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
@@ -853,7 +998,11 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
 
     When ``bind_predicate`` is set (and ``cfg.prefer_scoreboard_bind`` is
     true), bindable contracts are ranked ahead of unbound ones; each tier
-    still uses the standard depth/spread ranking. With
+    still uses the standard depth/spread ranking. Under sibling protection the
+    callback must return a stable structured score identity rather than a
+    boolean, so opposite orientations can be proved. Production callbacks
+    retain the five-part identity (competition, oriented athlete IDs, and
+    oriented player names); legacy three-part identities remain accepted. With
     ``cfg.one_contract_per_event`` (default on), at most one market per
     Event is kept — ``sibling_score`` picks the winner when provided.
     Explicit ticker lists are unchanged (order preserved, no re-rank).
@@ -864,8 +1013,14 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
         raise ValueError(
             "discover_game_contracts requires exactly one of cfg.sports "
             "or cfg.tickers")
+    sibling_enabled = bool(getattr(cfg, "sibling_spike_enabled", True))
+    one_per_event = bool(getattr(cfg, "one_contract_per_event", True))
+    if sibling_enabled and not one_per_event:
+        raise ValueError(
+            "sibling protection requires one_contract_per_event=True")
     if has_tickers:
-        return _discover_explicit_tickers(cfg, client, now=now)
+        return _discover_explicit_tickers(
+            cfg, client, now=now, bind_predicate=bind_predicate)
     for method in ("get_sports_filters", "get_sports_series",
                    "get_sports_milestones", "get_open_events"):
         if not hasattr(client, method):
@@ -998,13 +1153,40 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
     stats["candidates"] = len(candidates)
     prefer_bind = bool(getattr(cfg, "prefer_scoreboard_bind", True))
     bindable_tickers = set()
-    if prefer_bind and bind_predicate is not None:
+    binding_by_ticker = {}
+    invalid_binding_events = set()
+    if bind_predicate is not None:
         for contract in candidates:
             try:
-                if bind_predicate(contract):
-                    bindable_tickers.add(contract.ticker)
-            except Exception:  # noqa: BLE001 — fail-open to unbound tier
+                raw_binding = bind_predicate(contract)
+            except Exception:  # noqa: BLE001 — protection quarantines Event
+                if sibling_enabled:
+                    invalid_binding_events.add(
+                        contract.provenance.event_ticker)
                 continue
+            if raw_binding is not None and not isinstance(raw_binding, bool):
+                try:
+                    binding = _score_binding_identity(
+                        raw_binding,
+                        f"score binding for Market {contract.ticker!r}")
+                except ValueError:
+                    # One malformed result makes the Event ambiguous: keeping
+                    # a valid-looking pair beside it could silently promote a
+                    # same-player prop to match-winner evidence.
+                    invalid_binding_events.add(
+                        contract.provenance.event_ticker)
+                    continue
+                if binding is not None:
+                    binding_by_ticker[contract.ticker] = binding
+                    bindable_tickers.add(contract.ticker)
+            elif sibling_enabled and raw_binding is not None:
+                invalid_binding_events.add(
+                    contract.provenance.event_ticker)
+            elif raw_binding:
+                # Preference-only discovery retains the historical boolean
+                # callback contract; no opponent claim depends on it.
+                bindable_tickers.add(contract.ticker)
+    if prefer_bind and bind_predicate is not None:
         ranked = rank_contracts_prefer_bind(
             candidates, Decimal(str(cfg.contracts_per_trade)),
             bindable_tickers)
@@ -1015,38 +1197,64 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
     max_markets = getattr(cfg, "max_monitored_markets", None)
     if isinstance(max_markets, bool) or not isinstance(max_markets, int) or max_markets <= 0:
         raise ValueError("cfg.max_monitored_markets must be a positive integer")
-    if bool(getattr(cfg, "one_contract_per_event", True)):
+    watch_contracts = ()
+    if one_per_event:
         # Sibling drop count uses the uncapped winner set.
         uncapped = max(len(ranked), 1)
         all_winners = select_one_per_event(
             ranked, uncapped, sibling_score=sibling_score)
         stats["skipped_event_siblings"] = max(0, len(ranked) - len(all_winners))
-        contracts = all_winners[:max_markets]
+        if sibling_enabled:
+            candidates_by_event = {}
+            for candidate in candidates:
+                candidates_by_event.setdefault(
+                    candidate.provenance.event_ticker, []).append(candidate)
+            rank_index = {
+                contract.ticker: index
+                for index, contract in enumerate(ranked)
+            }
+            packages = []
+            skipped_unverified = 0
+            for event_ticker, event_candidates in candidates_by_event.items():
+                if event_ticker in invalid_binding_events:
+                    skipped_unverified += 1
+                    continue
+                pair = _verified_event_pair(
+                    event_candidates, binding_by_ticker, strict=False)
+                if pair is None:
+                    skipped_unverified += 1
+                    continue
+                pair_ranked = tuple(sorted(
+                    pair, key=lambda contract: rank_index[contract.ticker]))
+                trade = select_one_per_event(
+                    pair_ranked, 1, sibling_score=sibling_score)[0]
+                watch = pair[1] if pair[0].ticker == trade.ticker else pair[0]
+                packages.append((rank_index[trade.ticker], event_ticker,
+                                 trade, watch))
+            # A package is the atomic rank/cap unit. Invalid Events never
+            # become a partial selection, and the selected set is a stable
+            # prefix of the deterministically ranked valid packages.
+            packages.sort(key=lambda package: (package[0], package[1]))
+            package_cap = max_markets // 2
+            selected_packages = packages[:package_cap]
+            contracts = tuple(package[2] for package in selected_packages)
+            watch_contracts = tuple(
+                package[3] for package in selected_packages)
+            stats["skipped_unverified_opponent"] = skipped_unverified
+        else:
+            contracts = all_winners[:max_markets]
     else:
         contracts = ranked[:max_markets]
         stats["skipped_event_siblings"] = 0
     stats["selected"] = len(contracts)
     stats["selected_bindable"] = sum(
         1 for contract in contracts if contract.ticker in bindable_tickers)
-    watch_contracts = ()
-    if bool(getattr(cfg, "sibling_spike_enabled", True)):
-        selected_tickers = {contract.ticker for contract in contracts}
-        selected_events = {
-            contract.provenance.event_ticker for contract in contracts}
-        watched = []
-        seen_watch = set()
-        for contract in candidates:
-            event = contract.provenance.event_ticker
-            if contract.ticker in selected_tickers:
-                continue
-            if event not in selected_events:
-                continue
-            if contract.ticker in seen_watch:
-                continue
-            seen_watch.add(contract.ticker)
-            watched.append(contract)
-        watch_contracts = tuple(watched)
     stats["watch_siblings"] = len(watch_contracts)
+    selected_bindings = {
+        contract.ticker: binding_by_ticker[contract.ticker]
+        for contract in (*contracts, *watch_contracts)
+        if contract.ticker in binding_by_ticker
+    }
     return DiscoveryResult(
         contracts=contracts, selected_sports=selected_sports,
         local_timezone=window.local_timezone,
@@ -1055,4 +1263,5 @@ def discover_game_contracts(cfg, client, *, now=None, bind_predicate=None,
         session_start_utc=window.session_start_utc,
         session_end_utc=window.session_end_utc,
         stats=dict(sorted(stats.items())),
-        watch_contracts=watch_contracts)
+        watch_contracts=watch_contracts,
+        score_bindings=selected_bindings)

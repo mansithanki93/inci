@@ -102,6 +102,12 @@ class ScalpStrategy:
         if move <= -self.cfg.stop_loss:
             return {"action": "SELL",
                     "reason": f"stop-loss, bid {move:+.0f}c vs entry"}
+        # Max hold is a binding deadline. Once reached, the exit must be
+        # marketable; an armed trailing TP must not replace it with a
+        # price-floored IOC that can miss and extend the holding period.
+        if held >= self.cfg.max_hold_seconds:
+            return {"action": "SELL",
+                    "reason": f"time exit {held:.0f}s ({move:+.0f}c)"}
         trail = self.cfg.tp_trail_cents
         if peak_move >= self.cfg.take_profit:
             if trail <= 0:
@@ -121,9 +127,6 @@ class ScalpStrategy:
                                f"giveback {giveback:.0f}c "
                                f"(bid {move:+.0f}c)"),
                 }
-        if held >= self.cfg.max_hold_seconds:
-            return {"action": "SELL",
-                    "reason": f"time exit {held:.0f}s ({move:+.0f}c)"}
         return None
 
     # ---------- Fills (supports partials; P&L net of fees; fix #2, #6) ----------

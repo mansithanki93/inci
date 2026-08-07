@@ -26,14 +26,22 @@ from market_data import PriceFeed, MarketUnavailable
 from strategy import ScalpStrategy
 from espn_prob_gate import EspnProbGate
 from executor import Executor, HaltError
-from research_log import ResearchLog, write_startup_halt
+from research_log import ResearchLog, observation_detail, write_startup_halt
 from order_journal import OrderJournal
 from safety import Safety, Reconciler, ExposureError
 from schemas import SchemaError, UnknownOrderState
-from engine import Context, process_tick, flatten_all
+from engine import (
+    Context,
+    _gate_snapshot,
+    _reprice_gate_snapshot,
+    _sibling_snapshot,
+    flatten_all,
+    process_tick,
+)
 from pnl_ledger import DailyPnlLedger
 from process_lock import ProcessLock, ProcessLockError
 from sports_discovery import local_day_window, resolve_series
+from two_model_prior import TwoModelPriorStore
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,20 @@ class CliUsageError(ValueError):
 class _CliParser(argparse.ArgumentParser):
     def error(self, message):
         raise CliUsageError(f"{self.format_usage().strip()}\nerror: {message}")
+
+
+def build_score_gate(cfg, *, prior_now=None):
+    """Construct the score gate and its optional read-only Models 1+2 bridge."""
+    if not cfg.espn_gate_enabled:
+        return None
+    provider = None
+    if cfg.two_model_prior_path:
+        provider = TwoModelPriorStore(
+            cfg.two_model_prior_path,
+            max_age_s=cfg.two_model_prior_max_age_s,
+            now=prior_now,
+        )
+    return EspnProbGate(cfg, prematch_prior_provider=provider)
 
 
 def parse_cli(argv) -> CliOptions:
@@ -200,7 +222,8 @@ def format_discovery_telemetry(discovery):
     count_keys = (
         "series_rows", "milestone_pages", "milestone_rows",
         "event_pages", "event_rows", "candidates", "bindable_candidates",
-        "skipped_event_siblings", "watch_siblings", "selected",
+        "skipped_event_siblings", "skipped_unverified_opponent",
+        "watch_siblings", "selected",
         "selected_bindable",
     )
     skip_items = sorted(
@@ -406,65 +429,264 @@ def run_loop(ctx, reconciler, tickers, sleep=time.sleep, quote_tickers=None):
                             if ctx.executor.has_pending(t))
         return critical
 
+    watch_tickers = tuple(t for t in quote_tickers if t not in trade_set)
+    watch_set = set(watch_tickers)
+
+    def related_watch_tickers(ticker):
+        if not watch_tickers:
+            return (), None
+        if not hasattr(ctx.feed, "sibling_tickers"):
+            return (), RuntimeError(
+                "same-event sibling provenance is unavailable")
+        try:
+            siblings = set(ctx.feed.sibling_tickers(ticker) or ())
+        except Exception as error:
+            return (), error
+        return tuple(t for t in watch_tickers if t in siblings), None
+
+    def observe(ticker, phase, log_records, *, requote=False):
+        if ticker in safety.quarantined:
+            return None, False
+        try:
+            mid, bid, ask, observed_at = ctx.feed.get_quote(ticker)
+            safety.ok(ticker)
+        except Exception as error:
+            if ctx.log and hasattr(ctx.log, "event"):
+                prefix = "post-evidence requote: " if requote else ""
+                log_records.append((
+                    "event", ticker, "api_error", ctx.clock(),
+                    f"{prefix}{type(error).__name__}: {error}"))
+            was_quarantined = ticker in safety.quarantined
+            if ticker in critical_tickers():
+                if isinstance(error, MarketUnavailable):
+                    kind = ("post-evidence market unavailable" if requote
+                            else "market unavailable")
+                else:
+                    kind = ("post-evidence quote failure" if requote
+                            else "quote failure")
+                safety.trip(
+                    f"{kind} for exposed/pending market {ticker}: {error}")
+            elif isinstance(error, MarketUnavailable):
+                safety.quarantined.add(ticker)
+                print(f"[safety] QUARANTINED {ticker}: {error}")
+            else:
+                safety.handle_exception(error, ticker)
+            if (ctx.log and hasattr(ctx.log, "event")
+                    and not was_quarantined
+                    and ticker in safety.quarantined):
+                log_records.append((
+                    "event", ticker, "quarantined", ctx.clock(),
+                    str(error)))
+            safety.check_staleness(
+                ctx.feed, quote_tickers, critical_tickers())
+            return None, True
+
+        # Check between network requests; a successful slow request can make
+        # another exposed market stale before this package decides anything.
+        safety.check_staleness(
+            ctx.feed, quote_tickers, critical_tickers())
+        if safety.tripped:
+            return None, False
+        _, bid_qty, _, ask_qty = ctx.feed.top_of_book(ticker)
+        close_ts, can_close_early = (
+            ctx.feed.lifecycle(ticker)
+            if hasattr(ctx.feed, "lifecycle") else (None, None))
+        return {
+            "ticker": ticker, "mid": mid, "bid": bid, "ask": ask,
+            "observed_at": observed_at, "bid_qty": bid_qty,
+            "ask_qty": ask_qty, "close_ts": close_ts,
+            "can_close_early": can_close_early, "quote_phase": phase,
+        }, False
+
+    def persist_package(rows, log_records, sweep_id, decision_at,
+                        execution_evidence=None):
+        if not ctx.log:
+            return
+        durable_rows = [
+            (record[3], "event", record) for record in log_records]
+        durable_rows.extend(
+            (row["observed_at"], "quote", row) for row in rows)
+        durable_rows.sort(key=lambda item: item[0])
+        for _timestamp, record_type, record in durable_rows:
+            if record_type == "event":
+                _, ticker, event, event_ts, event_detail = record
+                ctx.log.event(
+                    ticker, event, ts=event_ts, detail=event_detail)
+                continue
+            row = record
+            ticker = row["ticker"]
+            role = "trade" if ticker in trade_set else "watch"
+            phase = row["quote_phase"]
+            if phase == "execution":
+                gate, siblings = execution_evidence
+                detail = observation_detail(
+                    role, sweep_id, quote_phase=phase,
+                    decision_at=decision_at, score_gate=gate,
+                    siblings=siblings)
+            else:
+                detail = observation_detail(
+                    role, sweep_id, quote_phase=phase,
+                    decision_at=decision_at)
+            ctx.log.tick(
+                ticker, row["mid"], row["bid"], row["ask"],
+                row["bid_qty"], row["ask_qty"],
+                ts=row["observed_at"], detail=detail,
+                close_ts=row["close_ts"],
+                can_close_early=row["can_close_early"])
+
     try:
         while not safety.tripped:
             sweep_had_error = False
-            for ticker in quote_tickers:
-                if ticker in safety.quarantined:
-                    continue
-                try:
-                    mid, bid, ask, observed_at = ctx.feed.get_quote(ticker)
-                    safety.ok(ticker)
-                except Exception as e:
-                    sweep_had_error = True
-                    if ctx.log and hasattr(ctx.log, "event"):
-                        ctx.log.event(
-                            ticker, "api_error", ts=ctx.clock(),
-                            detail=f"{type(e).__name__}: {e}")
-                    was_quarantined = ticker in safety.quarantined
-                    if isinstance(e, MarketUnavailable):
-                        if ticker in critical_tickers():
-                            safety.trip(
-                                f"market unavailable with exposure/pending "
-                                f"order: {ticker}: {e}")
-                        else:
-                            safety.quarantined.add(ticker)
-                            print(f"[safety] QUARANTINED {ticker}: {e}")
-                    else:
-                        if ticker in critical_tickers():
-                            safety.trip(
-                                f"quote failure for exposed/pending market "
-                                f"{ticker}: {e}")
-                        else:
-                            safety.handle_exception(e, ticker)
-                    if (ctx.log and hasattr(ctx.log, "event")
-                            and not was_quarantined
-                            and ticker in safety.quarantined):
-                        ctx.log.event(
-                            ticker, "quarantined", ts=ctx.clock(),
-                            detail=str(e))
-                    safety.check_staleness(
-                        ctx.feed, quote_tickers, critical_tickers())
-                    if safety.tripped:
-                        break
-                    continue
-                # A slow request for this market may have made another
-                # market stale. Check before this quote can trigger an order
-                # or the sweep can block on another request.
-                safety.check_staleness(
-                    ctx.feed, quote_tickers, critical_tickers())
+            observed_watch = set()
+            for ticker in trade_tickers:
                 if safety.tripped:
                     break
-                if ticker not in trade_set:
+                if ticker in safety.quarantined:
                     continue
-                try:
-                    process_tick(ctx, ticker, mid, bid, ask,
-                                 observed_at=observed_at)
+                ctx.sweep_id += 1
+                sweep_id = ctx.sweep_id
+                log_records = []
+                rows = []
+
+                # A decision package contains the trade's evidence quote and
+                # all same-event watch evidence, followed by exactly one fresh
+                # trade execution quote. It is processed before any unrelated
+                # ticker can delay or contaminate the decision.
+                related, relation_error = related_watch_tickers(ticker)
+                evidence_names = (ticker,) + related
+                if relation_error is not None:
+                    sweep_had_error = True
+                    log_records.append((
+                        "event", ticker, "api_error", ctx.clock(),
+                        "sibling provenance failure: "
+                        f"{type(relation_error).__name__}: "
+                        f"{relation_error}"))
+                    # Sibling evidence controls entry only. Never quarantine
+                    # or halt an exposed ticker before its own fresh quote can
+                    # schedule/fill a risk-reducing exit. Flat markets still
+                    # use the normal repeated-error quarantine policy.
+                    if ticker not in critical_tickers():
+                        safety.handle_exception(relation_error, ticker)
+                for evidence_ticker in evidence_names:
+                    row, had_error = observe(
+                        evidence_ticker, "evidence", log_records)
+                    sweep_had_error |= had_error
+                    if row is not None:
+                        rows.append(row)
+                        if evidence_ticker in watch_set:
+                            observed_watch.add(evidence_ticker)
                     if safety.tripped:
                         break
-                except (HaltError, UnknownOrderState) as e:
-                    safety.trip(str(e))
+
+                trade_evidence = next((
+                    row for row in rows
+                    if row["ticker"] == ticker
+                    and row["quote_phase"] == "evidence"), None)
+                raw_gate = None
+                execution_row = None
+                if trade_evidence is not None and not safety.tripped:
+                    raw_gate = _gate_snapshot(
+                        ctx, ticker, trade_evidence["ask"], required=True)
+                    execution_row, had_error = observe(
+                        ticker, "execution", log_records, requote=True)
+                    sweep_had_error |= had_error
+                    if execution_row is not None:
+                        rows.append(execution_row)
+
+                decision_at = ctx.clock()
+                if (rows and decision_at < max(
+                        row["observed_at"] for row in rows)):
+                    safety.trip(
+                        "decision clock precedes a package quote timestamp")
+                if (execution_row is not None and rows
+                        and execution_row["observed_at"] < max(
+                            row["observed_at"] for row in rows
+                            if row["quote_phase"] == "evidence")):
+                    safety.trip("execution quote precedes its evidence phase")
+
+                execution_evidence = None
+                # The trade's evidence + requote form the executable package.
+                # Missing watch evidence is represented explicitly by an
+                # incomplete sibling snapshot: it blocks entries inside the
+                # engine but still permits pending/required SELL reductions.
+                package_complete = (
+                    trade_evidence is not None and execution_row is not None)
+                if package_complete:
+                    observed_tickers = {row["ticker"] for row in rows}
+                    execution_evidence = (
+                        _reprice_gate_snapshot(
+                            ctx, raw_gate, execution_row["ask"],
+                            decision_at=decision_at, ticker=ticker),
+                        _sibling_snapshot(
+                            ctx, ticker, decision_at,
+                            observed_tickers=observed_tickers),
+                    )
+                # Strict replay packages are atomic. A failed required
+                # evidence quote or execution requote leaves only durable gap
+                # events and cannot drive the paper engine.
+                if not package_complete:
+                    history = getattr(ctx.feed, "history", None)
+                    if hasattr(history, "get"):
+                        for row in reversed(rows):
+                            bucket = history.get(row["ticker"])
+                            expected = (
+                                row["observed_at"], row["mid"])
+                            if bucket and bucket[-1] == expected:
+                                bucket.pop()
+                            else:
+                                safety.trip(
+                                    "cannot discard incomplete package from "
+                                    f"quote history for {row['ticker']}")
+                    gap_tickers = {record[1] for record in log_records}
+                    for row in rows:
+                        observed_ticker = row["ticker"]
+                        if observed_ticker in gap_tickers:
+                            continue
+                        log_records.append((
+                            "event", observed_ticker, "package_aborted",
+                            decision_at,
+                            "successful quote discarded because causal "
+                            "decision package was incomplete"))
+                        gap_tickers.add(observed_ticker)
+                persist_package(
+                    rows if package_complete else (), log_records,
+                    sweep_id, decision_at,
+                    execution_evidence=execution_evidence)
+
+                if package_complete and not safety.tripped:
+                    try:
+                        gate, siblings = execution_evidence
+                        process_tick(
+                            ctx, ticker, execution_row["mid"],
+                            execution_row["bid"], execution_row["ask"],
+                            observed_at=execution_row["observed_at"],
+                            decision_at=decision_at, gate_snapshot=gate,
+                            sibling_snapshot=siblings,
+                            log_observation=False, sweep_id=sweep_id)
+                    except (HaltError, UnknownOrderState) as error:
+                        safety.trip(str(error))
+
+            # Quote any unassigned watch contract for freshness/telemetry.
+            # It cannot influence a trade because no same-event provenance
+            # connected it to a decision package.
+            for ticker in watch_tickers:
+                if safety.tripped:
                     break
+                if ticker in observed_watch or ticker in safety.quarantined:
+                    continue
+                ctx.sweep_id += 1
+                sweep_id = ctx.sweep_id
+                log_records = []
+                row, had_error = observe(
+                    ticker, "evidence", log_records)
+                sweep_had_error |= had_error
+                rows = [] if row is None else [row]
+                decision_at = ctx.clock()
+                if row is not None and decision_at < row["observed_at"]:
+                    safety.trip(
+                        "decision clock precedes a watch quote timestamp")
+                persist_package(
+                    rows, log_records, sweep_id, decision_at)
             if safety.all_quarantined(trade_tickers):
                 safety.trip("every monitored market quarantined")
             safety.check_staleness(
@@ -513,7 +735,7 @@ def run_session(cfg, client):
     requested_tickers = tuple(cfg.tickers)
     print("PAPER mode (latency/spread/depth/slippage/fees simulated).")
 
-    espn_gate = (EspnProbGate(cfg) if cfg.espn_gate_enabled else None)
+    espn_gate = build_score_gate(cfg)
     try:
         feed = PriceFeed(cfg, client)
         discovery = feed.discover(scoreboard_gate=espn_gate)
@@ -532,7 +754,16 @@ def run_session(cfg, client):
         log = ResearchLog(
             starting_pnl=strategy.realized_pnl, config=cfg,
             session_start=session_start,
-            provenance_by_ticker=discovery.provenance_by_ticker)
+            provenance_by_ticker=discovery.provenance_by_ticker,
+            trade_tickers=getattr(
+                feed, "trade_tickers",
+                tuple(contract.ticker for contract in discovery.contracts)),
+            watch_tickers=getattr(
+                feed, "watch_tickers",
+                tuple(contract.ticker for contract in getattr(
+                    discovery, "watch_contracts", ()))),
+            score_bindings_by_ticker=getattr(
+                feed, "score_bindings_by_ticker", {}))
     except Exception as error:
         reason = f"canonical startup failed: {type(error).__name__}: {error}"
         return _precanonical_failure(
@@ -547,6 +778,12 @@ def run_session(cfg, client):
                   f"(leagues={','.join(cfg.espn_leagues)}; "
                   f"min_p={cfg.espn_min_model_prob}; "
                   f"min_edge={cfg.espn_min_edge})")
+            if espn_gate.prematch_prior_provider is not None:
+                print("[models] Models 1+2 prematch bridge enabled "
+                      f"(max_age={cfg.two_model_prior_max_age_s:.0f}s)")
+            else:
+                print("[models] no Models 1+2 prior configured; score "
+                      "updates are guard-only and do not claim market edge")
             if cfg.prefer_scoreboard_bind:
                 print("[discover] prefer_scoreboard_bind=on "
                       f"(bindable={discovery.stats.get('bindable_candidates', 0)}; "

@@ -2,8 +2,9 @@
 
 Paper: delayed IOC / taker simulation aligned with Config.time_in_force
 (immediate_or_cancel). Orders become eligible only after sim_latency_s, then
-get one attempt against the then-current top of book (depth-capped). Any
-unfilled remainder is canceled — nothing is retained as GTC.
+get one attempt against the then-current top of book (depth-capped), provided
+that observation arrives within fill_timeout_s of due_at. Any unfilled
+remainder or stale attempt is canceled — nothing is retained as GTC.
 
 Pricing:
 * BUY: current ask, only if ask is still at or below the signal-time cap.
@@ -56,6 +57,11 @@ class PendingPaperOrder:
     # BUY: max acceptable ask (signal cap). Non-stop SELL: min acceptable bid.
     # None for marketable stop/time exits (no floor/cap revalidation).
     limit_price: object = None
+    # Immutable cost basis for fee-aware non-risk SELL fragments. Risk exits
+    # deliberately ignore it so stop/time reductions remain marketable.
+    entry_price: object = None
+    entry_contracts: object = None
+    entry_fee_usd: object = None
 
 
 class Executor:
@@ -127,9 +133,43 @@ class Executor:
         filled = min(Decimal(str(order.contracts)), Decimal(str(avail)))
         if filled <= 0:
             return None
+        if side == "BUY":
+            # Signal-time depth may fragment before the delayed IOC reaches
+            # the book. Re-run the same fee-inclusive edge gate against the
+            # actual arrival price and executable quantity; balance rounding
+            # can make a tiny partial fill loss-making even when the original
+            # clip was profitable.
+            projected = projected_scalp_pnl_usd(
+                price, self.cfg.take_profit, filled,
+                self.cfg.sim_slippage_cents,
+                self.cfg.balance_precision_usd)
+            if projected <= 0:
+                return None
         fee = fee_usd(
             price, filled, side=side,
             balance_precision_usd=self.cfg.balance_precision_usd)
+        if side == "SELL" and not is_stop and not is_time:
+            basis = (order.entry_price, order.entry_contracts,
+                     order.entry_fee_usd)
+            if any(value is None for value in basis):
+                return None
+            try:
+                entry_price = Decimal(str(order.entry_price))
+                entry_contracts = Decimal(str(order.entry_contracts))
+                entry_fee = Decimal(str(order.entry_fee_usd))
+            except Exception:
+                return None
+            if (not entry_price.is_finite()
+                    or not entry_contracts.is_finite()
+                    or not entry_fee.is_finite()
+                    or entry_contracts <= 0 or entry_fee < 0
+                    or filled > entry_contracts):
+                return None
+            entry_fee_part = entry_fee * filled / entry_contracts
+            projected = ((price - entry_price) * filled / Decimal(100)
+                         - fee - entry_fee_part)
+            if projected <= 0:
+                return None
         tag = ("" if filled == order.contracts
                else f" (PARTIAL {filled}/{order.contracts})")
         print(f"[PAPER] {side} {filled}x {ticker} @ {price}c "
@@ -137,7 +177,8 @@ class Executor:
         return price, filled, fee
 
     def submit_paper(self, ticker, side, contracts, reason="", now=None,
-                     resting=None, limit_price=None):
+                     resting=None, limit_price=None, *, entry_price=None,
+                     entry_contracts=None, entry_fee_usd=None):
         if not self.cfg.paper_trading:
             raise HaltError("submit_paper called outside paper mode")
         if self.has_pending(ticker):
@@ -159,7 +200,13 @@ class Executor:
             due_at=submitted_at + self.cfg.sim_latency_s,
             reason=reason, resting=False,
             limit_price=(None if limit_price is None
-                         else Decimal(str(limit_price))))
+                         else Decimal(str(limit_price))),
+            entry_price=(None if entry_price is None
+                         else Decimal(str(entry_price))),
+            entry_contracts=(None if entry_contracts is None
+                             else Decimal(str(entry_contracts))),
+            entry_fee_usd=(None if entry_fee_usd is None
+                           else Decimal(str(entry_fee_usd))))
         self.pending_paper.append(order)
         return order
 
@@ -173,6 +220,22 @@ class Executor:
             if ((ticker is None or order.ticker == ticker)
                     and (side is None or order.side == side)):
                 return order
+        return None
+
+    def upgrade_pending_paper_exit(self, ticker, reason):
+        """Retag a SELL while preserving its already-paid latency window."""
+        for index, order in enumerate(self.pending_paper):
+            if order.ticker != ticker or order.side != "SELL":
+                continue
+            upgraded = PendingPaperOrder(
+                ticker=order.ticker, side=order.side,
+                contracts=order.contracts, due_at=order.due_at,
+                reason=reason, resting=False, limit_price=None,
+                entry_price=order.entry_price,
+                entry_contracts=order.entry_contracts,
+                entry_fee_usd=order.entry_fee_usd)
+            self.pending_paper[index] = upgraded
+            return upgraded
         return None
 
     def pending_count(self, side=None):
@@ -189,7 +252,12 @@ class Executor:
                     and (ticker is None or order.ticker == ticker)):
                 remaining.append(order)
                 continue
-            fill = self._paper_fill(order)
+            # ``fill_timeout_s`` also bounds the paper arrival window. An IOC
+            # that receives no quote near its due time is canceled when that
+            # ticker is next observed, never resurrected against a much later
+            # book after an outage or sparse replay interval.
+            expired = now > order.due_at + self.cfg.fill_timeout_s
+            fill = None if expired else self._paper_fill(order)
             # IOC: filled or canceled — never left working after the attempt.
             results.append((order, fill))
         self.pending_paper = remaining
