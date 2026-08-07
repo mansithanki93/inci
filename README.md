@@ -24,7 +24,7 @@ configuration field, or environment variable unlocks it.
 pip install requests cryptography
 python tests.py
 python bot.py --list-sports
-python bot.py --sports Tennis,Basketball
+python bot.py --sports Tennis
 python bot.py --check
 python analyze.py logs/ticks_v6_<YYYYMMDD>_<session-id>.csv
 ```
