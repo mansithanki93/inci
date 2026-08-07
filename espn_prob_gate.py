@@ -89,6 +89,46 @@ def _identity_mentioned(candidate: str, text: str) -> bool:
     return False
 
 
+def _opponent_confirmed_in_event(opponent_name: str, event_title: str) -> bool:
+    """Confirm the bound opponent against exchange event text.
+
+    Full first+surname mentions still win. A conflicting given name for the
+    opponent surname fails closed (Alice Smith vs Anna Smith). Kalshi ITF
+    titles are often surname-only (``Yuan vs Lin``); those are accepted when
+    both surnames were already verified by the caller and the event only
+    mentions that surname bare / after ``vs``.
+    """
+    if _identity_mentioned(opponent_name, event_title):
+        return True
+    identity = normalize_name(opponent_name).split()
+    words = normalize_name(event_title).split()
+    if len(identity) < 2 or not words:
+        return False
+    surname = identity[-1]
+    separators = frozenset({"vs", "v"})
+    saw_bare_surname = False
+    saw_compatible_full = False
+    saw_conflicting_full = False
+    for index, token in enumerate(words):
+        if token != surname:
+            continue
+        if index == 0 or words[index - 1] in separators:
+            saw_bare_surname = True
+            continue
+        given = words[index - 1]
+        if names_match(opponent_name, f"{given} {surname}"):
+            saw_compatible_full = True
+        else:
+            # Same-surname fixtures can mention both players (Low Player vs
+            # High Player); only fail when every fuller mention conflicts.
+            saw_conflicting_full = True
+    if saw_compatible_full:
+        return True
+    if saw_conflicting_full and not saw_bare_surname:
+        return False
+    return saw_bare_surname
+
+
 @dataclass(frozen=True)
 class GateDecision:
     allow: bool
@@ -873,7 +913,8 @@ class EspnProbGate:
                 if not event_tokens or not {
                         me_last, opp_last}.issubset(event_tokens):
                     continue
-                if not _identity_mentioned(opp.display_name, event_title):
+                if not _opponent_confirmed_in_event(
+                        opp.display_name, event_title):
                     continue
                 identity = (
                     match.competition_id,

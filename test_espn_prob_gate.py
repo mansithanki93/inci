@@ -614,10 +614,70 @@ def test_binding_requires_opponent_first_identity_not_just_surname():
     assert gate.find_bind(
         ticker="T", player_name="Venus Williams",
         event_title="Venus Williams vs Anna Smith") is not None
+    # Conflicting given name for the opponent surname must fail closed.
     assert gate.find_bind(
         ticker="T", player_name="Venus Williams",
         event_title="Venus Williams vs Alice Smith") is None
-    print("PASS binding verifies the opponent's first and last identity")
+    # Kalshi ITF-style surname-only titles are allowed when both surnames
+    # appear and no conflicting given name is asserted.
+    assert gate.find_bind(
+        ticker="T", player_name="Venus Williams",
+        event_title="Williams vs Smith") is not None
+    print("PASS binding verifies opponent identity without blocking "
+          "surname-only titles")
+
+
+def test_binding_accepts_kalshi_itf_surname_only_event_titles():
+    """Live Tennis cards use full names; Kalshi ITF events use surnames."""
+    card = parse_match({
+        "id": 172107,
+        "tournament": "W15 Tianjin",
+        "tour": "itf",
+        "format": "BO3",
+        "status": "live",
+        "is_doubles": False,
+        "timestamp": 100.0,
+        "players": {
+            "p1": {"id": 1072, "name": "Chengyiyi Yuan"},
+            "p2": {"id": 11402, "name": "Yu Jun Lin"},
+        },
+        "score": {"sets": [0, 0], "games": [[4], [3]], "server": 1},
+    })
+    assert card is not None
+
+    class EspnEmpty:
+        def matches(self, force=False):
+            return ()
+
+    class LiveCache:
+        def matches(self, force=False):
+            return (card,)
+
+    gate = EspnProbGate(
+        Config(), cache=EspnEmpty(), live_tennis_cache=LiveCache(),
+        clock=lambda: 100.0)
+    title = ("Will Yu Jun Lin win the Yuan vs Lin: "
+             "W15 Tianjin Quarterfinal match?")
+    assert gate.find_bind(
+        ticker="KXITFWMATCH-26AUG06YUALIN-LIN",
+        player_name=title,
+        event_title="Yuan vs Lin") is not None
+    assert gate.binding_provenance(
+        ticker="KXITFWMATCH-26AUG06YUALIN-LIN",
+        player_name=title,
+        event_title="Yuan vs Lin") == (
+            "lt:172107", "lt:athlete:11402", "lt:athlete:1072",
+            "Yu Jun Lin", "Chengyiyi Yuan")
+    # Opposite YES must reverse cleanly for sibling packaging.
+    opp_title = ("Will Chengyiyi Yuan win the Yuan vs Lin: "
+                 "W15 Tianjin Quarterfinal match?")
+    assert gate.binding_provenance(
+        ticker="KXITFWMATCH-26AUG06YUALIN-YUA",
+        player_name=opp_title,
+        event_title="Yuan vs Lin") == (
+            "lt:172107", "lt:athlete:1072", "lt:athlete:11402",
+            "Chengyiyi Yuan", "Yu Jun Lin")
+    print("PASS Kalshi ITF surname-only titles bind to Live Tennis cards")
 
 
 def test_match_winner_binding_rejects_reversed_player_set_prop():
@@ -1388,6 +1448,7 @@ if __name__ == "__main__":
     test_sibling_score_prioritizes_entry_eligibility_before_raw_edge()
     test_binding_requires_identity_opponent_and_unique_match()
     test_binding_requires_opponent_first_identity_not_just_surname()
+    test_binding_accepts_kalshi_itf_surname_only_event_titles()
     test_match_winner_binding_rejects_reversed_player_set_prop()
     test_scoreboard_caches_empty_and_bounds_stale_fallback()
     test_parse_live_tennis_match_itf()
